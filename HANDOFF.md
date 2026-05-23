@@ -94,4 +94,74 @@ W1-W12 Phase：
 
 ## 冬眠记录
 
+### 2026-05-24：Phase 1 scaffold 中断交接
+
+#### 1. 当前任务上下文
+
+正在执行 `docs/superpowers/plans/2026-05-23-phase-1-macos-recording-foundation.md` 的 Phase 1 / W1-W2：脚手架与 macOS 录制闭环。执行方式为 subagent-driven development，当前位于隔离 worktree：
+
+- 路径：`/Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording`
+- 分支：`feat/phase-1-macos-recording`
+- 最新实现提交：`fb7e648 chore(core): 保存Phase1脚手架现场`
+
+#### 2. 已完成进度
+
+- 已创建隔离 worktree，并从 `feat/architecture-planning` 派生实现分支。
+- 已通过 create-tauri-app 生成 Tauri 2 + React + TypeScript scaffold。
+- 已复制 scaffold 到 worktree 根目录。
+- 已安装 Node 依赖和 Tailwind Vite 插件。
+- 已配置 `vite.config.ts` 使用 `@tailwindcss/vite`。
+- 已创建 `src/styles.css`，内容为 `@import "tailwindcss";`。
+- 已删除临时 scaffold 目录 `luzhi/`。
+- 已运行 `npm run build`，结果通过。
+- 已按用户要求终止 `brew install rust`，不再继续 Homebrew 安装 Rust。
+
+#### 3. 中断时的处置决策
+
+休眠触发时，工作停在 Phase 1 Task 1 的 scaffold 验证阶段。选择“快速收尾”：
+
+- 保留已经复制到 worktree 根目录的 scaffold。
+- 删除临时生成目录 `luzhi/`。
+- 不继续推进 Task 2，因为 Rust/Cargo 尚未配置。
+- 不回滚 scaffold 修改，因为 Node 侧构建已通过，当前是可恢复的稳定点。
+
+#### 4. 架构与关键决策
+
+- 前端 scaffold 只作为 UI 壳，后续录制状态机仍必须放在 Rust 侧。
+- `.gitignore` 保留 `.worktrees/`，避免隔离 worktree 被误追踪。
+- `src-tauri/Cargo.toml` 依赖版本来自官方 scaffold，AI 未主动调整 Rust 核心依赖版本；恢复后仍需人工审查。
+- 继续遵守数据流红线：音视频帧流不得进入前端 JS 层。
+
+#### 5. 立即执行清单
+
+1. 用户手动配置 `rustup`，确认 `cargo` 和 `rustc` 在 PATH：
+   ```bash
+   which cargo
+   which rustc
+   cargo --version
+   rustc --version
+   ```
+2. 回到 worktree 并运行 Rust 验证：
+   ```bash
+   cd /Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording
+   cargo test --manifest-path src-tauri/Cargo.toml
+   ```
+3. 完成 Task 1 的 spec compliance review 与 code quality review；通过后进入 Task 2：Rust core media types and capture trait。
+
+#### 6. 当前报错/阻碍
+
+- `cargo` 当前不可用：
+  ```text
+  cargo not found
+  ```
+- `rustup` 此前也不可用：
+  ```text
+  rustup not found
+  ```
+- `brew install rust` 曾启动并下载依赖，但用户要求终止，最终会话输出包含：
+  ```text
+  Error: SIGTERM
+  ```
+- 用户计划手动清理 Homebrew `.incomplete` 缓存并手动配置 `rustup`。
+
 ---
