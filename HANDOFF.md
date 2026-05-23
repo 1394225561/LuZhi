@@ -94,4 +94,57 @@ W1-W12 Phase：
 
 ## 冬眠记录
 
+### 2026-05-24：Phase 1 scaffold 中断交接
+
+#### 1. 当前任务上下文
+
+正在执行 Phase 1 / W1-W2：脚手架与 macOS 录制闭环。实现工作不在当前 checkout 直接进行，而是在隔离 worktree：
+
+- 路径：`/Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording`
+- 分支：`feat/phase-1-macos-recording`
+- 最新实现提交：`fb7e648 chore(core): 保存Phase1脚手架现场`
+- 计划文件：`docs/superpowers/plans/2026-05-23-phase-1-macos-recording-foundation.md`
+
+#### 2. 已完成进度
+
+- 已完成系统架构文档与 Phase 1 实施计划。
+- 已创建 Phase 1 隔离 worktree。
+- worktree 内已完成 Tauri 2 + React + TypeScript scaffold、Tailwind Vite 插件安装与 `npm run build` 验证。
+- worktree 内已提交 scaffold 现场。
+
+#### 3. 中断时的处置决策
+
+休眠触发时，工作停在 Phase 1 Task 1 的 Rust 验证前。选择“快速收尾”：
+
+- 保留 scaffold 修改并在 worktree 分支提交。
+- 不继续推进 Rust 任务。
+- 不回滚已通过 Node 构建的 scaffold。
+
+#### 4. 架构与关键决策
+
+- Rust/Cargo 未配置完成前，不进入 Task 2。
+- `src-tauri/Cargo.toml` 依赖版本来自官方 scaffold，恢复后需要人工审查。
+- 继续保持前端只做命令与状态展示，录制状态机和音视频管线放 Rust。
+
+#### 5. 立即执行清单
+
+1. 手动配置 `rustup`，确认 `cargo` / `rustc` 可用。
+2. 进入 worktree：
+   ```bash
+   cd /Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording
+   ```
+3. 运行：
+   ```bash
+   cargo test --manifest-path src-tauri/Cargo.toml
+   ```
+4. 继续 Task 1 的 subagent 两阶段 review，再进入 Task 2。
+
+#### 6. 当前报错/阻碍
+
+```text
+cargo not found
+rustup not found
+brew install rust 被用户要求终止，最终为 Error: SIGTERM
+```
+
 ---
