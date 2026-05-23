@@ -72,6 +72,24 @@ W1-W12 Phase：
 2. 确认无调整后，进入详细实施计划编写。
 3. 启动 W1-W2 时，先按 `tests/phase-1-w1-w2-checklist.md` 建立验收闭环。
 
+### 2026-05-23：Phase 1 实施计划
+
+已生成实施计划：
+
+- `docs/superpowers/plans/2026-05-23-phase-1-macos-recording-foundation.md`
+
+执行范围：
+
+- 仅覆盖 Phase 1 / W1-W2：脚手架与 macOS 录制闭环。
+- 不覆盖 Windows、音频混音、光标美化、空白裁剪、导出预设和授权系统。
+
+执行要求：
+
+1. 按任务顺序执行，每个任务完成后提交一次。
+2. 执行前确认 `src-tauri/Cargo.toml` 依赖版本经过人工审查。
+3. ScreenCaptureKit 原生回调、线程切换、buffer 生命周期和 unsafe/FFI 代码必须人工逐行审查。
+4. Phase 1 完成后逐项执行 `tests/phase-1-w1-w2-checklist.md`。
+
 ---
 
 ## 冬眠记录
