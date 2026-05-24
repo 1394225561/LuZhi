@@ -1,94 +1,179 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { AnimatePresence } from 'framer-motion'
+import { RecordingPanel } from '@/components/recording-panel'
+import { RecordingStatusBar } from '@/components/recording-status-bar'
+import { PreviewView } from '@/components/preview-view'
+import { ProcessingView } from '@/components/processing-view'
+import { ErrorView } from '@/components/error-view'
 import {
-  fetchRecordingPermissions,
   fetchRecordingStatus,
+  fetchRecordingPermissions,
   type RecordingPermissions,
   type RecordingStatus,
-} from './lib/tauri'
+} from '@/lib/tauri'
 
-const STATUS_LABELS: Record<RecordingStatus['state'], string> = {
-  idle: '待录制',
-  recording: '录制中',
-  processing: '处理中',
-  completed: '已完成',
-  failed: '录制失败',
-}
-
-function permissionLabel(value: RecordingPermissions[keyof RecordingPermissions]) {
-  if (value === 'granted') return '已授权'
-  if (value === 'denied') return '未授权'
-  if (value === 'notDetermined') return '待确认'
-  return '未知'
-}
+type AppState = 'idle' | 'recording' | 'preview' | 'processing' | 'failed'
 
 export default function App() {
-  const [status, setStatus] = useState<RecordingStatus>({
-    state: 'idle',
-    canStart: true,
-  })
+  const [appState, setAppState] = useState<AppState>('idle')
+  const [recordingMode, setRecordingMode] = useState<'fullscreen' | 'window' | 'area'>('fullscreen')
+  const [systemAudioEnabled, setSystemAudioEnabled] = useState(true)
+  const [micEnabled, setMicEnabled] = useState(false)
+  const [micVolume, setMicVolume] = useState(60)
+  const [elapsedTime, setElapsedTime] = useState(0)
+  const [isPaused, setIsPaused] = useState(false)
   const [permissions, setPermissions] = useState<RecordingPermissions>({
     screenRecording: 'unknown',
     microphone: 'unknown',
   })
+  const [errorMessage, setErrorMessage] = useState('')
 
+  // 从 Tauri 后端获取初始状态
   useEffect(() => {
-    void fetchRecordingStatus().then(setStatus)
+    void fetchRecordingStatus().then((status: RecordingStatus) => {
+      if (status.state === 'recording') setAppState('recording')
+      else if (status.state === 'processing') setAppState('processing')
+      else if (status.state === 'completed') setAppState('preview')
+      else if (status.state === 'failed') {
+        setAppState('failed')
+        setErrorMessage('录制过程中发生错误')
+      }
+    })
     void fetchRecordingPermissions().then(setPermissions)
   }, [])
 
-  return (
-    <main className="min-h-screen bg-neutral-950 text-neutral-50">
-      <section className="mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-6 px-6 py-8">
-        <header className="flex items-center justify-between border-b border-neutral-800 pb-4">
-          <div>
-            <h1 className="text-2xl font-semibold">录智</h1>
-            <p className="mt-1 text-sm text-neutral-400">录屏、美化、导出</p>
-          </div>
-          <span className="rounded bg-neutral-800 px-3 py-1 text-sm">
-            {STATUS_LABELS[status.state]}
-          </span>
-        </header>
+  // 模拟麦克风音量变化（后续替换为 Tauri event 'mic-level'）
+  useEffect(() => {
+    if (!micEnabled) return
+    const interval = setInterval(() => {
+      setMicVolume(Math.floor(Math.random() * 60) + 20)
+    }, 200)
+    return () => clearInterval(interval)
+  }, [micEnabled])
 
-        <div className="grid gap-4 md:grid-cols-3">
-          <button
-            className="rounded border border-neutral-700 bg-neutral-900 px-4 py-3 text-left hover:border-neutral-500"
-            type="button"
-          >
-            全屏录制
-          </button>
-          <button
-            className="rounded border border-neutral-800 bg-neutral-900/60 px-4 py-3 text-left text-neutral-500"
-            type="button"
-            disabled
-          >
-            窗口录制
-          </button>
-          <button
-            className="rounded border border-neutral-800 bg-neutral-900/60 px-4 py-3 text-left text-neutral-500"
-            type="button"
-            disabled
-          >
-            区域录制
-          </button>
+  // 录制计时器（后续替换为 Tauri event 'recording-tick'）
+  useEffect(() => {
+    if (appState !== 'recording' || isPaused) return
+    const interval = setInterval(() => {
+      setElapsedTime((prev) => prev + 1)
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [appState, isPaused])
+
+  const handleStartRecording = useCallback(() => {
+    console.log('start_recording', { recordingMode, systemAudioEnabled, micEnabled })
+    // TODO: await invoke('start_recording')
+    setAppState('recording')
+    setElapsedTime(0)
+    setIsPaused(false)
+  }, [recordingMode, systemAudioEnabled, micEnabled])
+
+  const handlePauseRecording = useCallback(() => {
+    console.log(isPaused ? 'resume_recording' : 'pause_recording')
+    // TODO: await invoke(isPaused ? 'resume_recording' : 'pause_recording')
+    setIsPaused((prev) => !prev)
+  }, [isPaused])
+
+  const handleStopRecording = useCallback(() => {
+    console.log('stop_recording')
+    // TODO: await invoke('stop_recording')
+    setAppState('preview')
+  }, [])
+
+  const handleBackToIdle = useCallback(() => {
+    setAppState('idle')
+    setElapsedTime(0)
+    setIsPaused(false)
+    setErrorMessage('')
+  }, [])
+
+  const handleRetry = useCallback(() => {
+    setAppState('idle')
+    setErrorMessage('')
+  }, [])
+
+  // 禁用桌面端右键菜单和文本选中
+  useEffect(() => {
+    const handler = (e: Event) => e.preventDefault()
+    document.addEventListener('contextmenu', handler)
+    document.addEventListener('selectstart', handler)
+    return () => {
+      document.removeEventListener('contextmenu', handler)
+      document.removeEventListener('selectstart', handler)
+    }
+  }, [])
+
+  // Idle state
+  if (appState === 'idle') {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-8" data-tauri-drag-region>
+        <div className="relative" data-tauri-drag-region={false}>
+          <div className="absolute inset-0 -z-10 rounded-3xl bg-gradient-to-br from-muted/5 via-transparent to-muted/5 blur-3xl scale-150" />
+          <RecordingPanel
+            recordingMode={recordingMode}
+            setRecordingMode={setRecordingMode}
+            systemAudioEnabled={systemAudioEnabled}
+            setSystemAudioEnabled={setSystemAudioEnabled}
+            micEnabled={micEnabled}
+            setMicEnabled={setMicEnabled}
+            micVolume={micVolume}
+            onStartRecording={handleStartRecording}
+          />
+          {/* 权限提示 */}
+          {(permissions.screenRecording === 'denied' || permissions.microphone === 'denied') && (
+            <div className="mt-4 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-sm text-destructive">
+              {permissions.screenRecording === 'denied' && <p>屏幕录制权限未授权，请在系统设置中开启</p>}
+              {permissions.microphone === 'denied' && <p>麦克风权限未授权，请在系统设置中开启</p>}
+            </div>
+          )}
         </div>
+      </div>
+    )
+  }
 
-        <section className="grid gap-3 text-sm text-neutral-300 md:grid-cols-2">
-          <div className="rounded border border-neutral-800 p-4">
-            屏幕录制权限：{permissionLabel(permissions.screenRecording)}
+  // Recording state
+  if (appState === 'recording') {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-between p-8">
+        <div className="pt-4" data-tauri-drag-region>
+          <AnimatePresence>
+            <RecordingStatusBar
+              elapsedTime={elapsedTime}
+              isPaused={isPaused}
+              onPause={handlePauseRecording}
+              onStop={handleStopRecording}
+            />
+          </AnimatePresence>
+        </div>
+        <div className="flex-1 w-full max-w-4xl mx-auto my-8 rounded-2xl border-2 border-dashed border-border/30 flex items-center justify-center">
+          <div className="text-center text-muted-foreground">
+            <p className="text-sm mb-1">
+              正在录制 {recordingMode === 'fullscreen' ? '全屏' : recordingMode === 'window' ? '窗口' : '区域'}
+            </p>
+            <p className="text-xs opacity-60">此区域表示被录制的屏幕内容</p>
           </div>
-          <div className="rounded border border-neutral-800 p-4">
-            麦克风权限：{permissionLabel(permissions.microphone)}
-          </div>
-        </section>
+        </div>
+        <div className="h-12" />
+      </div>
+    )
+  }
 
-        <button
-          className="w-fit rounded bg-emerald-500 px-5 py-2 font-medium text-neutral-950 disabled:bg-neutral-700 disabled:text-neutral-400"
-          type="button"
-          disabled={!status.canStart}
-        >
-          开始录制
-        </button>
-      </section>
-    </main>
-  )
+  // Processing state
+  if (appState === 'processing') {
+    return <ProcessingView />
+  }
+
+  // Failed state
+  if (appState === 'failed') {
+    return (
+      <ErrorView
+        message={errorMessage}
+        onRetry={handleRetry}
+        onBack={handleBackToIdle}
+      />
+    )
+  }
+
+  // Preview state
+  return <PreviewView onBack={handleBackToIdle} />
 }
