@@ -1,12 +1,9 @@
-node_modules/
-out/
-dist/
 .DS_Store
+node_modules/
+dist/
+src-tauri/target/
 *.log
 .env
-.env.local
-settings.local.json
-
-.playwright-mcp
-playwright-*.md
+.env.*
+!.env.example
 .worktrees/
