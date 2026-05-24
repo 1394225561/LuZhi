@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "luzhi",
+  "productName": "录智",
   "version": "0.1.0",
   "identifier": "com.luzhi.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "luzhi",
+        "title": "录智",
         "width": 800,
         "height": 600
       }
