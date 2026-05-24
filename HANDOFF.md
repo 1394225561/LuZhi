@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-23 | 完成系统架构设计与 MVP W1-W12 执行计划落地
+> 最后更新：2026-05-24 | 完成 UI 移植（v0 → Tauri），五态路由与 Raycast 主题落地
 > 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按时间正序） → 冬眠记录（按时间倒序）”的结构顺序。
 
 ## 项目概述
@@ -75,6 +75,41 @@ W1-W12 Phase：
 
 ---
 
+### 2026-05-24：UI 移植（v0 → Tauri）
+
+输入文件：
+
+- `reference/ui/ui_spec.md`
+- `docs/architecture/project-architecture-and-overall-planning.md`
+- `_v0_reference/`（Next.js 设计稿）
+
+已完成：
+
+- 依赖安装：class-variance-authority, clsx, tailwind-merge, lucide-react, framer-motion, @radix-ui/react-switch/slider/select/slot
+- shadcn/ui 配置：components.json, 路径别名 `@/*` → `src/*`
+- Raycast 主题：CSS 自定义属性 + Tailwind v4 `@theme inline` 映射
+- shadcn/ui 组件：Button, Switch, Slider, Select
+- 业务组件：RecordingPanel, RecordingStatusBar, PreviewView, ProcessingView, ErrorView
+- Tauri invoke 封装：完整 Commands/Events 类型定义和函数
+- App.tsx 五态路由：idle/recording/preview/processing/failed
+- 前端测试：4 个测试覆盖核心交互
+- BUG 修复：3 个（透明窗口、拖拽区域、按钮点击）
+- 移植规范文档：`reference/ui/ui-migration-spec.md`
+
+验证结果：
+
+- `npm run build` 通过（JS 464 KB, CSS 115 KB）
+- `npm run test` 通过（4/4）
+- `cargo test` 通过（14/14）
+
+后续入口：
+
+1. `npm run tauri dev` 验证桌面端效果
+2. 将 console.log 占位替换为真实 Tauri invoke
+3. 进入 Phase 3 (W5-W6) 前后端联调
+
+---
+
 ### 2026-05-23：Phase 1 实施计划
 
 已生成实施计划：
@@ -96,6 +131,55 @@ W1-W12 Phase：
 ---
 
 ## 冬眠记录
+
+### 2026-05-24：UI 移植完成冬眠
+
+#### 1. 当前任务上下文
+
+完成 `_v0_reference/` UI 设计稿到 Tauri 2.0 项目的完整移植。当前在 `feat/architecture-planning` 分支，最新提交 `7f4ee1a`。
+
+#### 2. 已完成进度
+
+- 10 个 Task 全部完成（依赖→主题→组件→封装→业务组件→路由→测试）
+- 修复 3 个 BUG（透明窗口背景、拖拽区域缺失、按钮点击拦截）
+- 创建 `reference/ui/ui-migration-spec.md` 移植规范文档（389 行）
+- 编译通过，4 个前端测试通过
+
+#### 3. 中断时的处置决策
+
+休眠触发时，工作处于稳定完成态：
+
+- 所有 UI 组件已创建并验证
+- 最后一个操作是创建移植规范文档并更新索引
+- 无进行中的代码修改，无需回滚
+- 选择"快速收尾"：提交现场并生成交接文档
+
+#### 4. 架构与关键决策
+
+- 主题选择 Raycast 近黑中性色（`#040506` canvas），非 v0 原始紫色系
+- 窗口配置 `decorations: false` + `transparent: true` 实现无边框透明
+- `motion.div` 的 `whileTap` 不能作为可交互元素的父容器（会拦截点击）
+- 拖拽区域需要 `data-tauri-drag-region`，可交互元素需要 `{false}` 排除
+- `<html>` 必须添加 `class="dark"` 才能激活 CSS 主题变量
+
+#### 5. 立即执行清单
+
+1. 运行 `npm run tauri dev` 验证桌面端效果
+2. 检查浮动面板是否正确显示（无背景方框）
+3. 检查窗口拖拽和按钮点击是否正常
+4. 如有问题，参考 `reference/ui/ui-migration-spec.md` 第 7 章排查
+
+#### 6. 当前报错/阻碍
+
+当前无阻塞报错。
+
+已知待办事项：
+
+- PreviewView 和 App.tsx 中有 console.log 占位，需替换为真实 Tauri invoke
+- 录制计时器和麦克风音量需替换为 Tauri event 监听
+- 权限检测需连接真实系统权限 API
+
+---
 
 ### 2026-05-24：Phase 1 worktree 合并与清理
 
