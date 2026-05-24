@@ -74,12 +74,12 @@ export function PreviewView({ onBack }: PreviewViewProps) {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
-      className="flex h-screen bg-background"
+      className="flex h-screen bg-background" data-tauri-drag-region="deep"
     >
       {/* Main Preview Area */}
       <div className="flex-1 flex flex-col p-6">
         {/* Header */}
-        <div className="flex items-center justify-between mb-4" data-tauri-drag-region>
+        <div className="flex items-center justify-between mb-4">
           <button
             onClick={onBack}
             className="text-muted-foreground hover:text-foreground transition-colors text-sm flex items-center gap-2"

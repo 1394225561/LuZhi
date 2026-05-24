@@ -28,7 +28,7 @@ export function RecordingStatusBar({
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -20, scale: 0.9 }}
       transition={{ duration: 0.25, ease: 'easeOut' }}
-      className="bg-card/95 backdrop-blur-xl border border-border/50 rounded-full px-4 py-2 shadow-2xl shadow-black/30 flex items-center gap-4"
+      className="bg-card/95 border border-border/50 rounded-full px-4 py-2 flex items-center gap-4"
     >
       {/* Recording Indicator */}
       <div className="flex items-center gap-2">
@@ -63,30 +63,26 @@ export function RecordingStatusBar({
 
       {/* Controls */}
       <div className="flex items-center gap-1.5">
-        <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }}>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onPause}
-            className="h-8 w-8 rounded-full hover:bg-secondary"
-          >
-            {isPaused ? (
-              <Circle className="w-4 h-4 fill-primary text-primary" />
-            ) : (
-              <Pause className="w-4 h-4 text-foreground" />
-            )}
-          </Button>
-        </motion.div>
-        <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }}>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onStop}
-            className="h-8 w-8 rounded-full hover:bg-destructive/20 text-destructive hover:text-destructive"
-          >
-            <Square className="w-4 h-4 fill-current" />
-          </Button>
-        </motion.div>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onPause}
+          className="h-8 w-8 rounded-full hover:bg-secondary hover:scale-110 active:scale-95 transition-transform"
+        >
+          {isPaused ? (
+            <Circle className="w-4 h-4 fill-primary text-primary" />
+          ) : (
+            <Pause className="w-4 h-4 text-foreground" />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onStop}
+          className="h-8 w-8 rounded-full hover:bg-destructive/20 hover:scale-110 active:scale-95 transition-transform text-destructive hover:text-destructive"
+        >
+          <Square className="w-4 h-4 fill-current" />
+        </Button>
       </div>
     </motion.div>
   )

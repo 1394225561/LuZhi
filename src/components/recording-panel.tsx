@@ -35,7 +35,7 @@ export function RecordingPanel({
       initial={{ opacity: 0, y: 20, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ duration: 0.3, ease: 'easeOut' }}
-      className="bg-card/95 backdrop-blur-xl border border-border/50 rounded-2xl p-5 shadow-2xl shadow-black/30 w-[320px]"
+      className="bg-card/95 border border-border/50 rounded-2xl p-5 w-[320px]"
     >
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
@@ -129,7 +129,7 @@ export function RecordingPanel({
       {/* Start Recording Button */}
       <Button
         onClick={onStartRecording}
-        className="w-full h-12 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-base shadow-lg shadow-black/30 transition-all duration-200 active:scale-[0.99]"
+        className="w-full h-12 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-base transition-all duration-200 active:scale-[0.99]"
       >
         <Circle className="w-4 h-4 mr-2 fill-current" />
         开始录制

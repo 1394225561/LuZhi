@@ -2,6 +2,10 @@
 
 @custom-variant dark (&:is(.dark *));
 
+html {
+  background-color: transparent;
+}
+
 :root {
   --radius: 0.5rem;
 }
@@ -104,7 +108,7 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
   }
 }
 

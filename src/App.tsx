@@ -103,12 +103,36 @@ export default function App() {
     }
   }, [])
 
+  // 程序化窗口拖拽（绕过 Tauri drag.js 的 macOS 焦点窗口限制）
+  useEffect(() => {
+    const handleMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return
+
+      const target = e.target as HTMLElement
+
+      // 跳过交互元素
+      if (target.closest('button, input, select, textarea, a, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="slider"], [role="switch"], [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"])')) {
+        return
+      }
+
+      // 确认在拖拽区域内
+      const dragRegion = target.closest('[data-tauri-drag-region]')
+      if (!dragRegion) return
+
+      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+        getCurrentWindow().startDragging()
+      }).catch(() => {})
+    }
+
+    document.addEventListener('mousedown', handleMouseDown)
+    return () => document.removeEventListener('mousedown', handleMouseDown)
+  }, [])
+
   // Idle state
   if (appState === 'idle') {
     return (
-      <div className="min-h-screen flex items-center justify-center p-8" data-tauri-drag-region>
+      <div className="min-h-screen flex items-center justify-center p-8" data-tauri-drag-region="deep">
         <div className="relative" data-tauri-drag-region={false}>
-          <div className="absolute inset-0 -z-10 rounded-3xl bg-gradient-to-br from-muted/5 via-transparent to-muted/5 blur-3xl scale-150" />
           <RecordingPanel
             recordingMode={recordingMode}
             setRecordingMode={setRecordingMode}
@@ -134,8 +158,8 @@ export default function App() {
   // Recording state
   if (appState === 'recording') {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-between p-8">
-        <div className="pt-4" data-tauri-drag-region>
+      <div className="min-h-screen flex flex-col items-center justify-between p-8" data-tauri-drag-region="deep">
+        <div className="pt-4" data-tauri-drag-region={false}>
           <AnimatePresence>
             <RecordingStatusBar
               elapsedTime={elapsedTime}
