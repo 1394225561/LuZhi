@@ -29,16 +29,24 @@ impl<C: ScreenCapture> RecordingService<C> {
     pub fn start(&mut self, config: CaptureConfig) -> AppResult<()> {
         self.state_machine.start()?;
         let (sender, receiver) = channel();
-        self.capture.start(config, sender)?;
-        self.frame_receiver = Some(receiver);
-        Ok(())
+        match self.capture.start(config, sender) {
+            Ok(()) => {
+                self.frame_receiver = Some(receiver);
+                Ok(())
+            }
+            Err(error) => {
+                self.state_machine.fail();
+                Err(error)
+            }
+        }
     }
 
     pub fn stop(&mut self) -> AppResult<()> {
-        self.capture.stop()?;
+        let capture_result = self.capture.stop();
+        self.frame_receiver = None;
+        capture_result?;
         self.state_machine.stop()?;
         self.state_machine.complete()?;
-        self.frame_receiver = None;
         Ok(())
     }
 }
@@ -106,5 +114,21 @@ mod tests {
 
         assert_eq!(service.state(), RecordingState::Completed);
         assert!(service.frame_receiver.is_none());
+    }
+
+    #[test]
+    fn start_failure_transitions_to_failed_state() {
+        let capture = MockScreenCapture {
+            fail_on_start: true,
+            ..Default::default()
+        };
+        let mut service = RecordingService::new(capture);
+
+        let error = service
+            .start(CaptureConfig::full_screen_1080p_30fps())
+            .unwrap_err();
+
+        assert_eq!(service.state(), RecordingState::Failed);
+        assert!(matches!(error, AppError::CaptureFailed { .. }));
     }
 }

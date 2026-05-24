@@ -26,7 +26,6 @@ impl Default for MacScreenCapture {
 
 impl ScreenCapture for MacScreenCapture {
     fn start(&mut self, _config: CaptureConfig, _sink: VideoFrameSink) -> AppResult<()> {
-        self.running = true;
         Err(AppError::NativeCaptureUnavailable {
             reason: "ScreenCaptureKit native callback must pass human review before activation",
         })
