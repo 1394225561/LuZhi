@@ -1,21 +1,94 @@
-function App() {
-  return (
-    <main className="flex min-h-screen items-center justify-center bg-[#040506] bg-[radial-gradient(84.6%_73.49%_at_50%_26.51%,rgba(4,63,150,0.28),rgba(6,18,37,0.08))] p-8 text-white">
-      <section className="w-full max-w-xl rounded-2xl border border-white/6 bg-[#07080a] p-8 text-left shadow-[rgba(255,255,255,0.05)_0_1px_0_0_inset,rgba(0,0,0,0.4)_0_4px_40px_8px] max-[520px]:p-6">
-        <p className="mb-2 text-xs font-medium tracking-[0.04em] text-[#9c9c9d]">
-          录屏工作台
-        </p>
-        <h1 className="m-0 text-[32px] leading-[1.2] tracking-[-0.06px] text-white">
-          录智
-        </h1>
-        <p className="mb-6 mt-2 text-[#9c9c9d]">录屏、美化、导出</p>
+import { useEffect, useState } from 'react'
+import {
+  fetchRecordingPermissions,
+  fetchRecordingStatus,
+  type RecordingPermissions,
+  type RecordingStatus,
+} from './lib/tauri'
 
-        <div className="rounded-lg border border-white/6 bg-white/5 px-3 py-2 text-sm font-medium text-[#9c9c9d]">
-          核心录制模块初始化中
-        </div>
-      </section>
-    </main>
-  );
+const STATUS_LABELS: Record<RecordingStatus['state'], string> = {
+  idle: '待录制',
+  recording: '录制中',
+  processing: '处理中',
+  completed: '已完成',
+  failed: '录制失败',
 }
 
-export default App;
+function permissionLabel(value: RecordingPermissions[keyof RecordingPermissions]) {
+  if (value === 'granted') return '已授权'
+  if (value === 'denied') return '未授权'
+  if (value === 'notDetermined') return '待确认'
+  return '未知'
+}
+
+export default function App() {
+  const [status, setStatus] = useState<RecordingStatus>({
+    state: 'idle',
+    canStart: true,
+  })
+  const [permissions, setPermissions] = useState<RecordingPermissions>({
+    screenRecording: 'unknown',
+    microphone: 'unknown',
+  })
+
+  useEffect(() => {
+    void fetchRecordingStatus().then(setStatus)
+    void fetchRecordingPermissions().then(setPermissions)
+  }, [])
+
+  return (
+    <main className="min-h-screen bg-neutral-950 text-neutral-50">
+      <section className="mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-6 px-6 py-8">
+        <header className="flex items-center justify-between border-b border-neutral-800 pb-4">
+          <div>
+            <h1 className="text-2xl font-semibold">录智</h1>
+            <p className="mt-1 text-sm text-neutral-400">录屏、美化、导出</p>
+          </div>
+          <span className="rounded bg-neutral-800 px-3 py-1 text-sm">
+            {STATUS_LABELS[status.state]}
+          </span>
+        </header>
+
+        <div className="grid gap-4 md:grid-cols-3">
+          <button
+            className="rounded border border-neutral-700 bg-neutral-900 px-4 py-3 text-left hover:border-neutral-500"
+            type="button"
+          >
+            全屏录制
+          </button>
+          <button
+            className="rounded border border-neutral-800 bg-neutral-900/60 px-4 py-3 text-left text-neutral-500"
+            type="button"
+            disabled
+          >
+            窗口录制
+          </button>
+          <button
+            className="rounded border border-neutral-800 bg-neutral-900/60 px-4 py-3 text-left text-neutral-500"
+            type="button"
+            disabled
+          >
+            区域录制
+          </button>
+        </div>
+
+        <section className="grid gap-3 text-sm text-neutral-300 md:grid-cols-2">
+          <div className="rounded border border-neutral-800 p-4">
+            屏幕录制权限：{permissionLabel(permissions.screenRecording)}
+          </div>
+          <div className="rounded border border-neutral-800 p-4">
+            麦克风权限：{permissionLabel(permissions.microphone)}
+          </div>
+        </section>
+
+        <button
+          className="w-fit rounded bg-emerald-500 px-5 py-2 font-medium text-neutral-950 disabled:bg-neutral-700 disabled:text-neutral-400"
+          type="button"
+          disabled={!status.canStart}
+        >
+          开始录制
+        </button>
+      </section>
+    </main>
+  )
+}
