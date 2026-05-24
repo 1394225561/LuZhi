@@ -86,7 +86,9 @@ mod tests {
         let capture = MockScreenCapture::default();
         let mut service = RecordingService::new(capture);
 
-        service.start(CaptureConfig::full_screen_1080p_30fps()).unwrap();
+        service
+            .start(CaptureConfig::full_screen_1080p_30fps())
+            .unwrap();
 
         assert_eq!(service.state(), RecordingState::Recording);
         assert!(service.frame_receiver.is_some());
@@ -97,7 +99,9 @@ mod tests {
         let capture = MockScreenCapture::default();
         let mut service = RecordingService::new(capture);
 
-        service.start(CaptureConfig::full_screen_1080p_30fps()).unwrap();
+        service
+            .start(CaptureConfig::full_screen_1080p_30fps())
+            .unwrap();
         service.stop().unwrap();
 
         assert_eq!(service.state(), RecordingState::Completed);

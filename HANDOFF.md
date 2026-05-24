@@ -90,6 +90,69 @@ W1-W12 Phase：
 
 ## 冬眠记录
 
+### 2026-05-24：Phase 1 Task 4-10 完成交接
+
+#### 1. 当前任务上下文
+
+正在执行 `docs/superpowers/plans/2026-05-23-phase-1-macos-recording-foundation.md` 的 Phase 1 / W1-W2：脚手架与 macOS 录制闭环。当前位于隔离 worktree：
+
+- 路径：`/Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording`
+- 分支：`feat/phase-1-macos-recording`
+- 最新实现提交：`d37275d test(ui): 覆盖录制入口界面`
+
+#### 2. 已完成进度
+
+- Task 4：录制状态机 `state_machine.rs`，4 个测试通过。
+- Task 5：录制服务 `recording_service.rs`，MockScreenCapture 编排，2 个测试通过。
+- Task 6：权限检测边界 `permission_service.rs` + macOS 平台桩，1 个测试通过。
+- Task 7：macOS ScreenCaptureKit 边界 `screen_capture_kit.rs`，start() 返回 NativeCaptureUnavailable 等待人工审查，2 个测试通过。
+- Task 8：Tauri commands + events，`recording_status` / `recording_permissions` 命令注册，2 个测试通过。
+- Task 9：中文录制 UI，`src/lib/tauri.ts` + `App.tsx` 替换，`npm run build` 通过。
+- Task 10：前端测试，vitest + testing-library，2 个测试通过。
+- 全量验证通过：14 Rust tests, cargo fmt, cargo clippy, 2 frontend tests, npm run build。
+
+#### 3. 中断时的处置决策
+
+休眠触发时，Task 11（Phase 1 验收与交接）正在进行中：
+
+- 全量 Rust 测试 14 个通过。
+- cargo fmt 和 clippy 无警告。
+- 前端 2 个测试通过，构建通过。
+- 需要提交格式修复和 HANDOFF.md 更新。
+
+#### 4. 架构与关键决策
+
+- `MacScreenCapture::start()` 仍返回 `NativeCaptureUnavailable`，真实 ScreenCaptureKit 集成需要人工审查后单独激活。
+- `Cargo.toml` 核心依赖版本未被 AI 修改。
+- 前端 UI 使用 Tailwind 深色主题，状态通过 Tauri invoke 获取。
+- `src-tauri/src/app/mod.rs` 已导出全部 5 个子模块：error, events, permission_service, recording_service, state_machine。
+
+#### 5. 立即执行清单
+
+1. 恢复后进入 worktree：
+   ```bash
+   cd /Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording
+   ```
+2. 提交格式修复：
+   ```bash
+   git add -A && git commit -m "chore(core): 修复cargo fmt格式问题"
+   ```
+3. 更新 HANDOFF.md 并提交。
+4. 执行 `tests/phase-1-w1-w2-checklist.md` 验收清单逐项检查。
+5. 人工审查 Task 7 的 ScreenCaptureKit 边界，确认后激活真实实现。
+
+#### 6. 当前报错/阻碍
+
+当前无阻塞报错。
+
+已知待办事项：
+
+- `cargo fmt` 已修复格式但尚未提交。
+- `AppError` 的 4 个 `Display` 分支可补表驱动测试（非阻塞）。
+- Task 7 的 ScreenCaptureKit 真实实现需人工审查激活。
+
+---
+
 ### 2026-05-24：Phase 1 core types 冬眠交接
 
 #### 1. 当前任务上下文

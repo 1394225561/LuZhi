@@ -1,6 +1,4 @@
-use crate::app::permission_service::{
-    PermissionProbe, PermissionStatus, RecordingPermissions,
-};
+use crate::app::permission_service::{PermissionProbe, PermissionStatus, RecordingPermissions};
 
 /// macOS permission probe placeholder.
 ///
