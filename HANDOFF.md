@@ -1,6 +1,7 @@
 # LuZhi 项目交接文档
 
 > 最后更新：2026-05-23 | 完成系统架构设计与 MVP W1-W12 执行计划落地
+> 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按时间正序） → 冬眠记录（按时间倒序）”的结构顺序。
 
 ## 项目概述
 
@@ -12,6 +13,8 @@ LuZhi 是中国版 Screen Studio，核心聚焦“录屏 + AI 自动美化 + 一
 - 前端：React + TypeScript + Tailwind + shadcn/ui
 - Rust 底层：ScreenCaptureKit、DXGI、WASAPI、cpal、FFmpeg binding
 - 数据流红线：音视频帧流不得经过前端 JS 层
+
+---
 
 ## 完整开发计划
 
@@ -35,6 +38,8 @@ W1-W12 Phase：
 - Phase 4 / W7-W8：光标平滑与点击放大
 - Phase 5 / W9-W10：空白段检测与自动裁剪
 - Phase 6 / W11-W12：导出预设与本地授权
+
+---
 
 ## 工作任务记录
 
@@ -68,6 +73,8 @@ W1-W12 Phase：
 2. 确认无调整后，进入详细实施计划编写。
 3. 启动 W1-W2 时，先按 `tests/phase-1-w1-w2-checklist.md` 建立验收闭环。
 
+---
+
 ### 2026-05-23：Phase 1 实施计划
 
 已生成实施计划：
@@ -96,6 +103,8 @@ W1-W12 Phase：
 - 清理 `.worktrees/phase-1-macos-recording` worktree。
 - Phase 1 Task 1-10 全部完成，14 Rust tests + 2 frontend tests 通过。
 - 下一步：人工审查 ScreenCaptureKit 边界后激活真实实现，进入 Phase 2。
+
+---
 
 ### 2026-05-24：Phase 1 Task 4-10 完成交接
 
