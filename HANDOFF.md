@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-24 | 完成 UI 移植（v0 → Tauri），五态路由与 Raycast 主题落地
+> 最后更新：2026-05-24 | 修复 BUG-001（透明窗口）与 BUG-002（窗口拖拽），程序化拖拽方案落地
 > 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 3 次记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 3 次记录）”的结构顺序。
 
 ## 项目概述
@@ -73,6 +73,54 @@ W1-W12 Phase：
 
 ## 工作任务记录
 
+### 2026-05-24：BUG-001 & BUG-002 深度修复
+
+输入文件：
+
+- `BUG.md`（原记录 + 补充更新）
+- `src-tauri/Cargo.toml`（添加 macos-private-api）
+- `src-tauri/tauri.conf.json`（启用 macOSPrivateApi + acceptFirstMouse）
+- `src-tauri/capabilities/default.json`（添加拖拽权限）
+- `src/App.tsx`（程序化拖拽 handler + 拖拽区域标记）
+- `src/components/`（全部 5 个视图组件的拖拽区域配置）
+- `src/styles.css`（html 透明 + body 去背景）
+- `.cargo/registry/.../tauri-2.11.2/src/window/scripts/drag.js`（Tauri 源码审查）
+
+已完成：
+
+- BUG-001 修复（4 轮迭代）：
+  - CSS 层：`styles.css` body 移除 `bg-background`，html 添加 `background-color: transparent`
+  - WKWebView 层：`Cargo.toml` 启用 `macos-private-api` feature，`tauri.conf.json` 启用 `macOSPrivateApi: true`
+  - 视觉伪影：移除 RecordingPanel/StatusBar 的 `shadow-2xl shadow-black/30`、`backdrop-blur-xl`，移除 idle 装饰渐变 div
+- BUG-002 修复（4 轮迭代）：
+  - ACL 权限：`capabilities/default.json` 添加 `core:window:allow-start-dragging`
+  - macOS 首次点击：`tauri.conf.json` 添加 `acceptFirstMouse: true`
+  - 拖拽区域：全部 5 个视图（idle/recording/preview/processing/error）添加 `data-tauri-drag-region="deep"`
+  - 程序化拖拽：`App.tsx` 自定义 `mousedown` handler，调用 `getCurrentWindow().startDragging()`，绕过 drag.js 的 macOS 焦点窗口限制
+  - 交互元素排除：handler 用 `closest('button,input,select,textarea,a,[role=...],[contenteditable],[tabindex]')` 精确排除
+- BUG-003 补充修复：`recording-status-bar.tsx` pause/stop 按钮移除 `motion.div whileTap` 包裹
+- `BUG.md` 更新：BUG-001/002 完整根因分析 + 预防规则，新增延期-001（点击穿透）
+- Tauri 源码审查：drag.js 注入机制、`isDragRegion` 逻辑、macOS `performWindowDragWithEvent:` 调用链
+
+验证结果：
+
+- `npm run build` 通过
+- `npm run test` 通过（4/4）
+- `cargo build` 通过（clean）
+
+关键决策：
+
+- **放弃声明式 `data-tauri-drag-region`，采用程序化 `startDragging()` API**：声明式机制在 macOS 上受焦点窗口限制（tauri#11605），对浮动面板 app 不可靠
+- **不检查 `{false}` 值**：交互元素选择器已足够，`{false}` 排除反会阻止面板内容区拖拽
+- **动态 `import('@tauri-apps/api/window')`**：避免测试环境顶层导入报错
+
+后续入口：
+
+1. `npm run tauri dev` 验证所有视图拖拽和透明效果
+2. 进入 Phase 3 (W5-W6) 前后端联调
+
+---
+
 ### 2026-05-24：UI 移植（v0 → Tauri）
 
 输入文件：
@@ -130,6 +178,52 @@ W1-W12 Phase：
 
 ## 冬眠记录
 
+### 2026-05-24：BUG-001 & BUG-002 修复完成冬眠
+
+#### 1. 当前任务上下文
+
+修复 Tauri 2.0 浮动面板窗口的 BUG-001（800x600 不透明背景）和 BUG-002（窗口无法拖动）。当前在 `feat/architecture-planning` 分支，最新提交 `ecbdb69`。
+
+#### 2. 已完成进度
+
+- BUG-001 三层透明架构修复（NSWindow + WKWebView + CSS）
+- BUG-002 程序化拖拽方案（自定义 mousedown handler + `getCurrentWindow().startDragging()`）
+- 5 个视图全部支持拖拽（idle/recording/preview/processing/error）
+- 交互元素正确排除（按钮、滑块、开关等不触发拖拽）
+- CSS 阴影伪影清除
+- BUG.md 预防规则完整更新
+- 全部验证通过：`npm run build`、`npm run test` 4/4、`cargo build`
+
+#### 3. 中断时的处置决策
+
+休眠触发时，用户已验证拖拽功能正常，所有修改处于稳定完成态。选择"快速收尾"：提交现场并更新 HANDOFF.md。
+
+#### 4. 架构与关键决策
+
+- **程序化拖拽 > 声明式拖拽**：Tauri 2 的 `data-tauri-drag-region` 在 macOS 上受焦点窗口限制，不可靠。自定义 mousedown handler + `startDragging()` API 是更健壮的方案
+- **交互元素白名单 > `{false}` 排除**：用 `closest('button,input,select,...')` 精确排除交互元素，不做区域级 `{false}` 排除
+- **三层透明**：NSWindow (`transparent: true`) + WKWebView (`macos-private-api`) + CSS (html/body transparent) 缺一不可
+- **ACL 权限是硬门控**：`core:window:allow-start-dragging` 不在 `core:default` 内，必须显式授予
+
+#### 5. 立即执行清单
+
+1. `npm run tauri dev` 最终验证桌面端效果
+2. 将 console.log 占位替换为真实 Tauri invoke
+3. 录制计时器和麦克风音量替换为 Tauri event 监听
+4. 进入 Phase 3 (W5-W6) 前后端联调
+
+#### 6. 当前报错/阻碍
+
+当前无阻塞报错。
+
+已知待办事项：
+- 延期-001：透明区域鼠标点击不穿透（需原生 macOS 代码，记录在 BUG.md）
+- PreviewView 和 App.tsx 中有 console.log 占位
+- 录制计时器和麦克风音量需替换为 Tauri event 监听
+- 权限检测需连接真实系统权限 API
+
+---
+
 ### 2026-05-24：UI 移植完成冬眠
 
 #### 1. 当前任务上下文
@@ -185,226 +279,3 @@ W1-W12 Phase：
 - 清理 `.worktrees/phase-1-macos-recording` worktree。
 - Phase 1 Task 1-10 全部完成，14 Rust tests + 2 frontend tests 通过。
 - 下一步：人工审查 ScreenCaptureKit 边界后激活真实实现，进入 Phase 2。
-
----
-
-### 2026-05-24：Phase 1 Task 4-10 完成交接
-
-#### 1. 当前任务上下文
-
-正在执行 `docs/superpowers/plans/2026-05-23-phase-1-macos-recording-foundation.md` 的 Phase 1 / W1-W2：脚手架与 macOS 录制闭环。当前位于隔离 worktree：
-
-- 路径：`/Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording`
-- 分支：`feat/phase-1-macos-recording`
-- 最新实现提交：`d37275d test(ui): 覆盖录制入口界面`
-
-#### 2. 已完成进度
-
-- Task 4：录制状态机 `state_machine.rs`，4 个测试通过。
-- Task 5：录制服务 `recording_service.rs`，MockScreenCapture 编排，2 个测试通过。
-- Task 6：权限检测边界 `permission_service.rs` + macOS 平台桩，1 个测试通过。
-- Task 7：macOS ScreenCaptureKit 边界 `screen_capture_kit.rs`，start() 返回 NativeCaptureUnavailable 等待人工审查，2 个测试通过。
-- Task 8：Tauri commands + events，`recording_status` / `recording_permissions` 命令注册，2 个测试通过。
-- Task 9：中文录制 UI，`src/lib/tauri.ts` + `App.tsx` 替换，`npm run build` 通过。
-- Task 10：前端测试，vitest + testing-library，2 个测试通过。
-- 全量验证通过：14 Rust tests, cargo fmt, cargo clippy, 2 frontend tests, npm run build。
-
-#### 3. 中断时的处置决策
-
-休眠触发时，Task 11（Phase 1 验收与交接）正在进行中：
-
-- 全量 Rust 测试 14 个通过。
-- cargo fmt 和 clippy 无警告。
-- 前端 2 个测试通过，构建通过。
-- 需要提交格式修复和 HANDOFF.md 更新。
-
-#### 4. 架构与关键决策
-
-- `MacScreenCapture::start()` 仍返回 `NativeCaptureUnavailable`，真实 ScreenCaptureKit 集成需要人工审查后单独激活。
-- `Cargo.toml` 核心依赖版本未被 AI 修改。
-- 前端 UI 使用 Tailwind 深色主题，状态通过 Tauri invoke 获取。
-- `src-tauri/src/app/mod.rs` 已导出全部 5 个子模块：error, events, permission_service, recording_service, state_machine。
-
-#### 5. 立即执行清单
-
-1. 恢复后进入 worktree：
-   ```bash
-   cd /Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording
-   ```
-2. 提交格式修复：
-   ```bash
-   git add -A && git commit -m "chore(core): 修复cargo fmt格式问题"
-   ```
-3. 更新 HANDOFF.md 并提交。
-4. 执行 `tests/phase-1-w1-w2-checklist.md` 验收清单逐项检查。
-5. 人工审查 Task 7 的 ScreenCaptureKit 边界，确认后激活真实实现。
-
-#### 6. 当前报错/阻碍
-
-当前无阻塞报错。
-
-已知待办事项：
-
-- `cargo fmt` 已修复格式但尚未提交。
-- `AppError` 的 4 个 `Display` 分支可补表驱动测试（非阻塞）。
-- Task 7 的 ScreenCaptureKit 真实实现需人工审查激活。
-
----
-
-### 2026-05-24：Phase 1 core types 冬眠交接
-
-#### 1. 当前任务上下文
-
-正在执行 `docs/superpowers/plans/2026-05-23-phase-1-macos-recording-foundation.md` 的 Phase 1 / W1-W2：脚手架与 macOS 录制闭环。当前仍位于隔离 worktree：
-
-- 路径：`/Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording`
-- 分支：`feat/phase-1-macos-recording`
-- 最新实现提交：`5225dd7 feat(core): 定义录制核心数据结构`
-- 当前执行方式：按 `subagent-driven-development` 流程，每个任务执行后做 spec compliance review 与 code quality review。
-
-#### 2. 已完成进度
-
-- Rust 工具链已恢复可用：
-  - `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`
-  - `rustc 1.95.0 (59807616e 2026-04-14)`
-- Phase 1 Task 1 已完成并通过双审：
-  - 补交 `src-tauri/Cargo.lock`。
-  - 中文化 scaffold 可见文案与应用元信息。
-  - 删除独立 `src/App.css`，只保留全局 `src/styles.css`。
-  - 按新增 `DESIGN.md` 约束，将临时 UI 调整为近黑 Raycast 风格。
-  - 验证通过：`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`。
-- Phase 1 Task 2 已完成并通过双审：
-  - 新增 `src-tauri/src/core/frame.rs`、`config.rs`、`capture.rs`、`mod.rs`。
-  - 定义 `MediaTimestamp`、`VideoFrame`、`VideoFrameRef`、`CaptureConfig`、`CaptureCapabilities`、`ScreenCapture`。
-  - `ScreenCapture` trait 已补充 sink 线程交接、启动失败、stop 释放资源等公共接口注释。
-  - `lib.rs` 改为返回 `tauri::Result<()>`，移除 scaffold `expect`。
-  - `main.rs` 使用中文启动失败输出。
-  - 验证通过：`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`cargo test --manifest-path src-tauri/Cargo.toml core::`。
-- Phase 1 Task 3 已提前随 Task 2 完成并通过双审：
-  - 原因：Task 2 的 `capture.rs` 需要 `crate::app::error::AppResult`，计划顺序存在编译依赖缺口。
-  - 新增 `src-tauri/src/app/error.rs` 与 `src-tauri/src/app/mod.rs`。
-  - `AppError` 与中文 `Display` 输出符合计划。
-  - 验证通过：`cargo test --manifest-path src-tauri/Cargo.toml app::error`。
-- 新增规则资产：
-  - `AGENTS.md` 已加入 `DESIGN.md` 关键文件说明。
-  - `DESIGN.md` 已加入 worktree，后续 UI 必须严格遵循。
-
-#### 3. 中断时的处置决策
-
-休眠触发时，刚完成 Task 3 的 code quality review：
-
-- Task 3 审查结论：通过。
-- 非阻塞建议：后续可补一个表驱动测试覆盖 `AppError` 的 4 个 `Display` 分支，当前不阻塞 Phase 1 继续推进。
-- 当前没有未完成的代码编辑，选择“快速收尾”：只更新交接文档并提交现场。
-- 未回滚任何实现提交。
-
-#### 4. 架构与关键决策
-
-- `DESIGN.md` 是当前 worktree 的新增视觉标准；后续所有前端 UI 必须使用其中的深色 Raycast 风格 token 与组件约束。
-- 前端仍只是展示壳，不再调用 scaffold 的 `greet` Tauri command；真实录制命令等到 Task 8/9 按计划接入。
-- `AppError` 提前进入 Task 2 提交是为了保持 `ScreenCapture` trait 使用计划指定的 `AppResult`，不是额外功能扩张。
-- `src-tauri/Cargo.toml` 核心依赖版本未被 AI 修改。
-- 尚未触碰 ScreenCaptureKit、unsafe/FFI、底层回调或 buffer 生命周期代码。
-- `BUG.md` 当前暂无预防规则；本轮 review 已确认没有额外 bug 规则需要套用。
-
-#### 5. 立即执行清单
-
-1. 恢复后进入 worktree：
-   ```bash
-   cd /Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording
-   ```
-2. 读取最新规则与交接：
-   ```bash
-   sed -n '1,260p' AGENTS.md
-   sed -n '1,260p' DESIGN.md
-   sed -n '1,260p' HANDOFF.md
-   ```
-3. 从 Phase 1 Task 4 开始：按 TDD 创建 `src-tauri/src/app/state_machine.rs` 的状态机测试，先看失败，再补实现。
-4. Task 4 预期验证：
-   ```bash
-   cargo test --manifest-path src-tauri/Cargo.toml app::state_machine
-   ```
-5. Task 4 完成后继续执行 spec compliance review，再执行 code quality review；两者通过后再进入 Task 5。
-
-#### 6. 当前报错/阻碍
-
-当前无阻塞报错。
-
-已知非阻塞事项：
-
-- Task 3 code quality review 建议后续补全 `AppError` 四个 `Display` 分支的表驱动测试。
-- `DESIGN.md` 和 `AGENTS.md` 是本轮新增/修改的规则资产，冬眠提交会一并保存，确保恢复后不会丢失视觉规范。
-
----
-
-### 2026-05-24：Phase 1 scaffold 中断交接
-
-#### 1. 当前任务上下文
-
-正在执行 `docs/superpowers/plans/2026-05-23-phase-1-macos-recording-foundation.md` 的 Phase 1 / W1-W2：脚手架与 macOS 录制闭环。执行方式为 subagent-driven development，当前位于隔离 worktree：
-
-- 路径：`/Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording`
-- 分支：`feat/phase-1-macos-recording`
-- 最新实现提交：`fb7e648 chore(core): 保存Phase1脚手架现场`
-
-#### 2. 已完成进度
-
-- 已创建隔离 worktree，并从 `feat/architecture-planning` 派生实现分支。
-- 已通过 create-tauri-app 生成 Tauri 2 + React + TypeScript scaffold。
-- 已复制 scaffold 到 worktree 根目录。
-- 已安装 Node 依赖和 Tailwind Vite 插件。
-- 已配置 `vite.config.ts` 使用 `@tailwindcss/vite`。
-- 已创建 `src/styles.css`，内容为 `@import "tailwindcss";`。
-- 已删除临时 scaffold 目录 `luzhi/`。
-- 已运行 `npm run build`，结果通过。
-- 已按用户要求终止 `brew install rust`，不再继续 Homebrew 安装 Rust。
-
-#### 3. 中断时的处置决策
-
-休眠触发时，工作停在 Phase 1 Task 1 的 scaffold 验证阶段。选择“快速收尾”：
-
-- 保留已经复制到 worktree 根目录的 scaffold。
-- 删除临时生成目录 `luzhi/`。
-- 不继续推进 Task 2，因为 Rust/Cargo 尚未配置。
-- 不回滚 scaffold 修改，因为 Node 侧构建已通过，当前是可恢复的稳定点。
-
-#### 4. 架构与关键决策
-
-- 前端 scaffold 只作为 UI 壳，后续录制状态机仍必须放在 Rust 侧。
-- `.gitignore` 保留 `.worktrees/`，避免隔离 worktree 被误追踪。
-- `src-tauri/Cargo.toml` 依赖版本来自官方 scaffold，AI 未主动调整 Rust 核心依赖版本；恢复后仍需人工审查。
-- 继续遵守数据流红线：音视频帧流不得进入前端 JS 层。
-
-#### 5. 立即执行清单
-
-1. 用户手动配置 `rustup`，确认 `cargo` 和 `rustc` 在 PATH：
-   ```bash
-   which cargo
-   which rustc
-   cargo --version
-   rustc --version
-   ```
-2. 回到 worktree 并运行 Rust 验证：
-   ```bash
-   cd /Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording
-   cargo test --manifest-path src-tauri/Cargo.toml
-   ```
-3. 完成 Task 1 的 spec compliance review 与 code quality review；通过后进入 Task 2：Rust core media types and capture trait。
-
-#### 6. 当前报错/阻碍
-
-- `cargo` 当前不可用：
-  ```text
-  cargo not found
-  ```
-- `rustup` 此前也不可用：
-  ```text
-  rustup not found
-  ```
-- `brew install rust` 曾启动并下载依赖，但用户要求终止，最终会话输出包含：
-  ```text
-  Error: SIGTERM
-  ```
-- 用户计划手动清理 Homebrew `.incomplete` 缓存并手动配置 `rustup`。
-
----
