@@ -13,8 +13,6 @@ LuZhi 是中国版 Screen Studio，核心聚焦“录屏 + AI 自动美化 + 一
 - Rust 底层：ScreenCaptureKit、DXGI、WASAPI、cpal、FFmpeg binding
 - 数据流红线：音视频帧流不得经过前端 JS 层
 
----
-
 ## 完整开发计划
 
 已落地主架构与计划文档：
@@ -37,8 +35,6 @@ W1-W12 Phase：
 - Phase 4 / W7-W8：光标平滑与点击放大
 - Phase 5 / W9-W10：空白段检测与自动裁剪
 - Phase 6 / W11-W12：导出预设与本地授权
-
----
 
 ## 工作任务记录
 
@@ -93,6 +89,92 @@ W1-W12 Phase：
 ---
 
 ## 冬眠记录
+
+### 2026-05-24：Phase 1 core types 冬眠交接
+
+#### 1. 当前任务上下文
+
+正在执行 `docs/superpowers/plans/2026-05-23-phase-1-macos-recording-foundation.md` 的 Phase 1 / W1-W2：脚手架与 macOS 录制闭环。当前仍位于隔离 worktree：
+
+- 路径：`/Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording`
+- 分支：`feat/phase-1-macos-recording`
+- 最新实现提交：`5225dd7 feat(core): 定义录制核心数据结构`
+- 当前执行方式：按 `subagent-driven-development` 流程，每个任务执行后做 spec compliance review 与 code quality review。
+
+#### 2. 已完成进度
+
+- Rust 工具链已恢复可用：
+  - `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`
+  - `rustc 1.95.0 (59807616e 2026-04-14)`
+- Phase 1 Task 1 已完成并通过双审：
+  - 补交 `src-tauri/Cargo.lock`。
+  - 中文化 scaffold 可见文案与应用元信息。
+  - 删除独立 `src/App.css`，只保留全局 `src/styles.css`。
+  - 按新增 `DESIGN.md` 约束，将临时 UI 调整为近黑 Raycast 风格。
+  - 验证通过：`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`。
+- Phase 1 Task 2 已完成并通过双审：
+  - 新增 `src-tauri/src/core/frame.rs`、`config.rs`、`capture.rs`、`mod.rs`。
+  - 定义 `MediaTimestamp`、`VideoFrame`、`VideoFrameRef`、`CaptureConfig`、`CaptureCapabilities`、`ScreenCapture`。
+  - `ScreenCapture` trait 已补充 sink 线程交接、启动失败、stop 释放资源等公共接口注释。
+  - `lib.rs` 改为返回 `tauri::Result<()>`，移除 scaffold `expect`。
+  - `main.rs` 使用中文启动失败输出。
+  - 验证通过：`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`cargo test --manifest-path src-tauri/Cargo.toml core::`。
+- Phase 1 Task 3 已提前随 Task 2 完成并通过双审：
+  - 原因：Task 2 的 `capture.rs` 需要 `crate::app::error::AppResult`，计划顺序存在编译依赖缺口。
+  - 新增 `src-tauri/src/app/error.rs` 与 `src-tauri/src/app/mod.rs`。
+  - `AppError` 与中文 `Display` 输出符合计划。
+  - 验证通过：`cargo test --manifest-path src-tauri/Cargo.toml app::error`。
+- 新增规则资产：
+  - `AGENTS.md` 已加入 `DESIGN.md` 关键文件说明。
+  - `DESIGN.md` 已加入 worktree，后续 UI 必须严格遵循。
+
+#### 3. 中断时的处置决策
+
+休眠触发时，刚完成 Task 3 的 code quality review：
+
+- Task 3 审查结论：通过。
+- 非阻塞建议：后续可补一个表驱动测试覆盖 `AppError` 的 4 个 `Display` 分支，当前不阻塞 Phase 1 继续推进。
+- 当前没有未完成的代码编辑，选择“快速收尾”：只更新交接文档并提交现场。
+- 未回滚任何实现提交。
+
+#### 4. 架构与关键决策
+
+- `DESIGN.md` 是当前 worktree 的新增视觉标准；后续所有前端 UI 必须使用其中的深色 Raycast 风格 token 与组件约束。
+- 前端仍只是展示壳，不再调用 scaffold 的 `greet` Tauri command；真实录制命令等到 Task 8/9 按计划接入。
+- `AppError` 提前进入 Task 2 提交是为了保持 `ScreenCapture` trait 使用计划指定的 `AppResult`，不是额外功能扩张。
+- `src-tauri/Cargo.toml` 核心依赖版本未被 AI 修改。
+- 尚未触碰 ScreenCaptureKit、unsafe/FFI、底层回调或 buffer 生命周期代码。
+- `BUG.md` 当前暂无预防规则；本轮 review 已确认没有额外 bug 规则需要套用。
+
+#### 5. 立即执行清单
+
+1. 恢复后进入 worktree：
+   ```bash
+   cd /Users/root-mac/workspace_github/LuZhi/.worktrees/phase-1-macos-recording
+   ```
+2. 读取最新规则与交接：
+   ```bash
+   sed -n '1,260p' AGENTS.md
+   sed -n '1,260p' DESIGN.md
+   sed -n '1,260p' HANDOFF.md
+   ```
+3. 从 Phase 1 Task 4 开始：按 TDD 创建 `src-tauri/src/app/state_machine.rs` 的状态机测试，先看失败，再补实现。
+4. Task 4 预期验证：
+   ```bash
+   cargo test --manifest-path src-tauri/Cargo.toml app::state_machine
+   ```
+5. Task 4 完成后继续执行 spec compliance review，再执行 code quality review；两者通过后再进入 Task 5。
+
+#### 6. 当前报错/阻碍
+
+当前无阻塞报错。
+
+已知非阻塞事项：
+
+- Task 3 code quality review 建议后续补全 `AppError` 四个 `Display` 分支的表驱动测试。
+- `DESIGN.md` 和 `AGENTS.md` 是本轮新增/修改的规则资产，冬眠提交会一并保存，确保恢复后不会丢失视觉规范。
+
+---
 
 ### 2026-05-24：Phase 1 scaffold 中断交接
 
