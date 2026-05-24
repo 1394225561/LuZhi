@@ -2,7 +2,7 @@ use std::sync::mpsc::Sender;
 
 use crate::app::error::AppResult;
 use crate::core::config::CaptureConfig;
-use crate::core::frame::VideoFrameRef;
+use crate::core::frame::{AudioChunk, VideoFrameRef};
 
 /// Channel sender used by native capture adapters to hand video frames to Rust services.
 pub type VideoFrameSink = Sender<VideoFrameRef>;
@@ -45,4 +45,52 @@ pub trait ScreenCapture: Send {
 
     /// Returns the capture modes and resolutions supported by this adapter.
     fn capabilities(&self) -> CaptureCapabilities;
+}
+
+/// Channel sender used by native audio adapters to hand audio chunks to Rust services.
+pub type AudioChunkSink = Sender<AudioChunk>;
+
+/// Configuration for audio capture.
+#[derive(Clone, Debug)]
+pub struct AudioConfig {
+    /// Whether to capture system audio output.
+    pub capture_system_audio: bool,
+    /// Whether to capture microphone input.
+    pub capture_microphone: bool,
+    /// Specific microphone device name; `None` uses system default.
+    pub microphone_device: Option<String>,
+    /// Target sample rate in Hz (e.g., 48000).
+    pub sample_rate: u32,
+    /// Number of audio channels (1 = mono, 2 = stereo).
+    pub channels: u16,
+}
+
+/// An audio input or output device available on the system.
+#[derive(Clone, Debug)]
+pub struct AudioDevice {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// Audio capabilities exposed by a platform adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AudioCapabilities {
+    pub supports_system_audio: bool,
+    pub supports_microphone: bool,
+}
+
+/// Platform audio capture boundary implemented by macOS and Windows adapters.
+pub trait AudioCapture: Send {
+    /// Starts audio capture with the given configuration and sends chunks through `sink`.
+    fn start(&mut self, config: AudioConfig, sink: AudioChunkSink) -> AppResult<()>;
+
+    /// Stops audio capture and releases platform resources.
+    fn stop(&mut self) -> AppResult<()>;
+
+    /// Lists available audio input devices.
+    fn device_list(&self) -> AppResult<Vec<AudioDevice>>;
+
+    /// Returns the audio features supported by this adapter.
+    fn capabilities(&self) -> AudioCapabilities;
 }

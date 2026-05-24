@@ -19,6 +19,15 @@ pub enum AppError {
     CaptureFailed {
         reason: String,
     },
+    AudioCaptureFailed {
+        reason: String,
+    },
+    AudioDeviceNotFound {
+        name: String,
+    },
+    AudioMixFailed {
+        reason: String,
+    },
 }
 
 impl Display for AppError {
@@ -35,6 +44,15 @@ impl Display for AppError {
             }
             AppError::CaptureFailed { reason } => {
                 write!(formatter, "录制失败：{reason}")
+            }
+            AppError::AudioCaptureFailed { reason } => {
+                write!(formatter, "音频捕获失败：{reason}")
+            }
+            AppError::AudioDeviceNotFound { name } => {
+                write!(formatter, "未找到音频设备：{name}")
+            }
+            AppError::AudioMixFailed { reason } => {
+                write!(formatter, "音频混音失败：{reason}")
             }
         }
     }

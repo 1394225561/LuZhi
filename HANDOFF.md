@@ -1,7 +1,7 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-24 | 修复 BUG-001（透明窗口）与 BUG-002（窗口拖拽），程序化拖拽方案落地
-> 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 3 次记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 3 次记录）”的结构顺序。
+> 最后更新：2026-05-24 | 端到端流水线连接：MacRecordingService + 前后端联调 + 帧消费
+> 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 5 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 5 条记录）”的结构顺序。
 
 ## 项目概述
 
@@ -69,9 +69,112 @@ W1-W12 Phase：
 2. 确认无调整后，进入详细实施计划编写。
 3. 启动 W1-W2 时，先按 `tests/phase-1-w1-w2-checklist.md` 建立验收闭环。
 
+### 已知问题阻塞点
+
+1. [ ] **CoreMedia 链接错误阻塞 `npm run tauri dev`**
+   - **症状**：`cargo build --bin luzhi` 报 `_CMFormatDescriptionGetStreamBasicDescription` 符号未定义
+   - **根因**：`/System/Library/Frameworks/CoreMedia.framework/CoreMedia` 是断开的符号链接（指向 `Versions/Current/CoreMedia`，目标不存在）
+   - **影响**：`cargo build --lib` 和 `cargo test` 正常（不触发链接），但二进制构建失败，无法运行 `npm run tauri dev`
+   - **代码位置**：`src-tauri/src/platform/macos/screen_capture_kit.rs` 第 330 行 `extern "C"` 块中的 `CMFormatDescriptionGetStreamBasicDescription` 声明
+   - **修复方案**：
+     - 方案 A：修复系统 CoreMedia 框架（`sudo ln -sf Versions/A/CoreMedia /System/Library/Frameworks/CoreMedia.framework/Versions/Current/CoreMedia`）
+     - 方案 B：用 `objc2-core-media` crate 提供的安全绑定替代手写 `extern "C"` FFI
+     - 方案 C：手动实现 `CMFormatDescriptionGetStreamBasicDescription` 的逻辑（读取 format description 内部结构）
+
 ---
 
 ## 工作任务记录
+
+### 2026-05-24：端到端录制流水线连接
+
+输入文件：
+
+- `.claude/plans/docs-architecture-project-architecture-jaunty-horizon.md`
+
+**根因：** `npm run tauri dev` 验证发现数据流在 5 层全部断裂：前端未调用 Tauri 命令、Tauri 命令仅切换状态机未调用录制服务、AppState 不持有 RecordingService、帧无消费者、预览界面为占位文字。
+
+已完成（7 个 Task 全部完成）：
+
+1. **Task 1**：`MacRecordingService` 具体结构体（`platform/macos_service.rs`），封装 `MacScreenCapture` + `CpalMicrophoneCapture` + 状态机 + 混音器 + drain 线程
+2. **Task 2**：`AppState` 重构为持有 `Mutex<MacRecordingService>`（替代裸状态机）
+3. **Task 3**：所有 Tauri 命令更新为调用真实 `MacRecordingService`（start/stop/pause/resume）
+4. **Task 4**：帧消费线程（drain 模式，防止 channel 阻塞捕获线程）+ `recording-tick` 事件发射
+5. **Task 5**：前端 `App.tsx` 替换 TODO 注释为真实 Tauri invoke 调用 + 事件监听
+6. **Task 6**：`stop_recording` 返回 `RecordingResult`，`PreviewView` 显示录制统计
+7. **Task 7**：验证（fmt/clippy/test/build 全通过）
+
+验证结果：
+
+- `cargo fmt --check` 通过
+- `cargo clippy` 无错误
+- `cargo test` 34/34 通过
+- `cargo build --lib` 通过
+- `npm run build` 通过
+- `npm run test` 4/4 通过
+
+关键决策：
+
+- **`start_combined()` 方法**：`MacScreenCapture` 新增 `start_combined(config, video_sink, audio_sink)` 绕过 trait 方法歧义，原子化设置两个 sink
+- **Drain 模式帧消费**：后台线程以 10ms 间隔 `try_recv()` 消费帧，计数器记录帧数，不做编码
+- **`recording-tick` 线程**：独立线程每秒 emit 事件到前端，驱动计时器显示
+- **`RecordingResult`**：`stop_recording` 返回帧数和时长，`output_path: None`（FFmpeg 编码未实现）
+
+已知问题：
+
+- **CoreMedia 链接错误**：`CMFormatDescriptionGetStreamBasicDescription` 符号在当前系统上无法解析（CoreMedia.framework 符号链接损坏），导致 `cargo build --bin luzhi` 失败。`cargo build --lib` 和 `cargo test` 正常。需修复系统 CoreMedia 框架或改用替代 API。
+
+后续入口：
+
+1. 修复 CoreMedia 链接问题后，`npm run tauri dev` 端到端验证
+2. 进入 FFmpeg 集成实现视频编码和文件写入
+3. 实现 `recording-tick` 精确计时（基于 SCStream 时间戳）
+
+---
+
+### 2026-05-24：Phase 2 完成（W3-W4 双音频链路）
+
+输入文件：
+
+- `docs/superpowers/plans/2026-05-24-phase-2-windows-capture-research-dual-audio.md`
+- `tests/phase-2-w3-w4-checklist.md`
+
+已完成（10 个 Task 全部完成）：
+
+1. **Task 1**：`AudioChunk`、`MixedAudioChunk` 数据类型 + `AudioCapture` Trait + `AudioConfig`、`AudioDevice`、`AudioCapabilities`
+2. **Task 2**：`AppError` 新增 `AudioCaptureFailed`、`AudioDeviceNotFound`、`AudioMixFailed` 三个变体
+3. **Task 3**：`MacScreenCapture` 真实实现（SCStream 音视频统一捕获，`define_class!` 宏 + FFI 绑定）
+4. **Task 4**：`CpalMicrophoneCapture` 实现（cpal 麦克风采集，`SendStream` 解决 `!Send` 问题）
+5. **Task 5**：`SimpleAudioMixer` 实现（线性插值重采样 + 时间戳对齐 + 等权混音 + 硬限幅）
+6. **Task 6**：`RecordingService<C: ScreenCapture, A: AudioCapture>` 双泛型重构，含 rollback 逻辑
+7. **Task 7**：Windows `DxgiCapture` + `WasapiLoopback` Trait stub 骨架（`#[cfg(target_os = "windows")]`）
+8. **Task 8**：Tauri 命令扩展（start/stop/pause/resume/set_capture_mode/set_audio_config）+ 状态机 Paused 状态 + `recording-state-changed` 事件
+9. **Task 9**：音频单元测试补充（34 个测试全部通过）
+10. **Task 10**：Phase 2 验证与交接
+
+验证结果：
+
+- `cargo fmt --check` 通过
+- `cargo clippy` 无错误（FFI 相关 warning 可接受）
+- `cargo test` 34/34 通过
+- `npm run build` 通过
+- `npm run test` 4/4 通过
+
+关键决策：
+
+- **SCStream 统一音视频**：ScreenCaptureKit 的 SCStream 同时输出视频帧和系统音频，无需分离
+- **SendSCStream wrapper**：objc2 的 SCStream 是 `!Send`，用 unsafe newtype 解决（基于原子引用计数）
+- **SendStream wrapper**：cpal 的 Stream 也是 `!Send`，同样用 unsafe newtype 解决
+- **`objc2::define_class!` 宏**：必须使用完整路径调用，不能通过 `use` 导入
+- **双泛型 RecordingService**：`<C: ScreenCapture, A: AudioCapture>` 分离视频捕获和麦克风捕获
+- **实时混音**：录制期间实时混合系统音频和麦克风（非录后混音）
+
+后续入口：
+
+1. `npm run tauri dev` 验证端到端音视频录制
+2. 进入 Phase 3（W5-W6）录制 UI 与前后端联调
+3. ScreenCaptureKit FFI 代码需人工逐行审查内存安全
+
+---
 
 ### 2026-05-24：BUG-001 & BUG-002 深度修复
 
@@ -178,6 +281,54 @@ W1-W12 Phase：
 
 ## 冬眠记录
 
+### 2026-05-24：端到端流水线连接完成冬眠
+
+#### 1. 当前任务上下文
+
+修复 `npm run tauri dev` 端到端验证发现的数据流断裂问题（5 层全部断裂）。当前在 `feat/architecture-planning` 分支。
+
+#### 2. 已完成进度
+
+- `MacRecordingService` 具体结构体（`platform/macos_service.rs`），封装 SCStream + cpal + 状态机 + drain 线程
+- `MacScreenCapture::start_combined()` 原子化设置 video + audio sink
+- `AppState` 重构为 `Mutex<MacRecordingService>`（替代裸状态机）
+- 所有 6 个 Tauri 命令连接到真实服务 + `recording-tick` 事件发射
+- 前端 `App.tsx` 替换 TODO 为真实 invoke + 事件监听
+- `PreviewView` 接收 `RecordingResult` 显示录制统计
+- 全部验证通过：`cargo fmt`、`cargo clippy`、`cargo test` 34/34、`npm run build`、`npm run test` 4/4
+
+#### 3. 中断时的处置决策
+
+休眠触发时，所有 7 个 Task 已完成，代码处于稳定态。用户要求将 CoreMedia 链接错误记录到"已知问题阻塞点"后执行冬眠。选择"直接冬眠"：无需回滚或额外收尾。
+
+#### 4. 架构与关键决策
+
+- **`MacRecordingService` 替代泛型 `RecordingService<C, A>`**：macOS 的 SCStream 是统一流，需要同一个 `MacScreenCapture` 对象同时处理视频和系统音频，泛型设计无法满足
+- **`start_combined()` 方法**：绕过 `ScreenCapture`/`AudioCapture` trait 方法歧义（两个 trait 都有 `start()`/`stop()`），原子化设置两个 sink
+- **Drain 模式帧消费**：后台线程 10ms 间隔 `try_recv()` 消费帧，防止 channel 阻塞 SCStream 回调线程。不做编码
+- **`recording-tick` 线程**：独立线程每秒 emit 事件到前端，驱动计时器
+
+#### 5. 立即执行清单
+
+1. 修复 CoreMedia 链接错误（见"已知问题阻塞点"第 1 项的 3 个方案）
+2. `npm run tauri dev` 端到端验证完整录制流程
+3. 进入 FFmpeg 集成实现视频编码和文件写入
+
+#### 6. 当前报错/阻碍
+
+**CoreMedia 链接错误**（阻塞 `npm run tauri dev`）：
+
+```
+Undefined symbols for architecture arm64:
+  "_CMFormatDescriptionGetStreamBasicDescription", referenced from:
+    luzhi_lib::platform::macos::screen_capture_kit::cmformat_description_get_stream_basic_description
+ld: symbol(s) not found for architecture arm64
+```
+
+根因：`/System/Library/Frameworks/CoreMedia.framework/CoreMedia` 是断开的符号链接。详见"已知问题阻塞点"第 1 项。
+
+---
+
 ### 2026-05-24：BUG-001 & BUG-002 修复完成冬眠
 
 #### 1. 当前任务上下文
@@ -217,6 +368,7 @@ W1-W12 Phase：
 当前无阻塞报错。
 
 已知待办事项：
+
 - 延期-001：透明区域鼠标点击不穿透（需原生 macOS 代码，记录在 BUG.md）
 - PreviewView 和 App.tsx 中有 console.log 占位
 - 录制计时器和麦克风音量需替换为 Tauri event 监听

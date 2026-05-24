@@ -8,11 +8,23 @@ import { ErrorView } from '@/components/error-view'
 import {
   fetchRecordingStatus,
   fetchRecordingPermissions,
+  startRecording,
+  stopRecording,
+  pauseRecording,
+  resumeRecording,
+  onRecordingTick,
+  onRecordingStateChanged,
   type RecordingPermissions,
   type RecordingStatus,
 } from '@/lib/tauri'
 
 type AppState = 'idle' | 'recording' | 'preview' | 'processing' | 'failed'
+
+export type RecordingResult = {
+  durationSecs: number
+  frameCount: number
+  outputPath: string | null
+}
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>('idle')
@@ -27,6 +39,7 @@ export default function App() {
     microphone: 'unknown',
   })
   const [errorMessage, setErrorMessage] = useState('')
+  const [recordingResult, setRecordingResult] = useState<RecordingResult | null>(null)
 
   // 从 Tauri 后端获取初始状态
   useEffect(() => {
@@ -42,6 +55,35 @@ export default function App() {
     void fetchRecordingPermissions().then(setPermissions)
   }, [])
 
+  // 监听录制状态变化事件
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void onRecordingStateChanged((status) => {
+      if (status.state === 'idle') setAppState('idle')
+      else if (status.state === 'recording') {
+        setAppState('recording')
+        setIsPaused(false)
+      }
+      else if (status.state === 'paused') setIsPaused(true)
+      else if (status.state === 'processing') setAppState('processing')
+      else if (status.state === 'completed') setAppState('preview')
+      else if (status.state === 'failed') {
+        setAppState('failed')
+        setErrorMessage('录制过程中发生错误')
+      }
+    }).then((fn) => { unlisten = fn })
+    return () => { unlisten?.() }
+  }, [])
+
+  // 监听录制计时事件
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void onRecordingTick((elapsed) => {
+      setElapsedTime(elapsed)
+    }).then((fn) => { unlisten = fn })
+    return () => { unlisten?.() }
+  }, [])
+
   // 模拟麦克风音量变化（后续替换为 Tauri event 'mic-level'）
   useEffect(() => {
     if (!micEnabled) return
@@ -51,33 +93,42 @@ export default function App() {
     return () => clearInterval(interval)
   }, [micEnabled])
 
-  // 录制计时器（后续替换为 Tauri event 'recording-tick'）
-  useEffect(() => {
-    if (appState !== 'recording' || isPaused) return
-    const interval = setInterval(() => {
-      setElapsedTime((prev) => prev + 1)
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [appState, isPaused])
+  const handleStartRecording = useCallback(async () => {
+    try {
+      setElapsedTime(0)
+      setIsPaused(false)
+      await startRecording()
+    } catch (e) {
+      setAppState('failed')
+      setErrorMessage(String(e))
+    }
+  }, [])
 
-  const handleStartRecording = useCallback(() => {
-    console.log('start_recording', { recordingMode, systemAudioEnabled, micEnabled })
-    // TODO: await invoke('start_recording')
-    setAppState('recording')
-    setElapsedTime(0)
-    setIsPaused(false)
-  }, [recordingMode, systemAudioEnabled, micEnabled])
-
-  const handlePauseRecording = useCallback(() => {
-    console.log(isPaused ? 'resume_recording' : 'pause_recording')
-    // TODO: await invoke(isPaused ? 'resume_recording' : 'pause_recording')
-    setIsPaused((prev) => !prev)
+  const handlePauseRecording = useCallback(async () => {
+    try {
+      if (isPaused) {
+        await resumeRecording()
+      } else {
+        await pauseRecording()
+      }
+    } catch (e) {
+      setErrorMessage(String(e))
+    }
   }, [isPaused])
 
-  const handleStopRecording = useCallback(() => {
-    console.log('stop_recording')
-    // TODO: await invoke('stop_recording')
-    setAppState('preview')
+  const handleStopRecording = useCallback(async () => {
+    try {
+      const result = await stopRecording()
+      setRecordingResult({
+        durationSecs: result.duration_secs,
+        frameCount: result.frame_count,
+        outputPath: result.output_path ?? null,
+      })
+      setAppState('preview')
+    } catch (e) {
+      setAppState('failed')
+      setErrorMessage(String(e))
+    }
   }, [])
 
   const handleBackToIdle = useCallback(() => {
@@ -85,6 +136,7 @@ export default function App() {
     setElapsedTime(0)
     setIsPaused(false)
     setErrorMessage('')
+    setRecordingResult(null)
   }, [])
 
   const handleRetry = useCallback(() => {
@@ -199,5 +251,5 @@ export default function App() {
   }
 
   // Preview state
-  return <PreviewView onBack={handleBackToIdle} />
+  return <PreviewView onBack={handleBackToIdle} recordingResult={recordingResult} />
 }

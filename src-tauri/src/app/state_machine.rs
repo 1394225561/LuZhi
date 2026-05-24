@@ -5,6 +5,7 @@ use crate::app::error::{AppError, AppResult};
 pub enum RecordingState {
     Idle,
     Recording,
+    Paused,
     Processing,
     Completed,
     Failed,
@@ -15,6 +16,7 @@ impl RecordingState {
         match self {
             RecordingState::Idle => "idle",
             RecordingState::Recording => "recording",
+            RecordingState::Paused => "paused",
             RecordingState::Processing => "processing",
             RecordingState::Completed => "completed",
             RecordingState::Failed => "failed",
@@ -54,13 +56,39 @@ impl RecordingStateMachine {
 
     pub fn stop(&mut self) -> AppResult<()> {
         match self.state {
-            RecordingState::Recording => {
+            RecordingState::Recording | RecordingState::Paused => {
                 self.state = RecordingState::Processing;
                 Ok(())
             }
             _ => Err(AppError::InvalidState {
                 current: self.state.as_str(),
                 action: "stop",
+            }),
+        }
+    }
+
+    pub fn pause(&mut self) -> AppResult<()> {
+        match self.state {
+            RecordingState::Recording => {
+                self.state = RecordingState::Paused;
+                Ok(())
+            }
+            _ => Err(AppError::InvalidState {
+                current: self.state.as_str(),
+                action: "pause",
+            }),
+        }
+    }
+
+    pub fn resume(&mut self) -> AppResult<()> {
+        match self.state {
+            RecordingState::Paused => {
+                self.state = RecordingState::Recording;
+                Ok(())
+            }
+            _ => Err(AppError::InvalidState {
+                current: self.state.as_str(),
+                action: "resume",
             }),
         }
     }
@@ -137,5 +165,58 @@ mod tests {
         machine.start().unwrap();
 
         assert_eq!(machine.state(), RecordingState::Recording);
+    }
+
+    #[test]
+    fn can_pause_and_resume() {
+        let mut machine = RecordingStateMachine::new();
+
+        machine.start().unwrap();
+        machine.pause().unwrap();
+        assert_eq!(machine.state(), RecordingState::Paused);
+
+        machine.resume().unwrap();
+        assert_eq!(machine.state(), RecordingState::Recording);
+    }
+
+    #[test]
+    fn can_stop_from_paused() {
+        let mut machine = RecordingStateMachine::new();
+
+        machine.start().unwrap();
+        machine.pause().unwrap();
+        machine.stop().unwrap();
+
+        assert_eq!(machine.state(), RecordingState::Processing);
+    }
+
+    #[test]
+    fn cannot_pause_when_idle() {
+        let mut machine = RecordingStateMachine::new();
+
+        let error = machine.pause().unwrap_err();
+
+        assert_eq!(
+            error,
+            AppError::InvalidState {
+                current: "idle",
+                action: "pause"
+            }
+        );
+    }
+
+    #[test]
+    fn cannot_resume_when_not_paused() {
+        let mut machine = RecordingStateMachine::new();
+
+        let error = machine.resume().unwrap_err();
+
+        assert_eq!(
+            error,
+            AppError::InvalidState {
+                current: "idle",
+                action: "resume"
+            }
+        );
     }
 }

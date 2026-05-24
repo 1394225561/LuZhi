@@ -32,6 +32,12 @@ export type BeautifyConfig = {
 
 export type ExportPreset = 'bilibili' | 'douyin' | 'xiaohongshu'
 
+export type RecordingResult = {
+  duration_secs: number
+  frame_count: number
+  output_path: string | null
+}
+
 // ─── Tauri Commands ───
 
 export async function fetchRecordingStatus(): Promise<RecordingStatus> {
@@ -54,8 +60,8 @@ export async function resumeRecording(): Promise<void> {
   return invoke('resume_recording')
 }
 
-export async function stopRecording(): Promise<void> {
-  return invoke('stop_recording')
+export async function stopRecording(): Promise<RecordingResult> {
+  return invoke<RecordingResult>('stop_recording')
 }
 
 export async function setCaptureMode(mode: CaptureMode): Promise<void> {

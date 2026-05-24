@@ -25,11 +25,18 @@ import { cn } from '@/lib/utils'
 import { motion } from 'framer-motion'
 import type { BeautifyConfig, ExportPreset } from '@/lib/tauri'
 
-interface PreviewViewProps {
-  onBack: () => void
+type RecordingResult = {
+  durationSecs: number
+  frameCount: number
+  outputPath: string | null
 }
 
-export function PreviewView({ onBack }: PreviewViewProps) {
+interface PreviewViewProps {
+  onBack: () => void
+  recordingResult?: RecordingResult | null
+}
+
+export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(45)
   const [duration] = useState(180)
@@ -95,7 +102,24 @@ export function PreviewView({ onBack }: PreviewViewProps) {
         <div className="flex-1 bg-card rounded-2xl border border-border/50 overflow-hidden flex flex-col">
           {/* Video Area */}
           <div className="flex-1 bg-black/50 flex items-center justify-center relative">
-            <div className="text-muted-foreground text-sm">视频预览区域</div>
+            {recordingResult?.outputPath ? (
+              <video
+                src={`asset://localhost/${recordingResult.outputPath}`}
+                controls
+                className="w-full h-full object-contain"
+              />
+            ) : (
+              <div className="text-center text-muted-foreground">
+                <p className="text-sm mb-1">录制完成</p>
+                {recordingResult && (
+                  <p className="text-xs opacity-60">
+                    已捕获 {recordingResult.frameCount} 帧
+                    {recordingResult.durationSecs > 0 && ` · ${recordingResult.durationSecs}s`}
+                  </p>
+                )}
+                <p className="text-xs opacity-40 mt-2">视频编码尚未实现（FFmpeg 集成待完成）</p>
+              </div>
+            )}
             {cursorMagnification && (
               <motion.div
                 initial={{ scale: 1 }}
