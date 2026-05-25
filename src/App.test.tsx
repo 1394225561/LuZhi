@@ -116,4 +116,12 @@ describe('App', () => {
     })
     expect(invokeMock).toHaveBeenNthCalledWith(3, 'start_recording', undefined)
   })
+
+  it('does not render area-level false drag-region wrappers', async () => {
+    render(<App />)
+
+    await screen.findAllByText('开始录制')
+
+    expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+  })
 })

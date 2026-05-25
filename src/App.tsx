@@ -196,7 +196,7 @@ export default function App() {
   if (appState === 'idle') {
     return (
       <div className="min-h-screen flex items-center justify-center p-8" data-tauri-drag-region="deep">
-        <div className="relative" data-tauri-drag-region={false}>
+        <div className="relative">
           <RecordingPanel
             recordingMode={recordingMode}
             setRecordingMode={setRecordingMode}
@@ -223,7 +223,7 @@ export default function App() {
   if (appState === 'recording') {
     return (
       <div className="min-h-screen flex flex-col items-center justify-between p-8" data-tauri-drag-region="deep">
-        <div className="pt-4" data-tauri-drag-region={false}>
+        <div className="pt-4">
           <AnimatePresence>
             <RecordingStatusBar
               elapsedTime={elapsedTime}
