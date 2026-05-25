@@ -6,6 +6,7 @@ pub mod platform;
 use std::sync::{Arc, Mutex};
 
 use app::events::{PermissionPayload, RecordingStatusPayload};
+#[cfg(not(target_os = "macos"))]
 use app::permission_service::{PermissionStatus, RecordingPermissions};
 use app::recording_runtime::TickRuntime;
 use app::state_machine::RecordingState;
@@ -13,7 +14,7 @@ use core::capture::AudioConfig;
 use core::config::CaptureConfig;
 use media::recording_writer::RecordingResult;
 use platform::macos_service::MacRecordingService;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 
 /// Shared recording state managed by Tauri.
@@ -54,10 +55,20 @@ fn recording_status(state: tauri::State<'_, AppState>) -> RecordingStatusPayload
 
 #[tauri::command]
 fn recording_permissions() -> PermissionPayload {
+    #[cfg(target_os = "macos")]
+    let permissions = {
+        let service = app::permission_service::PermissionService::new(
+            platform::macos::permissions::MacPermissionProbe,
+        );
+        service.recording_permissions()
+    };
+
+    #[cfg(not(target_os = "macos"))]
     let permissions = RecordingPermissions {
         screen_recording: PermissionStatus::Unknown,
         microphone: PermissionStatus::Unknown,
     };
+
     PermissionPayload::from(permissions)
 }
 
