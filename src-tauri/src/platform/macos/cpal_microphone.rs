@@ -239,7 +239,7 @@ where
 
                 let guard = sink.lock().unwrap();
                 if let Some(s) = guard.as_ref() {
-                    let _ = s.send(chunk);
+                    let _sent = s.try_send_drop_newest(chunk);
                 }
             },
             |err| {

@@ -160,7 +160,7 @@ unsafe fn handle_video_frame(delegate: &StreamOutput, sample_buffer: &CMSampleBu
 
     let guard = delegate.ivars().video_sink.lock().unwrap();
     if let Some(sink) = guard.as_ref() {
-        let _ = sink.send(Arc::new(frame));
+        let _sent = sink.try_send_drop_newest(Arc::new(frame));
     }
 }
 
@@ -245,7 +245,7 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
 
     let guard = delegate.ivars().audio_sink.lock().unwrap();
     if let Some(sink) = guard.as_ref() {
-        let _ = sink.send(chunk);
+        let _sent = sink.try_send_drop_newest(chunk);
     }
 }
 
@@ -641,9 +641,9 @@ impl ScreenCapture for MacScreenCapture {
         }
 
         // Audio sink must be injected before start via AudioCapture::start().
-        // If not set, create a dummy channel that drops all audio.
+        // If not set, create a dummy bounded channel that drops all audio.
         let audio_sink = self.audio_sink.take().unwrap_or_else(|| {
-            let (tx, _rx) = std::sync::mpsc::channel();
+            let (tx, _rx) = crate::core::media_channel::bounded_media_channel(1);
             tx
         });
 

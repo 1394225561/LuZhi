@@ -1,10 +1,9 @@
-use std::sync::mpsc::{channel, Receiver};
-
 use crate::app::error::AppResult;
 use crate::app::state_machine::{RecordingState, RecordingStateMachine};
 use crate::core::capture::{AudioCapture, AudioConfig, ScreenCapture};
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
+use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
 use crate::media::audio_mixer::{AudioMixer, SimpleAudioMixer};
 
 /// Orchestrates a recording session over platform capture adapters.
@@ -17,9 +16,9 @@ pub struct RecordingService<C: ScreenCapture, A: AudioCapture> {
     audio_capture: A,
     state_machine: RecordingStateMachine,
     mixer: SimpleAudioMixer,
-    video_receiver: Option<Receiver<VideoFrameRef>>,
-    audio_receiver: Option<Receiver<AudioChunk>>,
-    mic_receiver: Option<Receiver<AudioChunk>>,
+    video_receiver: Option<MediaReceiver<VideoFrameRef>>,
+    audio_receiver: Option<MediaReceiver<AudioChunk>>,
+    mic_receiver: Option<MediaReceiver<AudioChunk>>,
 }
 
 impl<C: ScreenCapture, A: AudioCapture> RecordingService<C, A> {
@@ -47,7 +46,7 @@ impl<C: ScreenCapture, A: AudioCapture> RecordingService<C, A> {
         self.state_machine.start()?;
 
         // Start video (and system audio if the capture supports it).
-        let (video_sender, video_receiver) = channel();
+        let (video_sender, video_receiver) = bounded_media_channel(90);
         if let Err(error) = self.capture.start(config, video_sender) {
             self.state_machine.fail();
             return Err(error);
@@ -56,7 +55,7 @@ impl<C: ScreenCapture, A: AudioCapture> RecordingService<C, A> {
 
         // Start microphone capture if requested.
         if audio_config.capture_microphone {
-            let (mic_sender, mic_receiver) = channel();
+            let (mic_sender, mic_receiver) = bounded_media_channel(256);
             if let Err(error) = self.audio_capture.start(audio_config.clone(), mic_sender) {
                 // Roll back video capture on mic failure.
                 let _ = self.capture.stop();
@@ -95,20 +94,19 @@ impl<C: ScreenCapture, A: AudioCapture> RecordingService<C, A> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::Sender;
-
     use super::*;
     use crate::app::error::AppError;
     use crate::core::capture::{
         AudioCapabilities, AudioChunkSink, AudioDevice, CaptureCapabilities, VideoFrameSink,
     };
+    use crate::core::media_channel::MediaSender;
 
     #[derive(Default)]
     struct MockScreenCapture {
         started: bool,
         stopped: bool,
         fail_on_start: bool,
-        sink_seen: Option<Sender<VideoFrameRef>>,
+        sink_seen: Option<MediaSender<VideoFrameRef>>,
     }
 
     impl ScreenCapture for MockScreenCapture {

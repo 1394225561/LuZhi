@@ -1,11 +1,10 @@
-use std::sync::mpsc::Sender;
-
 use crate::app::error::AppResult;
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
+use crate::core::media_channel::MediaSender;
 
 /// Channel sender used by native capture adapters to hand video frames to Rust services.
-pub type VideoFrameSink = Sender<VideoFrameRef>;
+pub type VideoFrameSink = MediaSender<VideoFrameRef>;
 
 /// Capture features supported by the current platform adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,7 +47,7 @@ pub trait ScreenCapture: Send {
 }
 
 /// Channel sender used by native audio adapters to hand audio chunks to Rust services.
-pub type AudioChunkSink = Sender<AudioChunk>;
+pub type AudioChunkSink = MediaSender<AudioChunk>;
 
 /// Configuration for audio capture.
 #[derive(Clone, Debug)]

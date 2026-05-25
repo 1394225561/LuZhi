@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::thread;
 
@@ -10,6 +9,7 @@ use crate::app::state_machine::{RecordingState, RecordingStateMachine};
 use crate::core::capture::{AudioCapture, AudioConfig, ScreenCapture};
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
+use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
 use crate::media::audio_mixer::SimpleAudioMixer;
 
 /// Non-generic recording service for macOS.
@@ -23,9 +23,9 @@ pub struct MacRecordingService {
     mic_capture: CpalMicrophoneCapture,
     state_machine: RecordingStateMachine,
     _mixer: SimpleAudioMixer,
-    video_receiver: Option<Receiver<VideoFrameRef>>,
-    system_audio_receiver: Option<Receiver<AudioChunk>>,
-    mic_receiver: Option<Receiver<AudioChunk>>,
+    video_receiver: Option<MediaReceiver<VideoFrameRef>>,
+    system_audio_receiver: Option<MediaReceiver<AudioChunk>>,
+    mic_receiver: Option<MediaReceiver<AudioChunk>>,
     stop_flag: Option<Arc<AtomicBool>>,
     frame_count: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -57,9 +57,11 @@ impl MacRecordingService {
     pub fn start(&mut self, config: CaptureConfig, audio_config: AudioConfig) -> AppResult<()> {
         self.state_machine.start()?;
 
-        // Create channels for video and system audio.
-        let (video_sender, video_receiver) = channel();
-        let (audio_sender, audio_receiver) = channel();
+        // Create bounded channels for video and system audio.
+        const VIDEO_QUEUE_CAPACITY: usize = 90;
+        const AUDIO_QUEUE_CAPACITY: usize = 256;
+        let (video_sender, video_receiver) = bounded_media_channel(VIDEO_QUEUE_CAPACITY);
+        let (audio_sender, audio_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY);
 
         // Start the unified SCStream with both sinks.
         if let Err(error) = self
@@ -74,7 +76,7 @@ impl MacRecordingService {
 
         // Start microphone capture if requested.
         if audio_config.capture_microphone {
-            let (mic_sender, mic_receiver) = channel();
+            let (mic_sender, mic_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY);
             if let Err(error) = self.mic_capture.start(audio_config, mic_sender) {
                 // Rollback: stop screen capture.
                 let _ = ScreenCapture::stop(&mut self.screen_capture);
@@ -135,9 +137,9 @@ impl MacRecordingService {
     /// Background thread that drains video and audio channels to prevent blocking.
     fn consume_frames(
         stop_flag: Arc<AtomicBool>,
-        video_rx: Receiver<VideoFrameRef>,
-        system_audio_rx: Receiver<AudioChunk>,
-        mic_rx: Option<Receiver<AudioChunk>>,
+        video_rx: MediaReceiver<VideoFrameRef>,
+        system_audio_rx: MediaReceiver<AudioChunk>,
+        mic_rx: Option<MediaReceiver<AudioChunk>>,
         frame_count: Arc<std::sync::atomic::AtomicU64>,
     ) {
         loop {
