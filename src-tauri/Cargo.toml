@@ -35,3 +35,10 @@ objc2-core-foundation = "0.3"
 # Microphone audio capture
 cpal = "0.15"
 block2 = "0.6"
+
+# Video/audio encoding (optional — requires FFmpeg development libraries)
+ffmpeg-next = { version = "7", optional = true }
+
+[features]
+default = []
+ffmpeg = ["dep:ffmpeg-next"]

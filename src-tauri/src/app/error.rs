@@ -31,6 +31,12 @@ pub enum AppError {
     CaptureStopTimeout {
         reason: String,
     },
+    RecordingWriteFailed {
+        reason: String,
+    },
+    RecordingFinalizeFailed {
+        reason: String,
+    },
 }
 
 impl Display for AppError {
@@ -59,6 +65,12 @@ impl Display for AppError {
             }
             AppError::CaptureStopTimeout { reason } => {
                 write!(formatter, "停止录制超时：{reason}")
+            }
+            AppError::RecordingWriteFailed { reason } => {
+                write!(formatter, "写入录制文件失败：{reason}")
+            }
+            AppError::RecordingFinalizeFailed { reason } => {
+                write!(formatter, "完成录制文件失败：{reason}")
             }
         }
     }
