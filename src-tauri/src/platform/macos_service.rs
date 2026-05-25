@@ -6,6 +6,7 @@ use super::macos::cpal_microphone::CpalMicrophoneCapture;
 use super::macos::screen_capture_kit::MacScreenCapture;
 use crate::app::error::AppResult;
 use crate::app::state_machine::{RecordingState, RecordingStateMachine};
+use crate::media::recording_writer::RecordingResult;
 use crate::core::capture::{AudioCapture, AudioConfig, ScreenCapture};
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
@@ -108,7 +109,7 @@ impl MacRecordingService {
     }
 
     /// Stops all captures and finalizes the recording session.
-    pub fn stop(&mut self) -> AppResult<()> {
+    pub fn stop(&mut self) -> AppResult<RecordingResult> {
         // Signal the consumer thread to stop.
         if let Some(flag) = &self.stop_flag {
             flag.store(true, Ordering::Relaxed);
@@ -130,7 +131,14 @@ impl MacRecordingService {
 
         self.state_machine.stop()?;
         self.state_machine.complete()?;
-        Ok(())
+
+        let frame_count = self.frame_count.load(Ordering::Relaxed);
+        Ok(RecordingResult {
+            duration_secs: 0,
+            frame_count,
+            mixed_audio_chunk_count: 0,
+            output_path: None,
+        })
     }
 
     pub fn pause(&mut self) -> AppResult<()> {

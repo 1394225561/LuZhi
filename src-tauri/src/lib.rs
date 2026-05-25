@@ -11,6 +11,7 @@ use app::recording_runtime::TickRuntime;
 use app::state_machine::RecordingState;
 use core::capture::AudioConfig;
 use core::config::CaptureConfig;
+use media::recording_writer::RecordingResult;
 use platform::macos_service::MacRecordingService;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -43,14 +44,6 @@ impl Default for AppState {
 fn emit_state_changed(app: &AppHandle, state: RecordingState) {
     let payload = RecordingStatusPayload::from(state);
     let _ = app.emit("recording-state-changed", payload);
-}
-
-/// Result returned after stopping a recording session.
-#[derive(Serialize)]
-struct RecordingResult {
-    duration_secs: u64,
-    frame_count: u64,
-    output_path: Option<String>,
 }
 
 #[tauri::command]
@@ -108,22 +101,17 @@ async fn stop_recording(
 
     let service = state.service.clone();
 
-    let (new_state, frame_count) = tauri::async_runtime::spawn_blocking(move || {
+    let (new_state, result) = tauri::async_runtime::spawn_blocking(move || {
         let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
-        let frame_count = service.frame_count();
-        service.stop().map_err(|e| e.to_string())?;
-        Ok::<_, String>((service.state(), frame_count))
+        let result = service.stop().map_err(|e| e.to_string())?;
+        Ok::<_, String>((service.state(), result))
     })
     .await
     .map_err(|e| format!("停止录制任务失败: {e}"))??;
 
     emit_state_changed(&app, new_state);
 
-    Ok(RecordingResult {
-        duration_secs: 0, // TODO: track elapsed time from recording-tick
-        frame_count,
-        output_path: None, // FFmpeg encoding not yet implemented
-    })
+    Ok(result)
 }
 
 #[tauri::command]
