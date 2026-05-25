@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, SampleRate, StreamConfig};
@@ -18,8 +19,8 @@ use crate::core::frame::AudioChunk;
 struct SendStream(cpal::Stream);
 
 // SAFETY: CoreAudio streams are created and destroyed on the calling thread;
-// the audio callbacks run on the IO thread but only access Arc<Mutex<...>>
-// state, which is already Send+Sync.
+// the audio callbacks run on the IO thread but only use lock-free atomics
+// and try_send on bounded channels, which are already Send+Sync.
 unsafe impl Send for SendStream {}
 
 /// Microphone audio capture using the cpal crate.
@@ -28,14 +29,14 @@ unsafe impl Send for SendStream {}
 /// and sends `AudioChunk`s through the provided sink.
 pub struct CpalMicrophoneCapture {
     stream: Option<SendStream>,
-    running: Arc<Mutex<bool>>,
+    running: Arc<AtomicBool>,
 }
 
 impl CpalMicrophoneCapture {
     pub fn new() -> Self {
         Self {
             stream: None,
-            running: Arc::new(Mutex::new(false)),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -48,7 +49,7 @@ impl Default for CpalMicrophoneCapture {
 
 impl AudioCapture for CpalMicrophoneCapture {
     fn start(&mut self, config: AudioConfig, sink: AudioChunkSink) -> AppResult<()> {
-        if *self.running.lock().unwrap() {
+        if self.running.load(Ordering::Relaxed) {
             return Err(AppError::InvalidState {
                 current: "recording",
                 action: "start audio capture",
@@ -111,7 +112,7 @@ impl AudioCapture for CpalMicrophoneCapture {
             SampleFormat::F32 => build_input_stream::<f32>(
                 &device,
                 &stream_config,
-                sink,
+                sink.clone(),
                 running.clone(),
                 sample_rate_val,
                 channels_val,
@@ -119,7 +120,7 @@ impl AudioCapture for CpalMicrophoneCapture {
             SampleFormat::I16 => build_input_stream::<i16>(
                 &device,
                 &stream_config,
-                sink,
+                sink.clone(),
                 running.clone(),
                 sample_rate_val,
                 channels_val,
@@ -143,15 +144,14 @@ impl AudioCapture for CpalMicrophoneCapture {
             reason: format!("启动麦克风采集失败: {}", e),
         })?;
 
-        *self.running.lock().unwrap() = true;
+        self.running.store(true, Ordering::Relaxed);
         self.stream = Some(SendStream(stream));
 
         Ok(())
     }
 
     fn stop(&mut self) -> AppResult<()> {
-        *self.running.lock().unwrap() = false;
-        // Dropping the stream stops it.
+        self.running.store(false, Ordering::Relaxed);
         self.stream = None;
         Ok(())
     }
@@ -200,14 +200,13 @@ fn build_input_stream<T: cpal::SizedSample>(
     device: &Device,
     config: &StreamConfig,
     sink: AudioChunkSink,
-    running: Arc<Mutex<bool>>,
+    running: Arc<AtomicBool>,
     sample_rate: u32,
     channels: u16,
 ) -> AppResult<cpal::Stream>
 where
     f32: cpal::FromSample<T>,
 {
-    let sink = Arc::new(Mutex::new(Some(sink)));
     let sample_clock = Arc::new(crate::core::clock::AudioSampleClock::new(
         sample_rate,
         channels,
@@ -217,11 +216,10 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _info: &cpal::InputCallbackInfo| {
-                if !*running.lock().unwrap() {
+                if !running.load(Ordering::Relaxed) {
                     return;
                 }
 
-                // Convert samples to f32 in [-1.0, 1.0].
                 let samples: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
 
                 if samples.is_empty() {
@@ -237,10 +235,7 @@ where
                     samples: Arc::from(samples.into_boxed_slice()),
                 };
 
-                let guard = sink.lock().unwrap();
-                if let Some(s) = guard.as_ref() {
-                    let _sent = s.try_send_drop_newest(chunk);
-                }
+                let _ = sink.try_send_drop_newest(chunk);
             },
             |err| {
                 // Audio stream error — log but don't panic.
