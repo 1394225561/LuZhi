@@ -67,10 +67,12 @@ impl MacRecordingService {
         let (audio_sender, audio_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY);
 
         // Start the unified SCStream with both sinks.
-        if let Err(error) = self
-            .screen_capture
-            .start_combined(config, audio_config.capture_system_audio, video_sender, audio_sender)
-        {
+        if let Err(error) = self.screen_capture.start_combined(
+            config,
+            audio_config.capture_system_audio,
+            video_sender,
+            audio_sender,
+        ) {
             self.state_machine.fail();
             return Err(error);
         }
@@ -103,7 +105,14 @@ impl MacRecordingService {
 
         let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
         self.consumer_handle = Some(thread::spawn(move || {
-            Self::consume_frames(stop_flag, video_rx, system_audio_rx, mic_rx, frame_count, writer)
+            Self::consume_frames(
+                stop_flag,
+                video_rx,
+                system_audio_rx,
+                mic_rx,
+                frame_count,
+                writer,
+            )
         }));
 
         Ok(())
@@ -139,8 +148,15 @@ impl MacRecordingService {
 
         self.stop_flag = None;
 
-        capture_result?;
-        mic_result?;
+        // If either capture failed to stop, transition to Failed state.
+        if let Err(e) = capture_result {
+            self.state_machine.fail();
+            return Err(e);
+        }
+        if let Err(e) = mic_result {
+            self.state_machine.fail();
+            return Err(e);
+        }
 
         self.state_machine.stop()?;
         self.state_machine.complete()?;
@@ -165,7 +181,7 @@ impl MacRecordingService {
         frame_count: Arc<std::sync::atomic::AtomicU64>,
         mut writer: Box<dyn RecordingWriter>,
     ) -> RecordingResult {
-        let synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
+        let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
 
         loop {
             if stop_flag.load(Ordering::Relaxed) {
@@ -180,32 +196,30 @@ impl MacRecordingService {
                 }
             }
 
-            // Drain system audio — keep only the latest chunk.
-            let mut latest_system: Option<AudioChunk> = None;
+            // Enqueue system audio chunks for ordered pairing.
             while let Ok(chunk) = system_audio_rx.try_recv() {
-                latest_system = Some(chunk);
+                synchronizer.push_system(chunk);
             }
 
-            // Drain microphone audio — keep only the latest chunk.
-            let mut latest_mic: Option<AudioChunk> = None;
+            // Enqueue microphone audio chunks.
             if let Some(ref mic_rx) = mic_rx {
                 while let Ok(chunk) = mic_rx.try_recv() {
-                    latest_mic = Some(chunk);
+                    synchronizer.push_mic(chunk);
                 }
             }
 
-            // Mix available audio sources.
-            if latest_system.is_some() || latest_mic.is_some() {
-                if let Ok(mixed) =
-                    synchronizer.mix_pair(latest_system.as_ref(), latest_mic.as_ref())
-                {
-                    if let Err(e) = writer.push_audio(mixed) {
-                        eprintln!("写入混音音频失败: {e}");
+            // Pair by timestamp proximity and mix.
+            for mixed_result in synchronizer.drain_mixed() {
+                match mixed_result {
+                    Ok(mixed) => {
+                        if let Err(e) = writer.push_audio(mixed) {
+                            eprintln!("写入混音音频失败: {e}");
+                        }
                     }
+                    Err(e) => eprintln!("音频混合失败: {e}"),
                 }
             }
 
-            // Sleep briefly to avoid busy-waiting.
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
