@@ -17,17 +17,11 @@ import {
   onRecordingTick,
   onRecordingStateChanged,
   type RecordingPermissions,
+  type RecordingResult,
   type RecordingStatus,
 } from '@/lib/tauri'
 
 type AppState = 'idle' | 'recording' | 'preview' | 'processing' | 'failed'
-
-export type RecordingResult = {
-  durationSecs: number
-  frameCount: number
-  mixedAudioChunkCount: number
-  outputPath: string | null
-}
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>('idle')
@@ -131,10 +125,10 @@ export default function App() {
     try {
       const result = await stopRecording()
       setRecordingResult({
-        durationSecs: result.duration_secs,
-        frameCount: result.frame_count,
-        mixedAudioChunkCount: result.mixed_audio_chunk_count,
-        outputPath: result.output_path ?? null,
+        durationSecs: result.durationSecs,
+        frameCount: result.frameCount,
+        mixedAudioChunkCount: result.mixedAudioChunkCount,
+        outputPath: result.outputPath ?? null,
       })
       setAppState('preview')
     } catch (e) {

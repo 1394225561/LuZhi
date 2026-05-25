@@ -23,13 +23,7 @@ import {
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { motion } from 'framer-motion'
-import type { BeautifyConfig, ExportPreset } from '@/lib/tauri'
-
-type RecordingResult = {
-  durationSecs: number
-  frameCount: number
-  outputPath: string | null
-}
+import type { BeautifyConfig, ExportPreset, RecordingResult } from '@/lib/tauri'
 
 interface PreviewViewProps {
   onBack: () => void

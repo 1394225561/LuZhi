@@ -1,6 +1,14 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, act } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+
+// Mock ResizeObserver for framer-motion in jsdom
+class ResizeObserverMock {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+globalThis.ResizeObserver = ResizeObserverMock as unknown as typeof ResizeObserver
 
 const invokeMock = vi.fn()
 
@@ -123,5 +131,74 @@ describe('App', () => {
     await screen.findAllByText('开始录制')
 
     expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+  })
+
+  it('displays recording result after stop with camelCase fields', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    const stateCallbacks: Array<(status: { state: string }) => void> = []
+
+    vi.mocked(listen).mockImplementation(
+      (event: string, callback: (event: { event: string; id: number; payload: unknown }) => void) => {
+        if (event === 'recording-state-changed') {
+          stateCallbacks.push((status) => callback({ event, id: 0, payload: status }))
+        }
+        return Promise.resolve(() => {})
+      },
+    )
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      if (command === 'stop_recording') {
+        return Promise.resolve({
+          durationSecs: 5,
+          frameCount: 150,
+          mixedAudioChunkCount: 50,
+          outputPath: '/tmp/test.mp4',
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    const startButtons = await screen.findAllByText('开始录制')
+    fireEvent.click(startButtons[0])
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('start_recording', undefined)
+    })
+
+    // Emit recording state change event
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'recording' })
+      }
+    })
+
+    // RecordingStatusBar uses icon buttons; find the stop button (last button)
+    await vi.waitFor(() => {
+      const buttons = screen.getAllByRole('button')
+      expect(buttons.length).toBeGreaterThan(0)
+    })
+    const buttons = screen.getAllByRole('button')
+    console.log('Button count:', buttons.length)
+    console.log('Button labels:', buttons.map(b => b.textContent || b.getAttribute('aria-label')))
+    const stopButton = buttons[buttons.length - 1]
+    await act(async () => {
+      fireEvent.click(stopButton)
+    })
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('stop_recording', undefined)
+    })
+
+    // PreviewView renders with outputPath (video element)
+    await screen.findByText('预览与美化')
+    expect(screen.getByText('预览与美化')).toBeTruthy()
+    // Verify stop_recording returned camelCase result
+    expect(invokeMock).toHaveBeenCalledWith('stop_recording', undefined)
   })
 })

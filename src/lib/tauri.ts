@@ -43,10 +43,10 @@ export type BeautifyConfig = {
 export type ExportPreset = 'bilibili' | 'douyin' | 'xiaohongshu'
 
 export type RecordingResult = {
-  duration_secs: number
-  frame_count: number
-  mixed_audio_chunk_count: number
-  output_path: string | null
+  durationSecs: number
+  frameCount: number
+  mixedAudioChunkCount: number
+  outputPath: string | null
 }
 
 // ─── Tauri Commands ───
