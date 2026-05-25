@@ -197,6 +197,10 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
         Err(_) => return,
     };
 
+    if validate_asbd(basic).is_err() {
+        return;
+    }
+
     // Two-call size query for AudioBufferList.
     let mut needed_size = 0usize;
     let mut block_buffer: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -249,17 +253,27 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
         return;
     }
 
-    let mut samples_f32: Vec<f32> = Vec::new();
     let first_buffer = list_ref.mBuffers.as_ptr();
+    let mut buffers: Vec<AudioBuffer> = Vec::with_capacity(num_buffers);
     for i in 0..num_buffers {
         let buffer = *first_buffer.add(i);
-        if buffer.mData.is_null() || buffer.mDataByteSize == 0 {
-            continue;
+        if !buffer.mData.is_null() && buffer.mDataByteSize > 0 {
+            buffers.push(buffer);
         }
-        let bytes =
-            std::slice::from_raw_parts(buffer.mData as *const u8, buffer.mDataByteSize as usize);
-        samples_f32.extend(convert_pcm_bytes_to_f32(pcm_format, bytes));
     }
+
+    let samples_f32 = if is_non_interleaved(basic) && buffers.len() > 1 {
+        deinterleave_buffers(&buffers, channels as usize, pcm_format)
+    } else {
+        let mut samples = Vec::new();
+        for buffer in &buffers {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(buffer.mData as *const u8, buffer.mDataByteSize as usize)
+            };
+            samples.extend(convert_pcm_bytes_to_f32(pcm_format, bytes));
+        }
+        samples
+    };
 
     if !block_buffer.is_null() {
         cf_release(block_buffer as *const _);
@@ -794,6 +808,7 @@ enum PcmSampleFormat {
 const K_AUDIO_FORMAT_LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
 const K_AUDIO_FORMAT_FLAG_IS_FLOAT: u32 = 1 << 0;
 const K_AUDIO_FORMAT_FLAG_IS_SIGNED_INTEGER: u32 = 1 << 2;
+const K_AUDIO_FORMAT_FLAG_IS_NON_INTERLEAVED: u32 = 1 << 5;
 
 fn classify_pcm_format(basic: &AudioStreamBasicDescription) -> AppResult<PcmSampleFormat> {
     if basic.mFormatID != K_AUDIO_FORMAT_LINEAR_PCM {
@@ -818,6 +833,82 @@ fn classify_pcm_format(basic: &AudioStreamBasicDescription) -> AppResult<PcmSamp
             basic.mBitsPerChannel, basic.mFormatFlags
         ),
     })
+}
+
+/// Validates critical ASBD fields to catch malformed audio buffers early.
+fn validate_asbd(basic: &AudioStreamBasicDescription) -> AppResult<()> {
+    if basic.mFramesPerPacket == 0 {
+        return Err(AppError::AudioCaptureFailed {
+            reason: "mFramesPerPacket 为 0".to_string(),
+        });
+    }
+    if basic.mBytesPerFrame == 0 {
+        return Err(AppError::AudioCaptureFailed {
+            reason: "mBytesPerFrame 为 0".to_string(),
+        });
+    }
+    if basic.mChannelsPerFrame == 0 {
+        return Err(AppError::AudioCaptureFailed {
+            reason: "mChannelsPerFrame 为 0".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Returns `true` when the ASBD indicates non-interleaved channel layout.
+fn is_non_interleaved(basic: &AudioStreamBasicDescription) -> bool {
+    (basic.mFormatFlags & K_AUDIO_FORMAT_FLAG_IS_NON_INTERLEAVED) != 0
+}
+
+/// Deinterleaves per-channel buffers into a single interleaved L,R,L,R,... sequence.
+///
+/// Each buffer in `buffers` contains one channel of `frames` samples.
+/// `channels` is the total number of channels expected in the output.
+fn deinterleave_buffers(
+    buffers: &[AudioBuffer],
+    channels: usize,
+    format: PcmSampleFormat,
+) -> Vec<f32> {
+    if buffers.is_empty() || channels == 0 {
+        return Vec::new();
+    }
+
+    let bytes_per_sample = match format {
+        PcmSampleFormat::Float32 => 4,
+        PcmSampleFormat::SignedInt16 => 2,
+    };
+
+    let frames = if buffers[0].mDataByteSize > 0 {
+        buffers[0].mDataByteSize as usize / bytes_per_sample
+    } else {
+        return Vec::new();
+    };
+
+    // Convert each channel buffer to f32 independently.
+    let channel_samples: Vec<Vec<f32>> = buffers
+        .iter()
+        .take(channels)
+        .filter(|b| !b.mData.is_null() && b.mDataByteSize > 0)
+        .map(|b| {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(b.mData as *const u8, b.mDataByteSize as usize)
+            };
+            convert_pcm_bytes_to_f32(format, bytes)
+        })
+        .collect();
+
+    if channel_samples.is_empty() || channel_samples[0].len() != frames {
+        return Vec::new();
+    }
+
+    // Interleave: L0,R0,L1,R1,...
+    let mut interleaved = Vec::with_capacity(frames * channels);
+    for frame_idx in 0..frames {
+        for channel in &channel_samples {
+            interleaved.push(channel[frame_idx]);
+        }
+    }
+    interleaved
 }
 
 fn convert_pcm_bytes_to_f32(format: PcmSampleFormat, bytes: &[u8]) -> Vec<f32> {
@@ -855,6 +946,67 @@ mod audio_conversion_tests {
 
         assert!((samples[0] - 1.0).abs() < 1e-6);
         assert_eq!(samples[1], 0.0);
+    }
+
+    #[test]
+    fn deinterleaves_float32_stereo() {
+        let left = [0.5f32, 0.3f32];
+        let right = [0.25f32, 0.1f32];
+        let left_bytes: Vec<u8> = left.iter().flat_map(|f| f.to_ne_bytes()).collect();
+        let right_bytes: Vec<u8> = right.iter().flat_map(|f| f.to_ne_bytes()).collect();
+
+        let buffers = [
+            AudioBuffer {
+                mNumberChannels: 1,
+                mDataByteSize: left_bytes.len() as u32,
+                mData: left_bytes.as_ptr() as *mut _,
+            },
+            AudioBuffer {
+                mNumberChannels: 1,
+                mDataByteSize: right_bytes.len() as u32,
+                mData: right_bytes.as_ptr() as *mut _,
+            },
+        ];
+
+        let result = deinterleave_buffers(&buffers, 2, PcmSampleFormat::Float32);
+
+        assert_eq!(result.len(), 4);
+        assert!((result[0] - 0.5).abs() < 1e-6);
+        assert!((result[1] - 0.25).abs() < 1e-6);
+        assert!((result[2] - 0.3).abs() < 1e-6);
+        assert!((result[3] - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn validate_asbd_rejects_zero_frames_per_packet() {
+        let asbd = AudioStreamBasicDescription {
+            mSampleRate: 48000.0,
+            mFormatID: K_AUDIO_FORMAT_LINEAR_PCM,
+            mFormatFlags: K_AUDIO_FORMAT_FLAG_IS_FLOAT,
+            mBytesPerPacket: 8,
+            mFramesPerPacket: 0,
+            mBytesPerFrame: 8,
+            mChannelsPerFrame: 2,
+            mBitsPerChannel: 32,
+            mReserved: 0,
+        };
+        assert!(validate_asbd(&asbd).is_err());
+    }
+
+    #[test]
+    fn validate_asbd_accepts_valid_description() {
+        let asbd = AudioStreamBasicDescription {
+            mSampleRate: 48000.0,
+            mFormatID: K_AUDIO_FORMAT_LINEAR_PCM,
+            mFormatFlags: K_AUDIO_FORMAT_FLAG_IS_FLOAT,
+            mBytesPerPacket: 8,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 8,
+            mChannelsPerFrame: 2,
+            mBitsPerChannel: 32,
+            mReserved: 0,
+        };
+        assert!(validate_asbd(&asbd).is_ok());
     }
 }
 
