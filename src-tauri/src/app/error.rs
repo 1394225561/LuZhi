@@ -28,6 +28,9 @@ pub enum AppError {
     AudioMixFailed {
         reason: String,
     },
+    CaptureStopTimeout {
+        reason: String,
+    },
 }
 
 impl Display for AppError {
@@ -53,6 +56,9 @@ impl Display for AppError {
             }
             AppError::AudioMixFailed { reason } => {
                 write!(formatter, "音频混音失败：{reason}")
+            }
+            AppError::CaptureStopTimeout { reason } => {
+                write!(formatter, "停止录制超时：{reason}")
             }
         }
     }

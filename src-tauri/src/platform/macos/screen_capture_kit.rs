@@ -687,7 +687,11 @@ impl ScreenCapture for MacScreenCapture {
                 )));
             }
 
-            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| {
+                AppError::CaptureStopTimeout {
+                    reason: "ScreenCaptureKit stopCaptureWithCompletionHandler 未在 5 秒内回调".to_string(),
+                }
+            })?;
         }
 
         self.stream = None;
