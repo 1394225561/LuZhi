@@ -189,42 +189,71 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
         return;
     }
 
-    let num_samples = cmsamplebuffer_get_num_samples(sample_buffer);
-    if num_samples <= 0 {
+    let pcm_format = match classify_pcm_format(basic) {
+        Ok(fmt) => fmt,
+        Err(_) => return,
+    };
+
+    // Two-call size query for AudioBufferList.
+    let mut needed_size = 0usize;
+    let mut block_buffer: *mut std::ffi::c_void = std::ptr::null_mut();
+
+    let size_status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sample_buffer as *const _,
+        &mut needed_size as *mut _,
+        std::ptr::null_mut(),
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        0,
+        &mut block_buffer as *mut _,
+    );
+
+    if size_status != 0 || needed_size == 0 {
         return;
     }
 
-    let total_samples = num_samples as usize * channels as usize;
-    let mut samples_f32: Vec<f32> = Vec::with_capacity(total_samples);
+    let mut storage = vec![0u8; needed_size];
+    let buffer_list = storage.as_mut_ptr() as *mut AudioBufferList;
 
-    let mut audio_buffer_list = std::mem::MaybeUninit::<AudioBufferList>::uninit();
-    let mut block_buffer: *mut std::ffi::c_void = std::ptr::null_mut();
-
-    let status = cmsamplebuffer_get_audio_buffer_list(
-        sample_buffer,
-        audio_buffer_list.as_mut_ptr() as *mut _,
-        std::mem::size_of::<AudioBufferList>() as isize,
+    let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sample_buffer as *const _,
+        std::ptr::null_mut(),
+        buffer_list,
+        needed_size as isize,
+        std::ptr::null(),
+        std::ptr::null(),
+        0,
         &mut block_buffer as *mut _,
     );
 
     if status != 0 {
+        if !block_buffer.is_null() {
+            cf_release(block_buffer as *const _);
+        }
         return;
     }
 
-    let buffer_list = audio_buffer_list.assume_init();
-    let num_buffers = buffer_list.mNumberBuffers;
-
-    for i in 0..num_buffers {
-        let buffer = buffer_list.mBuffers[i as usize];
-        let data_ptr = buffer.mData as *const f32;
-        let data_bytes = buffer.mDataByteSize as usize;
-        let num_floats = data_bytes / std::mem::size_of::<f32>();
-
-        if !data_ptr.is_null() {
-            for j in 0..num_floats {
-                samples_f32.push(*data_ptr.add(j));
-            }
+    // Validate bounds before pointer arithmetic.
+    let list_ref = &*buffer_list;
+    let num_buffers = list_ref.mNumberBuffers as usize;
+    let minimum_size = std::mem::size_of::<u32>() + num_buffers * std::mem::size_of::<AudioBuffer>();
+    if needed_size < minimum_size {
+        if !block_buffer.is_null() {
+            cf_release(block_buffer as *const _);
         }
+        return;
+    }
+
+    let mut samples_f32: Vec<f32> = Vec::new();
+    let first_buffer = list_ref.mBuffers.as_ptr();
+    for i in 0..num_buffers {
+        let buffer = *first_buffer.add(i);
+        if buffer.mData.is_null() || buffer.mDataByteSize == 0 {
+            continue;
+        }
+        let bytes = std::slice::from_raw_parts(buffer.mData as *const u8, buffer.mDataByteSize as usize);
+        samples_f32.extend(convert_pcm_bytes_to_f32(pcm_format, bytes));
     }
 
     if !block_buffer.is_null() {
@@ -390,24 +419,6 @@ unsafe fn cmformat_description_get_stream_basic_description(
 
 unsafe fn cmsamplebuffer_get_num_samples(sbuf: &CMSampleBuffer) -> isize {
     CMSampleBufferGetNumSamples(sbuf as *const _)
-}
-
-unsafe fn cmsamplebuffer_get_audio_buffer_list(
-    sbuf: &CMSampleBuffer,
-    buffer_list: *mut AudioBufferList,
-    buffer_list_size: isize,
-    block_buffer_out: *mut *mut std::ffi::c_void,
-) -> i32 {
-    CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-        sbuf as *const _,
-        std::ptr::null_mut(),
-        buffer_list,
-        buffer_list_size,
-        std::ptr::null(),
-        std::ptr::null(),
-        0,
-        block_buffer_out,
-    )
 }
 
 unsafe fn cf_release(ptr: *const std::ffi::c_void) {
@@ -751,6 +762,83 @@ impl AudioCapture for MacScreenCapture {
             supports_system_audio: true,
             supports_microphone: false,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audio format classification and sample conversion helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PcmSampleFormat {
+    Float32,
+    SignedInt16,
+}
+
+const K_AUDIO_FORMAT_LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
+const K_AUDIO_FORMAT_FLAG_IS_FLOAT: u32 = 1 << 0;
+const K_AUDIO_FORMAT_FLAG_IS_SIGNED_INTEGER: u32 = 1 << 2;
+
+fn classify_pcm_format(basic: &AudioStreamBasicDescription) -> AppResult<PcmSampleFormat> {
+    if basic.mFormatID != K_AUDIO_FORMAT_LINEAR_PCM {
+        return Err(AppError::AudioCaptureFailed {
+            reason: format!("不支持的音频格式 ID: {}", basic.mFormatID),
+        });
+    }
+
+    if basic.mBitsPerChannel == 32 && (basic.mFormatFlags & K_AUDIO_FORMAT_FLAG_IS_FLOAT) != 0 {
+        return Ok(PcmSampleFormat::Float32);
+    }
+
+    if basic.mBitsPerChannel == 16
+        && (basic.mFormatFlags & K_AUDIO_FORMAT_FLAG_IS_SIGNED_INTEGER) != 0
+    {
+        return Ok(PcmSampleFormat::SignedInt16);
+    }
+
+    Err(AppError::AudioCaptureFailed {
+        reason: format!(
+            "不支持的 PCM 位深或标志: bits={}, flags={}",
+            basic.mBitsPerChannel, basic.mFormatFlags
+        ),
+    })
+}
+
+fn convert_pcm_bytes_to_f32(format: PcmSampleFormat, bytes: &[u8]) -> Vec<f32> {
+    match format {
+        PcmSampleFormat::Float32 => bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect(),
+        PcmSampleFormat::SignedInt16 => bytes
+            .chunks_exact(2)
+            .map(|chunk| i16::from_ne_bytes([chunk[0], chunk[1]]) as f32 / i16::MAX as f32)
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod audio_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn converts_float32_pcm_bytes() {
+        let bytes = [0.5f32.to_ne_bytes(), (-0.25f32).to_ne_bytes()].concat();
+
+        let samples = convert_pcm_bytes_to_f32(PcmSampleFormat::Float32, &bytes);
+
+        assert!((samples[0] - 0.5).abs() < 1e-6);
+        assert!((samples[1] - (-0.25)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn converts_signed_int16_pcm_bytes() {
+        let bytes = [i16::MAX.to_ne_bytes(), 0i16.to_ne_bytes()].concat();
+
+        let samples = convert_pcm_bytes_to_f32(PcmSampleFormat::SignedInt16, &bytes);
+
+        assert!((samples[0] - 1.0).abs() < 1e-6);
+        assert_eq!(samples[1], 0.0);
     }
 }
 
