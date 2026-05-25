@@ -6,12 +6,12 @@ use super::macos::cpal_microphone::CpalMicrophoneCapture;
 use super::macos::screen_capture_kit::MacScreenCapture;
 use crate::app::error::AppResult;
 use crate::app::state_machine::{RecordingState, RecordingStateMachine};
-use crate::media::recording_writer::RecordingResult;
 use crate::core::capture::{AudioCapture, AudioConfig, ScreenCapture};
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
 use crate::media::audio_mixer::SimpleAudioMixer;
+use crate::media::recording_writer::RecordingResult;
 
 /// Non-generic recording service for macOS.
 ///
@@ -185,7 +185,9 @@ impl MacRecordingService {
 
             // Mix available audio sources.
             if latest_system.is_some() || latest_mic.is_some() {
-                if let Ok(_mixed) = synchronizer.mix_pair(latest_system.as_ref(), latest_mic.as_ref()) {
+                if let Ok(_mixed) =
+                    synchronizer.mix_pair(latest_system.as_ref(), latest_mic.as_ref())
+                {
                     // Mixed audio ready — encoding not yet implemented.
                 }
             }

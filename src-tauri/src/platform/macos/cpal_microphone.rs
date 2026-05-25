@@ -208,7 +208,10 @@ where
     f32: cpal::FromSample<T>,
 {
     let sink = Arc::new(Mutex::new(Some(sink)));
-    let sample_clock = Arc::new(crate::core::clock::AudioSampleClock::new(sample_rate, channels));
+    let sample_clock = Arc::new(crate::core::clock::AudioSampleClock::new(
+        sample_rate,
+        channels,
+    ));
 
     let stream = device
         .build_input_stream(

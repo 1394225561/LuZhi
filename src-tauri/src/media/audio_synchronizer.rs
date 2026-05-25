@@ -50,7 +50,12 @@ mod tests {
     fn mixes_pair_with_matching_timestamps() {
         let synchronizer = AudioSynchronizer::new(SimpleAudioMixer::new());
 
-        let mixed = synchronizer.mix_pair(Some(&chunk(0, vec![0.5, 0.5])), Some(&chunk(0, vec![0.25, 0.25]))).unwrap();
+        let mixed = synchronizer
+            .mix_pair(
+                Some(&chunk(0, vec![0.5, 0.5])),
+                Some(&chunk(0, vec![0.25, 0.25])),
+            )
+            .unwrap();
 
         assert_eq!(mixed.timestamp.nanos, 0);
         assert_eq!(mixed.sample_rate, 48_000);
@@ -61,7 +66,9 @@ mod tests {
     fn passes_single_available_source() {
         let synchronizer = AudioSynchronizer::new(SimpleAudioMixer::new());
 
-        let mixed = synchronizer.mix_pair(Some(&chunk(0, vec![0.5, 0.5])), None).unwrap();
+        let mixed = synchronizer
+            .mix_pair(Some(&chunk(0, vec![0.5, 0.5])), None)
+            .unwrap();
 
         assert_eq!(mixed.samples.len(), 2);
     }

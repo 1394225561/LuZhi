@@ -15,7 +15,10 @@ pub struct MediaReceiver<T> {
 }
 
 pub fn bounded_media_channel<T>(capacity: usize) -> (MediaSender<T>, MediaReceiver<T>) {
-    assert!(capacity > 0, "media channel capacity must be greater than zero");
+    assert!(
+        capacity > 0,
+        "media channel capacity must be greater than zero"
+    );
     let (inner_sender, inner_receiver) = sync_channel(capacity);
     let dropped = Arc::new(AtomicU64::new(0));
 

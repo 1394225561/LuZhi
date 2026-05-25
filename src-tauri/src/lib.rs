@@ -77,13 +77,22 @@ fn recording_permissions() -> PermissionPayload {
 
 #[tauri::command]
 async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let config = *state.capture_config.lock().map_err(|_| "捕获配置锁已损坏".to_string())?;
-    let audio_config = state.audio_config.lock().map_err(|_| "音频配置锁已损坏".to_string())?.clone();
+    let config = *state
+        .capture_config
+        .lock()
+        .map_err(|_| "捕获配置锁已损坏".to_string())?;
+    let audio_config = state
+        .audio_config
+        .lock()
+        .map_err(|_| "音频配置锁已损坏".to_string())?
+        .clone();
     let service = state.service.clone();
 
     let new_state = tauri::async_runtime::spawn_blocking(move || {
         let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
-        service.start(config, audio_config).map_err(|e| e.to_string())?;
+        service
+            .start(config, audio_config)
+            .map_err(|e| e.to_string())?;
         Ok::<_, String>(service.state())
     })
     .await
@@ -92,7 +101,10 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
     emit_state_changed(&app, new_state);
 
     let tick_app = app.clone();
-    let mut tick_runtime = state.tick_runtime.lock().map_err(|_| "计时器锁已损坏".to_string())?;
+    let mut tick_runtime = state
+        .tick_runtime
+        .lock()
+        .map_err(|_| "计时器锁已损坏".to_string())?;
     if let Some(mut existing) = tick_runtime.take() {
         existing.stop();
     }
@@ -109,7 +121,12 @@ async fn stop_recording(
     state: tauri::State<'_, AppState>,
 ) -> Result<RecordingResult, String> {
     // Stop the tick runtime first.
-    if let Some(mut tick) = state.tick_runtime.lock().map_err(|_| "计时器锁已损坏".to_string())?.take() {
+    if let Some(mut tick) = state
+        .tick_runtime
+        .lock()
+        .map_err(|_| "计时器锁已损坏".to_string())?
+        .take()
+    {
         tick.stop();
     }
 

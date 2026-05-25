@@ -150,7 +150,10 @@ unsafe fn handle_video_frame(delegate: &StreamOutput, sample_buffer: &CMSampleBu
     cvpixelbuffer_unlock_base_address(image_buffer, 0);
 
     let timestamp_nanos = extract_timestamp_nanos(sample_buffer);
-    let timestamp = delegate.ivars().timestamp_normalizer.normalize(timestamp_nanos);
+    let timestamp = delegate
+        .ivars()
+        .timestamp_normalizer
+        .normalize(timestamp_nanos);
 
     let frame = VideoFrame {
         timestamp,
@@ -237,7 +240,8 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
     // Validate bounds before pointer arithmetic.
     let list_ref = &*buffer_list;
     let num_buffers = list_ref.mNumberBuffers as usize;
-    let minimum_size = std::mem::size_of::<u32>() + num_buffers * std::mem::size_of::<AudioBuffer>();
+    let minimum_size =
+        std::mem::size_of::<u32>() + num_buffers * std::mem::size_of::<AudioBuffer>();
     if needed_size < minimum_size {
         if !block_buffer.is_null() {
             cf_release(block_buffer as *const _);
@@ -252,7 +256,8 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
         if buffer.mData.is_null() || buffer.mDataByteSize == 0 {
             continue;
         }
-        let bytes = std::slice::from_raw_parts(buffer.mData as *const u8, buffer.mDataByteSize as usize);
+        let bytes =
+            std::slice::from_raw_parts(buffer.mData as *const u8, buffer.mDataByteSize as usize);
         samples_f32.extend(convert_pcm_bytes_to_f32(pcm_format, bytes));
     }
 
@@ -265,7 +270,10 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
     }
 
     let timestamp_nanos = extract_timestamp_nanos(sample_buffer);
-    let timestamp = delegate.ivars().timestamp_normalizer.normalize(timestamp_nanos);
+    let timestamp = delegate
+        .ivars()
+        .timestamp_normalizer
+        .normalize(timestamp_nanos);
 
     let chunk = AudioChunk {
         timestamp,
@@ -687,11 +695,11 @@ impl ScreenCapture for MacScreenCapture {
                 )));
             }
 
-            rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| {
-                AppError::CaptureStopTimeout {
-                    reason: "ScreenCaptureKit stopCaptureWithCompletionHandler 未在 5 秒内回调".to_string(),
-                }
-            })?;
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| AppError::CaptureStopTimeout {
+                    reason: "ScreenCaptureKit stopCaptureWithCompletionHandler 未在 5 秒内回调"
+                        .to_string(),
+                })?;
         }
 
         self.stream = None;
