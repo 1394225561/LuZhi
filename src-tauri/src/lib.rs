@@ -138,9 +138,9 @@ fn resume_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
 #[serde(rename_all = "camelCase")]
 struct SetCaptureModePayload {
     mode: String,
-    width: u32,
-    height: u32,
-    fps: u32,
+    width: Option<u32>,
+    height: Option<u32>,
+    fps: Option<u32>,
 }
 
 #[tauri::command]
@@ -155,29 +155,35 @@ fn set_capture_mode(
     let mut config = state.capture_config.lock().unwrap();
     *config = CaptureConfig {
         mode,
-        width: payload.width,
-        height: payload.height,
-        fps: payload.fps,
+        width: payload.width.unwrap_or(1920),
+        height: payload.height.unwrap_or(1080),
+        fps: payload.fps.unwrap_or(30),
     };
     Ok(())
 }
 
-#[tauri::command]
-fn set_audio_config(
-    state: tauri::State<'_, AppState>,
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetAudioConfigPayload {
     capture_system_audio: bool,
     capture_microphone: bool,
     microphone_device: Option<String>,
     sample_rate: u32,
     channels: u16,
+}
+
+#[tauri::command]
+fn set_audio_config(
+    state: tauri::State<'_, AppState>,
+    payload: SetAudioConfigPayload,
 ) -> Result<(), String> {
     let mut config = state.audio_config.lock().unwrap();
     *config = AudioConfig {
-        capture_system_audio,
-        capture_microphone,
-        microphone_device,
-        sample_rate,
-        channels,
+        capture_system_audio: payload.capture_system_audio,
+        capture_microphone: payload.capture_microphone,
+        microphone_device: payload.microphone_device,
+        sample_rate: payload.sample_rate,
+        channels: payload.channels,
     };
     Ok(())
 }

@@ -12,6 +12,8 @@ import {
   stopRecording,
   pauseRecording,
   resumeRecording,
+  setCaptureMode,
+  setAudioConfig,
   onRecordingTick,
   onRecordingStateChanged,
   type RecordingPermissions,
@@ -23,6 +25,7 @@ type AppState = 'idle' | 'recording' | 'preview' | 'processing' | 'failed'
 export type RecordingResult = {
   durationSecs: number
   frameCount: number
+  mixedAudioChunkCount: number
   outputPath: string | null
 }
 
@@ -97,12 +100,20 @@ export default function App() {
     try {
       setElapsedTime(0)
       setIsPaused(false)
+      await setCaptureMode({ mode: recordingMode, width: 1920, height: 1080, fps: 30 })
+      await setAudioConfig({
+        captureSystemAudio: systemAudioEnabled,
+        captureMicrophone: micEnabled,
+        microphoneDevice: null,
+        sampleRate: 48000,
+        channels: 2,
+      })
       await startRecording()
     } catch (e) {
       setAppState('failed')
       setErrorMessage(String(e))
     }
-  }, [])
+  }, [recordingMode, systemAudioEnabled, micEnabled])
 
   const handlePauseRecording = useCallback(async () => {
     try {
@@ -122,6 +133,7 @@ export default function App() {
       setRecordingResult({
         durationSecs: result.duration_secs,
         frameCount: result.frame_count,
+        mixedAudioChunkCount: result.mixed_audio_chunk_count,
         outputPath: result.output_path ?? null,
       })
       setAppState('preview')

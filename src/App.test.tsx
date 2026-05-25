@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
@@ -73,5 +73,47 @@ describe('App', () => {
 
     expect(await screen.findByText('屏幕录制权限未授权，请在系统设置中开启')).toBeInTheDocument()
     expect(screen.getByText('麦克风权限未授权，请在系统设置中开启')).toBeInTheDocument()
+  })
+
+  it('sends set_capture_mode and set_audio_config before start_recording', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') {
+        return Promise.resolve({ state: 'idle', canStart: true })
+      }
+      if (command === 'recording_permissions') {
+        return Promise.resolve({
+          screenRecording: 'unknown',
+          microphone: 'unknown',
+        })
+      }
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    const startButtons = await screen.findAllByText('开始录制')
+    invokeMock.mockClear()
+    fireEvent.click(startButtons[0])
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledTimes(3)
+    })
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'set_capture_mode', {
+      payload: { mode: 'fullscreen', width: 1920, height: 1080, fps: 30 },
+    })
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'set_audio_config', {
+      payload: {
+        captureSystemAudio: true,
+        captureMicrophone: false,
+        microphoneDevice: null,
+        sampleRate: 48000,
+        channels: 2,
+      },
+    })
+    expect(invokeMock).toHaveBeenNthCalledWith(3, 'start_recording', undefined)
   })
 })

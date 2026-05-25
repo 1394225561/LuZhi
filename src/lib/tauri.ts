@@ -18,8 +18,18 @@ export type RecordingPermissions = {
 export type CaptureMode = 'fullscreen' | 'window' | 'area'
 
 export type AudioConfig = {
-  systemAudio: boolean
-  microphone: boolean
+  captureSystemAudio: boolean
+  captureMicrophone: boolean
+  microphoneDevice: string | null
+  sampleRate: number
+  channels: number
+}
+
+export type CaptureConfig = {
+  mode: CaptureMode
+  width?: number
+  height?: number
+  fps?: number
 }
 
 export type BeautifyConfig = {
@@ -35,6 +45,7 @@ export type ExportPreset = 'bilibili' | 'douyin' | 'xiaohongshu'
 export type RecordingResult = {
   duration_secs: number
   frame_count: number
+  mixed_audio_chunk_count: number
   output_path: string | null
 }
 
@@ -64,12 +75,12 @@ export async function stopRecording(): Promise<RecordingResult> {
   return invoke<RecordingResult>('stop_recording')
 }
 
-export async function setCaptureMode(mode: CaptureMode): Promise<void> {
-  return invoke('set_capture_mode', { mode })
+export async function setCaptureMode(config: CaptureConfig): Promise<void> {
+  return invoke('set_capture_mode', { payload: config })
 }
 
 export async function setAudioConfig(config: AudioConfig): Promise<void> {
-  return invoke('set_audio_config', { config })
+  return invoke('set_audio_config', { payload: config })
 }
 
 export async function setBeautifyConfig(config: BeautifyConfig): Promise<void> {
