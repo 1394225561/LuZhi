@@ -11,7 +11,7 @@ use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
 use crate::media::audio_mixer::SimpleAudioMixer;
-use crate::media::recording_writer::RecordingResult;
+use crate::media::recording_writer::{CountingRecordingWriter, RecordingResult, RecordingWriter};
 
 /// Non-generic recording service for macOS.
 ///
@@ -28,7 +28,7 @@ pub struct MacRecordingService {
     system_audio_receiver: Option<MediaReceiver<AudioChunk>>,
     mic_receiver: Option<MediaReceiver<AudioChunk>>,
     stop_flag: Option<Arc<AtomicBool>>,
-    consumer_handle: Option<thread::JoinHandle<()>>,
+    consumer_handle: Option<thread::JoinHandle<RecordingResult>>,
     frame_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -101,8 +101,9 @@ impl MacRecordingService {
         let frame_count = self.frame_count.clone();
         frame_count.store(0, Ordering::Relaxed);
 
+        let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
         self.consumer_handle = Some(thread::spawn(move || {
-            Self::consume_frames(stop_flag, video_rx, system_audio_rx, mic_rx, frame_count);
+            Self::consume_frames(stop_flag, video_rx, system_audio_rx, mic_rx, frame_count, writer)
         }));
 
         Ok(())
@@ -119,10 +120,22 @@ impl MacRecordingService {
         let capture_result = ScreenCapture::stop(&mut self.screen_capture);
         let mic_result = self.mic_capture.stop();
 
-        // Join the consumer thread.
-        if let Some(handle) = self.consumer_handle.take() {
-            let _ = handle.join();
-        }
+        // Join the consumer thread and get writer result.
+        let result = if let Some(handle) = self.consumer_handle.take() {
+            handle.join().unwrap_or_else(|_| RecordingResult {
+                duration_secs: 0,
+                frame_count: 0,
+                mixed_audio_chunk_count: 0,
+                output_path: None,
+            })
+        } else {
+            RecordingResult {
+                duration_secs: 0,
+                frame_count: 0,
+                mixed_audio_chunk_count: 0,
+                output_path: None,
+            }
+        };
 
         self.stop_flag = None;
 
@@ -132,13 +145,7 @@ impl MacRecordingService {
         self.state_machine.stop()?;
         self.state_machine.complete()?;
 
-        let frame_count = self.frame_count.load(Ordering::Relaxed);
-        Ok(RecordingResult {
-            duration_secs: 0,
-            frame_count,
-            mixed_audio_chunk_count: 0,
-            output_path: None,
-        })
+        Ok(result)
     }
 
     pub fn pause(&mut self) -> AppResult<()> {
@@ -156,7 +163,8 @@ impl MacRecordingService {
         system_audio_rx: MediaReceiver<AudioChunk>,
         mic_rx: Option<MediaReceiver<AudioChunk>>,
         frame_count: Arc<std::sync::atomic::AtomicU64>,
-    ) {
+        mut writer: Box<dyn RecordingWriter>,
+    ) -> RecordingResult {
         let synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
 
         loop {
@@ -165,8 +173,11 @@ impl MacRecordingService {
             }
 
             // Drain video frames (non-blocking).
-            while let Ok(_frame) = video_rx.try_recv() {
+            while let Ok(frame) = video_rx.try_recv() {
                 frame_count.fetch_add(1, Ordering::Relaxed);
+                if let Err(e) = writer.push_video(frame) {
+                    eprintln!("写入视频帧失败: {e}");
+                }
             }
 
             // Drain system audio — keep only the latest chunk.
@@ -185,16 +196,25 @@ impl MacRecordingService {
 
             // Mix available audio sources.
             if latest_system.is_some() || latest_mic.is_some() {
-                if let Ok(_mixed) =
+                if let Ok(mixed) =
                     synchronizer.mix_pair(latest_system.as_ref(), latest_mic.as_ref())
                 {
-                    // Mixed audio ready — encoding not yet implemented.
+                    if let Err(e) = writer.push_audio(mixed) {
+                        eprintln!("写入混音音频失败: {e}");
+                    }
                 }
             }
 
             // Sleep briefly to avoid busy-waiting.
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+
+        writer.finish().unwrap_or_else(|_| RecordingResult {
+            duration_secs: 0,
+            frame_count: 0,
+            mixed_audio_chunk_count: 0,
+            output_path: None,
+        })
     }
 }
 
