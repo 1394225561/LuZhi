@@ -13,7 +13,10 @@ use app::state_machine::RecordingState;
 use core::capture::AudioConfig;
 use core::config::CaptureConfig;
 use media::recording_writer::RecordingResult;
+#[cfg(target_os = "macos")]
 use platform::macos_service::MacRecordingService;
+#[cfg(not(target_os = "macos"))]
+compile_error!("LuZhi recording service currently supports macOS builds only; Windows app wiring requires a WindowsRecordingService.");
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 

@@ -1,5 +1,6 @@
 use crate::app::error::{AppError, AppResult};
-use crate::core::capture::{CaptureCapabilities, CaptureConfig, ScreenCapture, VideoFrameSink};
+use crate::core::capture::{CaptureCapabilities, ScreenCapture, VideoFrameSink};
+use crate::core::config::CaptureConfig;
 
 /// Windows screen capture stub using DXGI Desktop Duplication.
 ///
