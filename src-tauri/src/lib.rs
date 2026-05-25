@@ -134,15 +134,16 @@ async fn stop_recording(
 
     let (new_state, result) = tauri::async_runtime::spawn_blocking(move || {
         let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
-        let result = service.stop().map_err(|e| e.to_string())?;
-        Ok::<_, String>((service.state(), result))
+        let result = service.stop();
+        let new_state = service.state();
+        Ok::<_, String>((new_state, result))
     })
     .await
     .map_err(|e| format!("停止录制任务失败: {e}"))??;
 
     emit_state_changed(&app, new_state);
 
-    Ok(result)
+    result.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
