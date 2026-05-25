@@ -25,7 +25,7 @@ use crate::core::capture::{
     ScreenCapture, VideoFrameSink,
 };
 use crate::core::config::CaptureConfig;
-use crate::core::frame::{AudioChunk, FrameBuffer, MediaTimestamp, PixelFormat, VideoFrame};
+use crate::core::frame::{AudioChunk, FrameBuffer, PixelFormat, VideoFrame};
 
 // ---------------------------------------------------------------------------
 // Send wrapper for SCStream
@@ -52,6 +52,7 @@ unsafe impl Send for SendSCStream {}
 struct StreamOutputIvars {
     video_sink: Mutex<Option<VideoFrameSink>>,
     audio_sink: Mutex<Option<AudioChunkSink>>,
+    timestamp_normalizer: crate::core::clock::TimestampNormalizer,
 }
 
 // Only protocol conformance goes inside define_class! — all helper functions
@@ -96,6 +97,7 @@ impl StreamOutput {
         let this = Self::alloc().set_ivars(StreamOutputIvars {
             video_sink: Mutex::new(Some(video_sink)),
             audio_sink: Mutex::new(Some(audio_sink)),
+            timestamp_normalizer: crate::core::clock::TimestampNormalizer::default(),
         });
         unsafe { objc2::msg_send![super(this), init] }
     }
@@ -148,7 +150,7 @@ unsafe fn handle_video_frame(delegate: &StreamOutput, sample_buffer: &CMSampleBu
     cvpixelbuffer_unlock_base_address(image_buffer, 0);
 
     let timestamp_nanos = extract_timestamp_nanos(sample_buffer);
-    let timestamp = MediaTimestamp::from_nanos(timestamp_nanos);
+    let timestamp = delegate.ivars().timestamp_normalizer.normalize(timestamp_nanos);
 
     let frame = VideoFrame {
         timestamp,
@@ -234,7 +236,7 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
     }
 
     let timestamp_nanos = extract_timestamp_nanos(sample_buffer);
-    let timestamp = MediaTimestamp::from_nanos(timestamp_nanos);
+    let timestamp = delegate.ivars().timestamp_normalizer.normalize(timestamp_nanos);
 
     let chunk = AudioChunk {
         timestamp,

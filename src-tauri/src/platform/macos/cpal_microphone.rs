@@ -7,7 +7,7 @@ use crate::app::error::{AppError, AppResult};
 use crate::core::capture::{
     AudioCapabilities, AudioCapture, AudioChunkSink, AudioConfig, AudioDevice,
 };
-use crate::core::frame::{AudioChunk, MediaTimestamp};
+use crate::core::frame::AudioChunk;
 
 /// Wrapper to make `cpal::Stream` `Send`.
 ///
@@ -208,7 +208,7 @@ where
     f32: cpal::FromSample<T>,
 {
     let sink = Arc::new(Mutex::new(Some(sink)));
-    let _channels_usize = channels as usize;
+    let sample_clock = Arc::new(crate::core::clock::AudioSampleClock::new(sample_rate, channels));
 
     let stream = device
         .build_input_stream(
@@ -225,10 +225,7 @@ where
                     return;
                 }
 
-                // Use a monotonically increasing timestamp based on sample count.
-                // ⚠️ 人工审查：这里使用 sample count 作为 timestamp，
-                // 生产环境应使用系统时钟与视频帧对齐。
-                let timestamp = MediaTimestamp::from_nanos(0);
+                let timestamp = sample_clock.timestamp_for_interleaved_sample_count(samples.len());
 
                 let chunk = AudioChunk {
                     timestamp,
