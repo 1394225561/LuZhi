@@ -27,6 +27,7 @@ pub struct MacRecordingService {
     system_audio_receiver: Option<MediaReceiver<AudioChunk>>,
     mic_receiver: Option<MediaReceiver<AudioChunk>>,
     stop_flag: Option<Arc<AtomicBool>>,
+    consumer_handle: Option<thread::JoinHandle<()>>,
     frame_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -41,6 +42,7 @@ impl MacRecordingService {
             system_audio_receiver: None,
             mic_receiver: None,
             stop_flag: None,
+            consumer_handle: None,
             frame_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -98,9 +100,9 @@ impl MacRecordingService {
         let frame_count = self.frame_count.clone();
         frame_count.store(0, Ordering::Relaxed);
 
-        thread::spawn(move || {
+        self.consumer_handle = Some(thread::spawn(move || {
             Self::consume_frames(stop_flag, video_rx, system_audio_rx, mic_rx, frame_count);
-        });
+        }));
 
         Ok(())
     }
@@ -115,6 +117,11 @@ impl MacRecordingService {
         // Stop captures.
         let capture_result = ScreenCapture::stop(&mut self.screen_capture);
         let mic_result = self.mic_capture.stop();
+
+        // Join the consumer thread.
+        if let Some(handle) = self.consumer_handle.take() {
+            let _ = handle.join();
+        }
 
         self.stop_flag = None;
 
