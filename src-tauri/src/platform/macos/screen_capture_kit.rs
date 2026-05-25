@@ -328,7 +328,7 @@ extern "C" {
 
     fn CMSampleBufferGetNumSamples(sbuf: *const CMSampleBuffer) -> isize;
     fn CMSampleBufferGetFormatDescription(sbuf: *const CMSampleBuffer) -> CMFormatDescriptionRef;
-    fn CMFormatDescriptionGetStreamBasicDescription(
+    fn CMAudioFormatDescriptionGetStreamBasicDescription(
         desc: CMFormatDescriptionRef,
     ) -> *const AudioStreamBasicDescription;
     fn CMFormatDescriptionGetMediaSubType(desc: CMFormatDescriptionRef) -> u32;
@@ -383,7 +383,7 @@ unsafe fn cmsamplebuffer_get_format_description(
 unsafe fn cmformat_description_get_stream_basic_description(
     desc: CMFormatDescriptionRef,
 ) -> *const AudioStreamBasicDescription {
-    CMFormatDescriptionGetStreamBasicDescription(desc)
+    CMAudioFormatDescriptionGetStreamBasicDescription(desc)
 }
 
 unsafe fn cmsamplebuffer_get_num_samples(sbuf: &CMSampleBuffer) -> isize {
