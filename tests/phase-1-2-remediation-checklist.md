@@ -6,12 +6,12 @@
 
 ## 自动化验证
 
-- [ ] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过。
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` 通过。
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` 无 error。
-- [ ] `cargo build --manifest-path src-tauri/Cargo.toml` 通过，不再出现 CoreMedia 未定义符号。
-- [ ] `npm run build` 通过。
-- [ ] `npm test -- --run` 通过。
+- [x] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过。
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` 通过（43 tests）。
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` 无 error（FFI 命名 warning 可接受）。
+- [x] `cargo build --manifest-path src-tauri/Cargo.toml` 通过，不再出现 CoreMedia 未定义符号。
+- [x] `npm run build` 通过。
+- [x] `npm test -- --run` 通过（6 tests）。
 
 ## Phase 1 功能验收
 
@@ -60,18 +60,18 @@
 
 ## BUG.md 规则回归
 
-- [ ] `src-tauri/Cargo.toml` 保留 `tauri` 的 `macos-private-api` feature。
-- [ ] `src-tauri/tauri.conf.json` 保留 `macOSPrivateApi: true`。
-- [ ] `src-tauri/tauri.conf.json` 保留窗口 `transparent: true` 和 `acceptFirstMouse: true`。
-- [ ] `src-tauri/capabilities/default.json` 保留 `core:window:allow-start-dragging`。
-- [ ] 前端不再使用大容器级 `data-tauri-drag-region={false}`。
-- [ ] 交互元素仍通过 button/input/role/tabindex/contenteditable 选择器排除拖拽。
+- [x] `src-tauri/Cargo.toml` 保留 `tauri` 的 `macos-private-api` feature。
+- [x] `src-tauri/tauri.conf.json` 保留 `macOSPrivateApi: true`。
+- [x] `src-tauri/tauri.conf.json` 保留窗口 `transparent: true` 和 `acceptFirstMouse: true`。
+- [x] `src-tauri/capabilities/default.json` 保留 `core:window:allow-start-dragging`。
+- [x] 前端不再使用大容器级 `data-tauri-drag-region={false}`。
+- [x] 交互元素仍通过 button/input/role/tabindex/contenteditable 选择器排除拖拽。
 
 ## Windows 边界
 
-- [ ] macOS 构建不会编译 Windows DXGI/WASAPI stub。
-- [ ] Windows stub 文件中的 `CaptureConfig` 从 `crate::core::config` 导入。
-- [ ] 无 Windows 测试机时，`HANDOFF.md` 明确记录 Windows 可行性验证未执行。
+- [x] macOS 构建不会编译 Windows DXGI/WASAPI stub。
+- [x] Windows stub 文件中的 `CaptureConfig` 从 `crate::core::config` 导入。
+- [x] 无 Windows 测试机时，`HANDOFF.md` 明确记录 Windows 可行性验证未执行。
 - [ ] 有 Windows 测试机时，`cargo check --target x86_64-pc-windows-msvc` 结果已记录。
 
 ## 人工审查

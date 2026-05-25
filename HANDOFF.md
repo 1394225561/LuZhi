@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-24 | 端到端流水线连接：MacRecordingService + 前后端联调 + 帧消费
+> 最后更新：2026-05-25 | Phase 1/2 录制流水线整改完成
 > 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 5 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 5 条记录）”的结构顺序。
 
 ## 项目概述
@@ -71,19 +71,63 @@ W1-W12 Phase：
 
 ### 已知问题阻塞点
 
-1. [ ] **CoreMedia 链接错误阻塞 `npm run tauri dev`**
+1. [x] **CoreMedia 链接错误阻塞 `npm run tauri dev`**（已修复：2026-05-25）
    - **症状**：`cargo build --bin luzhi` 报 `_CMFormatDescriptionGetStreamBasicDescription` 符号未定义
-   - **根因**：`/System/Library/Frameworks/CoreMedia.framework/CoreMedia` 是断开的符号链接（指向 `Versions/Current/CoreMedia`，目标不存在）
-   - **影响**：`cargo build --lib` 和 `cargo test` 正常（不触发链接），但二进制构建失败，无法运行 `npm run tauri dev`
-   - **代码位置**：`src-tauri/src/platform/macos/screen_capture_kit.rs` 第 330 行 `extern "C"` 块中的 `CMFormatDescriptionGetStreamBasicDescription` 声明
-   - **修复方案**：
-     - 方案 A：修复系统 CoreMedia 框架（`sudo ln -sf Versions/A/CoreMedia /System/Library/Frameworks/CoreMedia.framework/Versions/Current/CoreMedia`）
-     - 方案 B：用 `objc2-core-media` crate 提供的安全绑定替代手写 `extern "C"` FFI
-     - 方案 C：手动实现 `CMFormatDescriptionGetStreamBasicDescription` 的逻辑（读取 format description 内部结构）
+   - **根因**：使用了错误的符号名 `CMFormatDescriptionGetStreamBasicDescription`，正确符号为 `CMAudioFormatDescriptionGetStreamBasicDescription`
+   - **修复**：Task 1 已替换为正确的 CoreMedia 音频格式符号，`cargo build` 通过
 
 ---
 
 ## 工作任务记录
+
+### 2026-05-25：Phase 1/2 录制流水线整改计划执行完成
+
+输入文件：
+
+- `docs/superpowers/plans/2026-05-25-phase-1-2-recording-pipeline-remediation.md`
+- `tests/phase-1-2-remediation-checklist.md`
+
+已完成（15 个 Task 全部完成）：
+
+1. **Task 1**：修复 CoreMedia 音频格式符号 `CMAudioFormatDescriptionGetStreamBasicDescription`
+2. **Task 2**：录制回调改为有界非阻塞媒体队列 `MediaSender`/`MediaReceiver`
+3. **Task 3**：ScreenCaptureKit 和 cpal 时间戳归一化（`TimestampNormalizer` + `AudioSampleClock`）
+4. **Task 4**：音频缓冲解析增加 PCM 格式判断和动态 `AudioBufferList` 分配
+5. **Task 5**：Tauri 录制命令迁移到 `spawn_blocking`，`TickRuntime` 可取消
+6. **Task 6**：`stopCaptureWithCompletionHandler` 超时返回 `CaptureStopTimeout` 错误
+7. **Task 7**：`AudioSynchronizer` 封装 `SimpleAudioMixer`，接入录制链路
+8. **Task 8**：`RecordingWriter` trait 抽象 + `CountingRecordingWriter` 测试实现
+9. **Task 9**：FFmpeg 生产写入器骨架（feature-gated `ffmpeg-next`）
+10. **Task 10**：前端/后端命令参数对齐（`setCaptureMode`/`setAudioConfig` payload）
+11. **Task 11**：权限探测改用 `PermissionService` + `MacPermissionProbe`
+12. **Task 12**：移除区域级 `data-tauri-drag-region={false}` 标记
+13. **Task 13**：Windows stub 编译边界修复（`CaptureConfig` 导入路径 + `compile_error!`）
+14. **Task 14**：自动化验证矩阵（fmt/clippy/test/build）
+15. **Task 15**：手动验收清单 + HANDOFF 更新
+
+验证结果：
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` 43 tests 通过
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` 无 error（FFI 命名 warning 可接受）
+- `cargo build --manifest-path src-tauri/Cargo.toml` 通过
+- `npm run build` 通过
+- `npm test -- --run` 6 tests 通过
+
+关键决策：
+
+- **有界非阻塞队列**：`try_send_drop_newest` 策略，队列满时丢弃最新帧，避免捕获回调阻塞
+- **会话相对时间戳**：第一个时间戳归零，解决跨源时间戳不一致问题
+- **动态 AudioBufferList 分配**：两步查询模式，避免固定大小缓冲区溢出
+- **FFmpeg feature gate**：`ffmpeg-next` 通过 Cargo feature 控制，开发环境可不安装
+
+后续入口：
+
+1. 进入 Phase 3 前，人工复审 ScreenCaptureKit/cpal unsafe 和资源释放路径
+2. Windows DXGI/WASAPI 在 Windows 测试机上执行可行性验证
+3. FFmpeg 写入器完整实现（编码 + 封装）
+
+---
 
 ### 2026-05-24：端到端录制流水线连接
 
