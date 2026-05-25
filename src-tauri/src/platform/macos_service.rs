@@ -149,6 +149,8 @@ impl MacRecordingService {
         mic_rx: Option<MediaReceiver<AudioChunk>>,
         frame_count: Arc<std::sync::atomic::AtomicU64>,
     ) {
+        let synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
+
         loop {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
@@ -159,15 +161,24 @@ impl MacRecordingService {
                 frame_count.fetch_add(1, Ordering::Relaxed);
             }
 
-            // Drain system audio (non-blocking).
-            while let Ok(_chunk) = system_audio_rx.try_recv() {
-                // Drain — encoding not yet implemented.
+            // Drain system audio — keep only the latest chunk.
+            let mut latest_system: Option<AudioChunk> = None;
+            while let Ok(chunk) = system_audio_rx.try_recv() {
+                latest_system = Some(chunk);
             }
 
-            // Drain microphone audio (non-blocking).
+            // Drain microphone audio — keep only the latest chunk.
+            let mut latest_mic: Option<AudioChunk> = None;
             if let Some(ref mic_rx) = mic_rx {
-                while let Ok(_chunk) = mic_rx.try_recv() {
-                    // Drain — encoding not yet implemented.
+                while let Ok(chunk) = mic_rx.try_recv() {
+                    latest_mic = Some(chunk);
+                }
+            }
+
+            // Mix available audio sources.
+            if latest_system.is_some() || latest_mic.is_some() {
+                if let Ok(_mixed) = synchronizer.mix_pair(latest_system.as_ref(), latest_mic.as_ref()) {
+                    // Mixed audio ready — encoding not yet implemented.
                 }
             }
 
