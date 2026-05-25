@@ -481,6 +481,7 @@ impl MacScreenCapture {
     fn start_stream(
         &mut self,
         config: &CaptureConfig,
+        capture_system_audio: bool,
         video_sink: VideoFrameSink,
         audio_sink: AudioChunkSink,
     ) -> AppResult<()> {
@@ -515,7 +516,7 @@ impl MacScreenCapture {
         unsafe {
             stream_config.setWidth(config.width as usize);
             stream_config.setHeight(config.height as usize);
-            stream_config.setCapturesAudio(true);
+            stream_config.setCapturesAudio(capture_system_audio);
             stream_config.setSampleRate(48000);
             stream_config.setChannelCount(2);
             stream_config.setShowsCursor(true);
@@ -561,16 +562,18 @@ impl MacScreenCapture {
             }
         }
 
-        // Add stream output for system audio.
-        unsafe {
-            if let Err(e) = stream.addStreamOutput_type_sampleHandlerQueue_error(
-                objc2::runtime::ProtocolObject::from_ref(&*delegate),
-                SCStreamOutputType::Audio,
-                None,
-            ) {
-                return Err(AppError::CaptureFailed {
-                    reason: format!("添加音频输出失败: {}", e),
-                });
+        // Add stream output for system audio (only if enabled).
+        if capture_system_audio {
+            unsafe {
+                if let Err(e) = stream.addStreamOutput_type_sampleHandlerQueue_error(
+                    objc2::runtime::ProtocolObject::from_ref(&*delegate),
+                    SCStreamOutputType::Audio,
+                    None,
+                ) {
+                    return Err(AppError::CaptureFailed {
+                        reason: format!("添加音频输出失败: {}", e),
+                    });
+                }
             }
         }
 
@@ -668,7 +671,7 @@ impl ScreenCapture for MacScreenCapture {
             tx
         });
 
-        self.start_stream(&config, sink, audio_sink)
+        self.start_stream(&config, true, sink, audio_sink)
     }
 
     fn stop(&mut self) -> AppResult<()> {
@@ -731,6 +734,7 @@ impl MacScreenCapture {
     pub fn start_combined(
         &mut self,
         config: CaptureConfig,
+        capture_system_audio: bool,
         video_sink: VideoFrameSink,
         audio_sink: AudioChunkSink,
     ) -> AppResult<()> {
@@ -740,7 +744,7 @@ impl MacScreenCapture {
                 action: "start",
             });
         }
-        self.start_stream(&config, video_sink, audio_sink)
+        self.start_stream(&config, capture_system_audio, video_sink, audio_sink)
     }
 }
 

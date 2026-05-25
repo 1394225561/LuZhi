@@ -69,7 +69,7 @@ impl MacRecordingService {
         // Start the unified SCStream with both sinks.
         if let Err(error) = self
             .screen_capture
-            .start_combined(config, video_sender, audio_sender)
+            .start_combined(config, audio_config.capture_system_audio, video_sender, audio_sender)
         {
             self.state_machine.fail();
             return Err(error);
