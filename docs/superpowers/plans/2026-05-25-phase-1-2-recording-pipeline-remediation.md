@@ -2237,6 +2237,409 @@ Phase 2 remediation is complete only when:
 - Native stop timeout is surfaced as an error instead of silently releasing Rust handles.
 - Windows stubs are build-safe or the missing Windows validation is explicitly documented.
 
+## 2026-05-25 Round 2 Code Review Findings
+
+> Review input: first remediation implementation after `tests/phase-1-2-remediation-checklist.md` was partially checked.
+> Review focus: Phase 1/2 task completeness, Phase 2 capture hot path blocking risk, memory safety, thread safety, and resource release paths.
+
+### Fresh Verification Evidence
+
+Commands run during this review:
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+```
+
+Observed results:
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` exited 0.
+- `cargo test --manifest-path src-tauri/Cargo.toml` passed `43` Rust tests.
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` exited 0, but still emitted warnings in the macOS FFI files.
+- `cargo build --manifest-path src-tauri/Cargo.toml` exited 0, but still emitted warnings in the macOS FFI files.
+- `npm run build` exited 0.
+- `npm test -- --run` passed `6` Vitest tests.
+- `cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc` did not reach code checking on this machine because the Rust target is not installed:
+
+```text
+error[E0463]: can't find crate for `std`
+= note: the `x86_64-pc-windows-msvc` target may not be installed
+```
+
+### Completion Judgment
+
+Phase 1 status: **partially complete, not accepted yet**.
+
+- Completed: macOS binary build blocker fixed, Tauri command path moved to `spawn_blocking`, bounded queues are present, UI can call Rust commands, Rust-side media flow does not send frames/audio to frontend JS.
+- Not complete: no playable local recording artifact is produced, `stop_recording` is not proven to return `frame_count > 0`, frontend does not correctly read the returned recording result shape, and real permission probing remains a placeholder.
+
+Phase 2 status: **incomplete**.
+
+- Completed: audio data types, cpal microphone capture, ScreenCaptureKit system audio extraction, `SimpleAudioMixer`, `AudioSynchronizer`, and bounded audio queues exist.
+- Not complete: mixed audio is not delivered to a writer, `mixed_audio_chunk_count` is always `0`, the system-audio toggle is ignored by the backend, timestamp pairing is not continuous, and the native audio callback path still contains avoidable locking.
+
+### Blocking Findings
+
+#### R2-001 Critical: Recording writer boundary exists but is not wired into the real recording pipeline
+
+Evidence:
+
+- `src-tauri/src/platform/macos_service.rs`
+  - `consume_frames()` counts video frames but discards the actual `VideoFrameRef`.
+  - `consume_frames()` creates mixed audio but discards the `MixedAudioChunk`.
+  - `stop()` returns `mixed_audio_chunk_count: 0` and `output_path: None`.
+- `src-tauri/src/media/ffmpeg_writer.rs`
+  - `FfmpegRecordingWriter` is only a feature-gated skeleton and does not encode or mux media.
+
+Impact:
+
+- Phase 1 cannot satisfy "录制结束后产出可播放视频文件".
+- Phase 2 cannot satisfy "Mixed audio reaches the writer" or "录制文件包含音频轨道".
+- Manual checklist items for `frame_count > 0`, `mixed_audio_chunk_count > 0`, and playable `output_path` remain unaccepted.
+
+Required remediation:
+
+- Pass a `RecordingWriter` into the consumer thread.
+- Call `writer.push_video(frame)` for every drained video frame.
+- Call `writer.push_audio(mixed)` for every mixed audio chunk.
+- Return `writer.finish()` from `MacRecordingService::stop()`.
+- For non-FFmpeg builds, use `CountingRecordingWriter` only as an explicit development fallback and make the returned `output_path` remain `None`.
+- Do not mark artifact acceptance complete until a real writer creates a playable file with an audio track.
+
+Verification:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml media::recording_writer
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run build
+```
+
+Manual acceptance after real writer is enabled:
+
+```text
+1. Start a 1080p recording for at least 5 seconds.
+2. Stop recording.
+3. Confirm returned frameCount > 0.
+4. Confirm returned mixedAudioChunkCount > 0 when audio is enabled.
+5. Confirm returned outputPath exists.
+6. Confirm the outputPath opens as a playable local file with video and audio tracks.
+```
+
+#### R2-002 Important: Frontend and backend recording result field names are mismatched
+
+Evidence:
+
+- `src-tauri/src/media/recording_writer.rs` derives `#[serde(rename_all = "camelCase")]` for `RecordingResult`.
+- `src/lib/tauri.ts` defines `RecordingResult` with snake_case fields: `duration_secs`, `frame_count`, `mixed_audio_chunk_count`, `output_path`.
+- `src/App.tsx` reads snake_case fields from `stopRecording()` result.
+
+Impact:
+
+- Once `stop_recording` returns a result, the frontend will read `undefined` for duration, frame count, mixed audio count, and output path.
+- Preview UI cannot reliably display recording statistics or load the produced artifact.
+
+Required remediation:
+
+- Change TypeScript result shape to camelCase:
+
+```ts
+export type RecordingResult = {
+  durationSecs: number
+  frameCount: number
+  mixedAudioChunkCount: number
+  outputPath: string | null
+}
+```
+
+- Change `handleStopRecording` in `src/App.tsx` to read camelCase:
+
+```ts
+setRecordingResult({
+  durationSecs: result.durationSecs,
+  frameCount: result.frameCount,
+  mixedAudioChunkCount: result.mixedAudioChunkCount,
+  outputPath: result.outputPath ?? null,
+})
+```
+
+- Add a Vitest case where `stop_recording` resolves with camelCase fields and the preview displays the returned frame count.
+
+Verification:
+
+```bash
+npm test -- --run
+npm run build
+```
+
+#### R2-003 Important: Backend ignores `captureSystemAudio`
+
+Evidence:
+
+- `src/App.tsx` sends `captureSystemAudio` through `set_audio_config`.
+- `src-tauri/src/lib.rs` stores `capture_system_audio` in `AudioConfig`.
+- `src-tauri/src/platform/macos_service.rs` always creates the system audio channel and always calls `MacScreenCapture::start_combined(config, video_sender, audio_sender)`.
+- `src-tauri/src/platform/macos/screen_capture_kit.rs` always calls `stream_config.setCapturesAudio(true)`.
+
+Impact:
+
+- User disabling system audio in the UI still causes ScreenCaptureKit system audio capture to be requested.
+- Permission prompts and capture behavior can diverge from UI state.
+
+Required remediation:
+
+- Thread `capture_system_audio` into the `MacScreenCapture` start path.
+- Set `stream_config.setCapturesAudio(audio_config.capture_system_audio)`.
+- If system audio is disabled, either avoid adding `SCStreamOutputType::Audio` or attach a sink that is intentionally unused and cannot affect result counters.
+- Add a unit test or adapter-level test seam proving disabled system audio does not push system chunks.
+
+Verification:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+npm test -- --run
+```
+
+Manual acceptance:
+
+```text
+1. Disable system audio in the UI.
+2. Start and stop recording.
+3. Confirm no system audio chunks are counted or mixed.
+4. Enable system audio and repeat.
+5. Confirm system audio chunks can contribute to mixedAudioChunkCount.
+```
+
+#### R2-004 Important: Audio synchronizer is not a continuous timestamp pairing stage
+
+Evidence:
+
+- `src-tauri/src/platform/macos_service.rs::consume_frames()` drains all available system audio but keeps only the latest chunk.
+- The same loop drains all available microphone audio but keeps only the latest chunk.
+- It then mixes only one latest system chunk and one latest microphone chunk per 10 ms loop.
+- `AudioSampleClock` starts microphone timestamps at zero independently from ScreenCaptureKit's first sample timestamp.
+
+Impact:
+
+- Audio chunks can be dropped before reaching the mixer even when queues are healthy.
+- Mixed audio can contain gaps or mismatched pairs.
+- "timestamp-based alignment" exists at the mixer level but is not yet implemented as a real stream synchronization stage.
+
+Required remediation:
+
+- Replace latest-only draining with ordered audio queues inside the consumer thread.
+- Pair chunks by timestamp window and mix each pair exactly once.
+- Preserve single-source chunks as mixed output when only one enabled source is available.
+- Track `mixed_audio_chunk_count` from actual writer pushes.
+- Add tests covering:
+  - system-only recording,
+  - mic-only recording,
+  - both sources with matching timestamps,
+  - both sources with offset timestamps,
+  - no duplicate mixing of the same chunk.
+
+Verification:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml media::audio_synchronizer
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+#### R2-005 Important: cpal audio callback still locks mutexes on the hot path
+
+Evidence:
+
+- `src-tauri/src/platform/macos/cpal_microphone.rs::build_input_stream()` locks `running` on every audio callback.
+- The same callback locks `sink` before sending.
+- `CpalMicrophoneCapture::start()` and `stop()` lock the same `running` state.
+
+Impact:
+
+- The cpal audio IO callback can block on a mutex, increasing underrun/dropout risk.
+- This conflicts with the Phase 2 review focus on avoiding capture hot path blocking.
+
+Required remediation:
+
+- Replace `Arc<Mutex<bool>>` with `Arc<AtomicBool>` for `running`.
+- Remove `Arc<Mutex<Option<AudioChunkSink>>>` around the sink; move a cloned `MediaSender<AudioChunk>` directly into the callback.
+- Keep `try_send_drop_newest()` as the only channel operation in the callback.
+- Do not log synchronously from the callback beyond the existing cpal error callback path.
+
+Verification:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+```
+
+Manual acceptance:
+
+```text
+1. Record with microphone enabled for at least 3 minutes.
+2. Confirm no obvious audio dropouts or UI stalls.
+3. Stop and restart recording 5 times.
+4. Confirm no crash and no stale recording-tick events.
+```
+
+#### R2-006 Important: Stop timeout leaves the recording service in an awkward state
+
+Evidence:
+
+- `src-tauri/src/platform/macos/screen_capture_kit.rs::stop()` clears delegate sinks before `stopCaptureWithCompletionHandler`.
+- If the stop completion callback times out, `stop()` returns `CaptureStopTimeout` before setting `self.stream = None`, `self.delegate = None`, or `self.running = false`.
+- `src-tauri/src/platform/macos_service.rs::stop()` returns early on `capture_result?` before moving the state machine to `Processing` or `Completed`.
+- `src-tauri/src/lib.rs::stop_recording()` stops the tick runtime before calling the service stop path.
+
+Impact:
+
+- UI tick can stop while backend state remains `Recording`.
+- A later `start_recording` can be rejected by the state machine or `MacScreenCapture::running`.
+- Native handles may remain retained after an error path.
+
+Required remediation:
+
+- Decide and document the timeout policy:
+  - strict policy: keep native handles for safety, mark state as `Failed`, and surface a recoverable error to UI; or
+  - cleanup policy: clear Rust handles after timeout only after confirming ScreenCaptureKit callbacks cannot use freed objects.
+- Ensure `MacRecordingService::stop()` sets the app state to `Failed` when stop fails.
+- Emit `recording-state-changed` with `failed` on stop failure.
+- Keep tick cancellation, but include an error-state transition so the UI does not appear idle while backend remains recording.
+
+Verification:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml app::state_machine
+cargo test --manifest-path src-tauri/Cargo.toml
+npm test -- --run
+```
+
+Manual acceptance:
+
+```text
+1. Simulate or force a stop timeout path.
+2. Confirm stop_recording returns a Chinese structured error.
+3. Confirm recording-state-changed emits failed.
+4. Confirm a later start attempt either works after cleanup or returns a clear recoverable error.
+```
+
+#### R2-007 Moderate: ScreenCaptureKit audio buffer parsing needs another native safety pass
+
+Evidence:
+
+- `AudioBufferList` is represented with a one-element trailing array and then indexed via pointer arithmetic.
+- The minimum-size check uses `size_of::<u32>() + num_buffers * size_of::<AudioBuffer>()`, which does not explicitly use the offset of `mBuffers`.
+- `classify_pcm_format()` checks format id, float/signed-int flags, and bit depth, but does not verify interleaving, endian flags, `mBytesPerFrame`, or packet/frame consistency.
+- Multiple buffers are appended sequentially, which is not equivalent to interleaved stereo if CoreAudio returns non-interleaved buffers.
+
+Impact:
+
+- Some valid CoreAudio layouts may be converted incorrectly.
+- Non-interleaved system audio can be misinterpreted as interleaved audio.
+- This remains a human-review gate before Phase 2 can be accepted.
+
+Required remediation:
+
+- Add explicit handling for interleaved vs non-interleaved PCM.
+- Validate `mBytesPerFrame`, `mFramesPerPacket`, `mBytesPerPacket`, channel count, and byte order assumptions.
+- Convert non-interleaved buffers into interleaved `f32` samples before creating `AudioChunk`.
+- Add tests for conversion helpers using:
+  - interleaved float32 stereo,
+  - interleaved signed int16 stereo,
+  - non-interleaved float32 stereo,
+  - unsupported endian/layout flags.
+
+Verification:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml platform::macos::screen_capture_kit::audio_conversion_tests
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Manual review gate:
+
+```text
+Human reviewer must inspect ScreenCaptureKit AudioBufferList ownership, layout handling, retained block buffer release, and callback lifetime assumptions before marking this accepted.
+```
+
+#### R2-008 Moderate: macOS permission probe is still a placeholder
+
+Evidence:
+
+- `src-tauri/src/platform/macos/permissions.rs::MacPermissionProbe` returns `PermissionStatus::Unknown` for both screen recording and microphone.
+
+Impact:
+
+- UI cannot display accurate `denied` or `notDetermined` permission state.
+- Phase 1 acceptance around permission guidance remains weak.
+
+Required remediation:
+
+- Keep the `PermissionService` boundary.
+- Add native macOS permission status calls only after the native safety gate.
+- Until native calls are implemented, document `Unknown` as an explicit temporary limitation and do not mark permission detection as fully complete.
+
+Verification after native permission calls are added:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml app::permission_service
+npm test -- --run
+```
+
+Manual acceptance:
+
+```text
+1. Run with Screen Recording permission denied.
+2. Confirm UI shows a Chinese denied message.
+3. Run with Microphone permission denied.
+4. Confirm UI shows a Chinese denied message.
+5. Grant both permissions.
+6. Confirm UI no longer shows denied warnings.
+```
+
+### Round 2 Remediation Task List
+
+Use this list as the execution order for the second remediation pass:
+
+1. [ ] Fix frontend `RecordingResult` camelCase contract and add Vitest coverage.
+2. [ ] Wire `RecordingWriter` into `MacRecordingService` and return writer-derived counts.
+3. [ ] Preserve and count mixed audio chunks instead of discarding them.
+4. [ ] Respect `captureSystemAudio` in ScreenCaptureKit configuration and output registration.
+5. [ ] Replace latest-only audio draining with ordered timestamp pairing.
+6. [ ] Remove mutex locking from the cpal audio callback hot path.
+7. [ ] Define and implement a consistent stop-timeout state/resource policy.
+8. [ ] Harden ScreenCaptureKit audio layout parsing and add conversion tests.
+9. [ ] Document or implement real macOS permission probing.
+10. [ ] Re-run full automated verification and update `tests/phase-1-2-remediation-checklist.md`.
+11. [ ] Run manual artifact/audio acceptance before marking Phase 1/2 complete.
+
+### Round 2 Definition of Done
+
+Round 2 remediation is complete only when:
+
+- `stop_recording` returns frontend-readable camelCase fields.
+- `frameCount > 0` after a real macOS recording.
+- `mixedAudioChunkCount > 0` when at least one audio source is enabled and produces chunks.
+- System audio disabled in UI means ScreenCaptureKit does not request or count system audio.
+- Capture callbacks use bounded non-blocking sends and no avoidable mutex locks on cpal's audio callback path.
+- Stop timeout produces a structured Chinese error and a consistent app state transition.
+- Native resource release behavior is documented for normal stop, failed stop, and timeout stop.
+- The artifact writer is either explicitly documented as not yet active or produces a playable local file with an audio track.
+- All unchecked manual items in `tests/phase-1-2-remediation-checklist.md` are either checked with evidence or left unchecked with a dated reason.
+- Full verification commands pass or their blockers are documented:
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+```
+
 ## Self-Review
 
 - Spec coverage: The plan maps each audit finding to a task: build blocker (Task 1), unbounded channels (Task 2), timestamp mismatch (Task 3), unsafe audio extraction (Task 4), command blocking and tick leaks (Task 5), stop timeout (Task 6), missing mix pipeline (Task 7), missing writer boundary/artifact (Tasks 8-9), command payload mismatch (Task 10), permissions (Task 11), BUG.md drag rule (Task 12), Windows boundary (Task 13), verification (Tasks 14-15).
