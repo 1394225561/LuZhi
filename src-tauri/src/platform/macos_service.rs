@@ -223,6 +223,36 @@ impl MacRecordingService {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
+        // Final drain: captures have been stopped, drain everything remaining
+        // before finalizing the writer.
+        while let Ok(frame) = video_rx.try_recv() {
+            frame_count.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = writer.push_video(frame) {
+                eprintln!("写入视频帧失败: {e}");
+            }
+        }
+
+        while let Ok(chunk) = system_audio_rx.try_recv() {
+            synchronizer.push_system(chunk);
+        }
+
+        if let Some(ref mic_rx) = mic_rx {
+            while let Ok(chunk) = mic_rx.try_recv() {
+                synchronizer.push_mic(chunk);
+            }
+        }
+
+        for mixed_result in synchronizer.drain_mixed() {
+            match mixed_result {
+                Ok(mixed) => {
+                    if let Err(e) = writer.push_audio(mixed) {
+                        eprintln!("写入混音音频失败: {e}");
+                    }
+                }
+                Err(e) => eprintln!("音频混合失败: {e}"),
+            }
+        }
+
         writer.finish().unwrap_or_else(|_| RecordingResult {
             duration_secs: 0,
             frame_count: 0,
