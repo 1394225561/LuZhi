@@ -213,10 +213,15 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
         std::ptr::null(),
         std::ptr::null(),
         0,
-        &mut block_buffer as *mut _,
+        // Pass null for block_buffer_out on the size-query call —
+        // we only need needed_size here and there is nothing to retain.
+        std::ptr::null_mut(),
     );
 
     if size_status != 0 || needed_size == 0 {
+        if !block_buffer.is_null() {
+            cf_release(block_buffer as *const _);
+        }
         return;
     }
 
@@ -477,6 +482,10 @@ pub struct MacScreenCapture {
     stream: Option<SendSCStream>,
     delegate: Option<Retained<StreamOutput>>,
     running: bool,
+    /// True when a previous stop timed out. The stream/delegate handles are
+    /// kept alive (SCKit callbacks may still reference them), but `running`
+    /// is false so the caller can attempt a fresh start.
+    needs_reset: bool,
     audio_sink: Option<AudioChunkSink>,
 }
 
@@ -486,6 +495,7 @@ impl MacScreenCapture {
             stream: None,
             delegate: None,
             running: false,
+            needs_reset: false,
             audio_sink: None,
         }
     }
@@ -500,6 +510,15 @@ impl MacScreenCapture {
         audio_sink: AudioChunkSink,
     ) -> AppResult<()> {
         use objc2_foundation::NSArray;
+
+        // If a previous stop timed out, drop stale native handles before
+        // creating new ones. We are on the caller's thread (not a callback),
+        // so releasing Retained objects here is safe.
+        if self.needs_reset {
+            self.stream = None;
+            self.delegate = None;
+            self.needs_reset = false;
+        }
 
         // ⚠️ 人工审查：此调用阻塞当前线程等待异步回调。
         // 不应在 Tauri 主线程调用，否则可能死锁。
@@ -712,16 +731,31 @@ impl ScreenCapture for MacScreenCapture {
                 )));
             }
 
-            rx.recv_timeout(std::time::Duration::from_secs(5))
-                .map_err(|_| AppError::CaptureStopTimeout {
-                    reason: "ScreenCaptureKit stopCaptureWithCompletionHandler 未在 5 秒内回调"
-                        .to_string(),
-                })?;
+            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(()) => {
+                    // Normal stop: clean up all handles.
+                    self.stream = None;
+                    self.delegate = None;
+                    self.running = false;
+                    self.needs_reset = false;
+                }
+                Err(_) => {
+                    // Timeout: keep native handles alive (SCKit callbacks
+                    // may still reference them), but mark running=false so
+                    // the caller can retry. Stale handles are dropped in
+                    // start_stream() via needs_reset.
+                    self.running = false;
+                    self.needs_reset = true;
+                    return Err(AppError::CaptureStopTimeout {
+                        reason: "ScreenCaptureKit stopCaptureWithCompletionHandler 未在 5 秒内回调"
+                            .to_string(),
+                    });
+                }
+            }
+        } else {
+            self.running = false;
+            self.needs_reset = false;
         }
-
-        self.stream = None;
-        self.delegate = None;
-        self.running = false;
 
         Ok(())
     }
