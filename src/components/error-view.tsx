@@ -20,7 +20,7 @@ export function ErrorView({ message, onRetry, onBack }: ErrorViewProps) {
         <AlertCircle className="w-10 h-10 text-destructive" />
         <h2 className="text-lg font-semibold text-foreground">录制失败</h2>
         <p className="text-sm text-muted-foreground">{message}</p>
-        <div className="flex gap-3 mt-2" data-tauri-drag-region={false}>
+        <div className="flex gap-3 mt-2">
           {onRetry && (
             <Button variant="outline" onClick={onRetry}>
               <RotateCcw className="w-4 h-4 mr-2" />

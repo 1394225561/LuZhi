@@ -133,6 +133,18 @@ describe('App', () => {
     expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
   })
 
+  it('error view does not contain false drag-region markers', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'failed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('录制失败')
+    expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+  })
+
   it('displays recording result after stop with camelCase fields', async () => {
     const { listen } = await import('@tauri-apps/api/event')
     const stateCallbacks: Array<(status: { state: string }) => void> = []
