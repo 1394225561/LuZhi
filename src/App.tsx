@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence } from 'framer-motion'
 import { RecordingPanel } from '@/components/recording-panel'
 import { RecordingStatusBar } from '@/components/recording-status-bar'
@@ -16,6 +16,7 @@ import {
   setAudioConfig,
   onRecordingTick,
   onRecordingStateChanged,
+  onMicLevel,
   type RecordingPermissions,
   type RecordingResult,
   type RecordingStatus,
@@ -23,12 +24,15 @@ import {
 
 type AppState = 'idle' | 'recording' | 'preview' | 'processing' | 'failed'
 
+const DEFAULT_RESOLUTION = { width: 1920, height: 1080, label: '1080p (1920×1080)' }
+const DEFAULT_FPS = 30
+
 export default function App() {
   const [appState, setAppState] = useState<AppState>('idle')
   const [recordingMode, setRecordingMode] = useState<'fullscreen' | 'window' | 'area'>('fullscreen')
   const [systemAudioEnabled, setSystemAudioEnabled] = useState(true)
   const [micEnabled, setMicEnabled] = useState(false)
-  const [micVolume, setMicVolume] = useState(60)
+  const [micVolume, setMicVolume] = useState(0)
   const [elapsedTime, setElapsedTime] = useState(0)
   const [isPaused, setIsPaused] = useState(false)
   const [permissions, setPermissions] = useState<RecordingPermissions>({
@@ -37,6 +41,10 @@ export default function App() {
   })
   const [errorMessage, setErrorMessage] = useState('')
   const [recordingResult, setRecordingResult] = useState<RecordingResult | null>(null)
+  const [resolution, setResolution] = useState(DEFAULT_RESOLUTION)
+  const [fps, setFps] = useState(DEFAULT_FPS)
+  const isStartingRef = useRef(false)
+  const isStoppingRef = useRef(false)
 
   // 从 Tauri 后端获取初始状态
   useEffect(() => {
@@ -56,17 +64,27 @@ export default function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined
     void onRecordingStateChanged((status) => {
-      if (status.state === 'idle') setAppState('idle')
+      if (status.state === 'idle') {
+        setAppState('idle')
+        isStartingRef.current = false
+        isStoppingRef.current = false
+      }
       else if (status.state === 'recording') {
         setAppState('recording')
         setIsPaused(false)
+        isStartingRef.current = false
       }
       else if (status.state === 'paused') setIsPaused(true)
       else if (status.state === 'processing') setAppState('processing')
-      else if (status.state === 'completed') setAppState('preview')
+      else if (status.state === 'completed') {
+        setAppState('preview')
+        isStoppingRef.current = false
+      }
       else if (status.state === 'failed') {
         setAppState('failed')
         setErrorMessage('录制过程中发生错误')
+        isStartingRef.current = false
+        isStoppingRef.current = false
       }
     }).then((fn) => { unlisten = fn })
     return () => { unlisten?.() }
@@ -81,20 +99,40 @@ export default function App() {
     return () => { unlisten?.() }
   }, [])
 
-  // 模拟麦克风音量变化（后续替换为 Tauri event 'mic-level'）
+  // 监听真实麦克风电平事件
   useEffect(() => {
-    if (!micEnabled) return
-    const interval = setInterval(() => {
-      setMicVolume(Math.floor(Math.random() * 60) + 20)
-    }, 200)
-    return () => clearInterval(interval)
-  }, [micEnabled])
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    if (appState === 'recording') {
+      void onMicLevel((level) => {
+        if (!cancelled) setMicVolume(Math.round(level * 100))
+      }).then((fn) => {
+        if (cancelled) fn()
+        else unlisten = fn
+      })
+    }
+    return () => { cancelled = true; unlisten?.() }
+  }, [appState])
 
   const handleStartRecording = useCallback(async () => {
+    if (appState !== 'idle' || isStartingRef.current) return
+
+    if (recordingMode !== 'fullscreen') {
+      setErrorMessage('窗口/区域录制模式正在开发中，当前仅支持全屏录制')
+      return
+    }
+
+    isStartingRef.current = true
+    setElapsedTime(0)
+    setIsPaused(false)
+
     try {
-      setElapsedTime(0)
-      setIsPaused(false)
-      await setCaptureMode({ mode: recordingMode, width: 1920, height: 1080, fps: 30 })
+      await setCaptureMode({
+        mode: recordingMode,
+        width: resolution.width,
+        height: resolution.height,
+        fps,
+      })
       await setAudioConfig({
         captureSystemAudio: systemAudioEnabled,
         captureMicrophone: micEnabled,
@@ -106,10 +144,12 @@ export default function App() {
     } catch (e) {
       setAppState('failed')
       setErrorMessage(String(e))
+      isStartingRef.current = false
     }
-  }, [recordingMode, systemAudioEnabled, micEnabled])
+  }, [appState, recordingMode, systemAudioEnabled, micEnabled, resolution, fps])
 
   const handlePauseRecording = useCallback(async () => {
+    if (appState !== 'recording') return
     try {
       if (isPaused) {
         await resumeRecording()
@@ -119,9 +159,11 @@ export default function App() {
     } catch (e) {
       setErrorMessage(String(e))
     }
-  }, [isPaused])
+  }, [appState, isPaused])
 
   const handleStopRecording = useCallback(async () => {
+    if (appState !== 'recording' || isStoppingRef.current) return
+    isStoppingRef.current = true
     try {
       const result = await stopRecording()
       setRecordingResult({
@@ -130,12 +172,12 @@ export default function App() {
         mixedAudioChunkCount: result.mixedAudioChunkCount,
         outputPath: result.outputPath ?? null,
       })
-      setAppState('preview')
     } catch (e) {
       setAppState('failed')
       setErrorMessage(String(e))
+      isStoppingRef.current = false
     }
-  }, [])
+  }, [appState])
 
   const handleBackToIdle = useCallback(() => {
     setAppState('idle')
@@ -143,12 +185,13 @@ export default function App() {
     setIsPaused(false)
     setErrorMessage('')
     setRecordingResult(null)
+    // 重新检测权限（用户可能在系统设置中修改了权限）
+    void fetchRecordingPermissions().then(setPermissions)
   }, [])
 
   const handleRetry = useCallback(() => {
-    setAppState('idle')
-    setErrorMessage('')
-  }, [])
+    handleBackToIdle()
+  }, [handleBackToIdle])
 
   // 禁用桌面端右键菜单和文本选中
   useEffect(() => {
@@ -200,12 +243,30 @@ export default function App() {
             setMicEnabled={setMicEnabled}
             micVolume={micVolume}
             onStartRecording={handleStartRecording}
+            resolution={resolution}
+            setResolution={setResolution}
+            fps={fps}
+            setFps={setFps}
           />
           {/* 权限提示 */}
-          {(permissions.screenRecording === 'denied' || permissions.microphone === 'denied') && (
+          {permissions.screenRecording === 'denied' && (
             <div className="mt-4 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-sm text-destructive">
-              {permissions.screenRecording === 'denied' && <p>屏幕录制权限未授权，请在系统设置中开启</p>}
-              {permissions.microphone === 'denied' && <p>麦克风权限未授权，请在系统设置中开启</p>}
+              <p>屏幕录制权限未授权，请在系统设置中开启</p>
+            </div>
+          )}
+          {permissions.microphone === 'denied' && (
+            <div className="mt-2 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-sm text-destructive">
+              <p>麦克风权限未授权，请在系统设置中开启</p>
+            </div>
+          )}
+          {permissions.screenRecording === 'notDetermined' && (
+            <div className="mt-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-sm text-amber-400">
+              <p>需要屏幕录制权限才能录制，请在启动录制时授权</p>
+            </div>
+          )}
+          {permissions.microphone === 'notDetermined' && micEnabled && (
+            <div className="mt-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-sm text-amber-400">
+              <p>需要麦克风权限才能录制音频，请在启动录制时授权</p>
             </div>
           )}
         </div>

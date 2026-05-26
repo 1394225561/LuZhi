@@ -5,7 +5,8 @@ pub mod platform;
 
 use std::sync::{Arc, Mutex};
 
-use app::events::{PermissionPayload, RecordingStatusPayload};
+use app::events::{MicLevelPayload, PermissionPayload, RecordingStatusPayload};
+use app::mic_level_runtime::MicLevelRuntime;
 #[cfg(not(target_os = "macos"))]
 use app::permission_service::{PermissionStatus, RecordingPermissions};
 use app::recording_runtime::TickRuntime;
@@ -26,6 +27,7 @@ struct AppState {
     capture_config: Arc<Mutex<CaptureConfig>>,
     audio_config: Arc<Mutex<AudioConfig>>,
     tick_runtime: Arc<Mutex<Option<TickRuntime>>>,
+    mic_level_runtime: Arc<Mutex<Option<MicLevelRuntime>>>,
 }
 
 impl Default for AppState {
@@ -41,6 +43,7 @@ impl Default for AppState {
                 channels: 2,
             })),
             tick_runtime: Arc::new(Mutex::new(None)),
+            mic_level_runtime: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -81,11 +84,18 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
         .capture_config
         .lock()
         .map_err(|_| "捕获配置锁已损坏".to_string())?;
+
+    // 窗口/区域录制模式尚未实现
+    if config.mode != core::config::CaptureMode::FullScreen {
+        return Err("窗口/区域录制模式正在开发中，当前仅支持全屏录制".to_string());
+    }
+
     let audio_config = state
         .audio_config
         .lock()
         .map_err(|_| "音频配置锁已损坏".to_string())?
         .clone();
+    let mic_enabled = audio_config.capture_microphone;
     let service = state.service.clone();
 
     let new_state = tauri::async_runtime::spawn_blocking(move || {
@@ -100,6 +110,7 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
 
     emit_state_changed(&app, new_state);
 
+    // Start recording-tick runtime (250ms interval).
     let tick_app = app.clone();
     let mut tick_runtime = state
         .tick_runtime
@@ -111,6 +122,35 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
     *tick_runtime = Some(TickRuntime::spawn(move |elapsed| {
         let _ = tick_app.emit("recording-tick", serde_json::json!({ "elapsed": elapsed }));
     }));
+
+    // Start mic-level runtime only when microphone capture is enabled.
+    if mic_enabled {
+        let mic_level = {
+            let service = state
+                .service
+                .lock()
+                .map_err(|_| "录制服务锁已损坏".to_string())?;
+            service.mic_level_ref()
+        };
+        let mic_app = app.clone();
+        let mic_runtime = MicLevelRuntime::spawn(move || {
+            let level = mic_level.lock().map(|g| *g).unwrap_or(0.0);
+            let _ = mic_app.emit("mic-level", MicLevelPayload { level });
+        });
+
+        let mut runtime_guard = state
+            .mic_level_runtime
+            .lock()
+            .map_err(|_| "麦克风电平锁已损坏".to_string())?;
+        // Stop any previous runtime before replacing.
+        if let Some(mut existing) = runtime_guard.take() {
+            existing.stop();
+        }
+        *runtime_guard = Some(mic_runtime);
+    } else {
+        // Emit a single zero-level event so the frontend knows mic is off.
+        let _ = app.emit("mic-level", MicLevelPayload { level: 0.0 });
+    }
 
     Ok(())
 }
@@ -128,6 +168,16 @@ async fn stop_recording(
         .take()
     {
         tick.stop();
+    }
+
+    // Stop the mic-level runtime.
+    if let Some(mut mic_runtime) = state
+        .mic_level_runtime
+        .lock()
+        .map_err(|_| "麦克风电平锁已损坏".to_string())?
+        .take()
+    {
+        mic_runtime.stop();
     }
 
     let service = state.service.clone();
@@ -180,10 +230,7 @@ fn set_capture_mode(
     state: tauri::State<'_, AppState>,
     payload: SetCaptureModePayload,
 ) -> Result<(), String> {
-    let mode = match payload.mode.as_str() {
-        "fullscreen" => core::config::CaptureMode::FullScreen,
-        _ => return Err(format!("未知捕获模式: {}", payload.mode)),
-    };
+    let mode = core::config::CaptureMode::mode_from_str(&payload.mode)?;
     let mut config = state.capture_config.lock().unwrap();
     *config = CaptureConfig {
         mode,

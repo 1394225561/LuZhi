@@ -31,6 +31,13 @@ pub struct PermissionPayload {
     pub microphone: PermissionStatusPayload,
 }
 
+/// Mic level payload sent to the frontend during recording.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicLevelPayload {
+    pub level: f64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionStatusPayload {
@@ -78,5 +85,13 @@ mod tests {
 
         assert_eq!(payload.state, "recording");
         assert!(!payload.can_start);
+    }
+
+    #[test]
+    fn mic_level_payload_serializes_camel_case() {
+        let payload = MicLevelPayload { level: 0.75 };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"level\""));
+        assert!(json.contains("0.75"));
     }
 }

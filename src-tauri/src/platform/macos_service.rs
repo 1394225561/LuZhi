@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use super::macos::cpal_microphone::CpalMicrophoneCapture;
@@ -11,6 +11,7 @@ use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
 use crate::media::audio_mixer::SimpleAudioMixer;
+use crate::media::mic_level::MicLevelDetector;
 use crate::media::recording_writer::{CountingRecordingWriter, RecordingResult, RecordingWriter};
 
 /// Non-generic recording service for macOS.
@@ -30,6 +31,8 @@ pub struct MacRecordingService {
     stop_flag: Option<Arc<AtomicBool>>,
     consumer_handle: Option<thread::JoinHandle<RecordingResult>>,
     frame_count: Arc<std::sync::atomic::AtomicU64>,
+    /// 当前麦克风 RMS 电平值 (0.0 ~ 1.0)，由消费线程周期性更新，外部通过 `mic_level()` 读取。
+    mic_level: Arc<Mutex<f64>>,
 }
 
 impl MacRecordingService {
@@ -45,6 +48,7 @@ impl MacRecordingService {
             stop_flag: None,
             consumer_handle: None,
             frame_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            mic_level: Arc::new(Mutex::new(0.0)),
         }
     }
 
@@ -56,9 +60,24 @@ impl MacRecordingService {
         self.frame_count.load(Ordering::Relaxed)
     }
 
+    /// 返回当前麦克风 RMS 电平值 (0.0 ~ 1.0)。
+    pub fn mic_level(&self) -> f64 {
+        self.mic_level.lock().map(|g| *g).unwrap_or(0.0)
+    }
+
+    /// 返回麦克风电平值的共享引用，供外部线程周期性读取并发射事件。
+    pub fn mic_level_ref(&self) -> Arc<Mutex<f64>> {
+        self.mic_level.clone()
+    }
+
     /// Starts video + system audio capture via SCStream, and optionally microphone.
     pub fn start(&mut self, config: CaptureConfig, audio_config: AudioConfig) -> AppResult<()> {
         self.state_machine.start()?;
+
+        // Reset mic level from any previous session.
+        if let Ok(mut guard) = self.mic_level.lock() {
+            *guard = 0.0;
+        }
 
         // Create bounded channels for video and system audio.
         const VIDEO_QUEUE_CAPACITY: usize = 90;
@@ -106,6 +125,7 @@ impl MacRecordingService {
         let system_audio_rx = self.system_audio_receiver.take().unwrap();
         let mic_rx = self.mic_receiver.take();
         let frame_count = self.frame_count.clone();
+        let mic_level = self.mic_level.clone();
         frame_count.store(0, Ordering::Relaxed);
 
         let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
@@ -117,6 +137,7 @@ impl MacRecordingService {
                 mic_rx,
                 frame_count,
                 writer,
+                mic_level,
             )
         }));
 
@@ -152,6 +173,11 @@ impl MacRecordingService {
 
         self.stop_flag = None;
 
+        // Reset mic level after session ends.
+        if let Ok(mut guard) = self.mic_level.lock() {
+            *guard = 0.0;
+        }
+
         // If either capture failed to stop, transition to Failed state.
         if let Err(e) = capture_result {
             self.state_machine.fail();
@@ -184,8 +210,10 @@ impl MacRecordingService {
         mic_rx: Option<MediaReceiver<AudioChunk>>,
         frame_count: Arc<std::sync::atomic::AtomicU64>,
         mut writer: Box<dyn RecordingWriter>,
+        mic_level: Arc<Mutex<f64>>,
     ) -> RecordingResult {
         let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
+        let mut mic_detector = MicLevelDetector::new(4096); // ~85ms 窗口 @ 48kHz
 
         loop {
             if stop_flag.load(Ordering::Relaxed) {
@@ -205,9 +233,14 @@ impl MacRecordingService {
                 synchronizer.push_system(chunk);
             }
 
-            // Enqueue microphone audio chunks.
+            // Enqueue microphone audio chunks and compute RMS level.
             if let Some(ref mic_rx) = mic_rx {
                 while let Ok(chunk) = mic_rx.try_recv() {
+                    // Feed mic samples to the level detector
+                    let level = mic_detector.push_samples(&chunk.samples);
+                    if let Ok(mut guard) = mic_level.lock() {
+                        *guard = level;
+                    }
                     synchronizer.push_mic(chunk);
                 }
             }

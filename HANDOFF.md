@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-25 | Phase 1/2 录制流水线整改完成。
+> 最后更新：2026-05-26 | Phase 3 Code Review 整改完成（自动化验证全部通过，手动验证待执行）。
 >
 > 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,86 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-05-26：Phase 3 Code Review 整改完成 (Round 2 — 3 Important 修复)
+
+输入文件：
+
+- `docs/superpowers/plans/2026-05-26-phase-3-code-review-remediation.md`
+- `tests/phase-3-code-review-remediation-checklist.md`
+
+已完成（7 个 Phase 全部完成）：
+
+1. **Phase A**：前端开始录制防重入 — `App.tsx` 增加 `isStartingRef` 守卫，阻止快速双击触发多组启动命令
+2. **Phase B**：前端停止录制防重入 — `App.tsx` 增加 `isStoppingRef` 守卫
+3. **Phase C**：`MicLevelRuntime` 生命周期管理 — 新建 `app/mic_level_runtime.rs`，实现可停止、可 join、可 Drop 的线程管理，替换原裸 `thread::spawn` + `Arc<AtomicBool>`
+4. **Phase D**：麦克风关闭与电平重置 — `start_recording` 仅当 `capture_microphone == true` 时启动 mic runtime；`MacRecordingService::start()`/`stop()` 中重置 `mic_level = 0.0`
+5. **Phase E**：权限测试隔离 — `permissions.rs` 提取 `map_av_authorization_status()`、`map_screen_preflight()` 纯函数，替换调用真实 API 的测试
+6. **Phase F**：测试补齐 — `MicLevelPayload` 序列化测试 + `mic-level` 事件监听测试 + 真实双击防重入测试
+7. **Phase G**：`MicLevelDetector` 测试清理 — 重命名 `half_amplitude_clamps_to_one_with_reference_level`，清理注释
+
+验证结果：
+
+- `cargo fmt --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` **76 tests** 通过
+- `cargo clippy --all-targets` 无 error（21 pre-existing warnings）
+- `cargo build` 通过
+- `npm run build` 通过
+- `npm test -- --run` **17 tests** 通过（+3 vs 首版整改）
+
+改动文件：
+
+- **新增**: `src-tauri/src/app/mic_level_runtime.rs`
+- **修改**: `src/App.tsx`, `src/App.test.tsx`, `src-tauri/src/lib.rs`, `src-tauri/src/app/mod.rs`, `src-tauri/src/platform/macos/permissions.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/app/events.rs`, `src-tauri/src/media/mic_level.rs`
+
+后续入口：`tests/phase-3-w5-w6-checklist.md` 中仍有手动验证项待执行（需 `npm run tauri dev`）；`permissions.rs` FFI 需人工 Native Safety Gate 审查。
+
+---
+
+### 2026-05-26：Phase 3 录制 UI 与前后端联调完成
+
+输入文件：
+
+- `docs/architecture/project-architecture-and-overall-planning.md`
+- `docs/superpowers/plans/` (本 Phase 计划在 `.claude/plans/` 中)
+- `tests/phase-3-w5-w6-checklist.md`
+
+已完成（9 个 Task 全部完成）：
+
+1. **Task 1**：`CaptureMode` 枚举新增 `Window`/`Area` 变体 + `mode_from_str()` 解析方法
+2. **Task 2**：`MacPermissionProbe` 接入真实 macOS 权限 API（`CGPreflightScreenCaptureAccess` + `AVCaptureDevice.authorizationStatusForMediaType:`）
+3. **Task 3**：`MicLevelDetector` — 滑动窗口 RMS 电平计算器（`media/mic_level.rs`）
+4. **Task 4**：消费线程集成 `MicLevelDetector` + `mic-level` 事件（100ms 间隔）推送
+5. **Task 5**：`RecordingPanel` 新增分辨率/FPS 下拉 + 窗口/区域模式"即将推出"提示 + 按钮禁用
+6. **Task 6**：`App.tsx` 替换 mic 随机数模拟为真实 `mic-level` 事件 + 状态转换加固 + 权限变更重检
+7. **Task 7**：`lib/tauri.ts` 补充 `MicLevelPayload` 类型
+8. **Task 8**：测试扩展（69 Rust + 14 前端 测试全部通过）
+9. **Task 9**：手动验证清单更新到 `tests/phase-3-w5-w6-checklist.md`
+
+验证结果：
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` 69 tests 通过
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` 无 error（21 个 FFI naming warning 可接受）
+- `cargo build --manifest-path src-tauri/Cargo.toml` 通过
+- `npm run build` 通过
+- `npm test -- --run` 14 tests 通过
+
+关键决策：
+
+- **窗口/区域模式前端传参、后端预留**：`CaptureMode` 枚举已扩展，`set_capture_mode` 接受三种模式参数，`start_recording` 对非全屏返回中文错误
+- **真实 macOS 权限 API**：`CGPreflightScreenCaptureAccess()` + `AVCaptureDevice.authorizationStatusForMediaType:` 通过 FFI/objc2 调用，状态映射 0→NotDetermined, 1→Denied, 2→Denied, 3→Granted
+- **MicLevelDetector 100ms 推送**：独立线程每 100ms 从 `Arc<Mutex<f64>>` 读取 RMS 值并通过 Tauri event 推送，替换前端 setInterval 模拟
+- **权限变更重检**：`handleBackToIdle` 中重新调用 `fetchRecordingPermissions()`
+- **状态转换加固**：所有 handler 增加当前状态检查守卫（`appState !== 'idle'` 直接 return）
+
+后续入口：
+
+1. `npm run tauri dev` 执行 Phase 3 手动验证清单（7 项）
+2. 人工审查 `permissions.rs` 中的 FFI 调用（Native Safety Gate）
+3. 进入 Phase 4（W7-W8）光标平滑与点击放大
+
+---
 
 ### 2026-05-25：Phase 1/2 录制流水线整改计划执行完成
 

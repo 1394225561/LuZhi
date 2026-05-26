@@ -40,6 +40,10 @@ export type BeautifyConfig = {
   trimSensitivity: 'low' | 'medium' | 'high'
 }
 
+export type MicLevelPayload = {
+  level: number
+}
+
 export type ExportPreset = 'bilibili' | 'douyin' | 'xiaohongshu'
 
 export type RecordingResult = {
