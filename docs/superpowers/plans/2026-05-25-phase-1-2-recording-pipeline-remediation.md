@@ -3213,6 +3213,348 @@ Round 4 remediation is complete only when:
 - Automated verification passes with current working tree.
 - Manual checklist items remain unchecked until verified on a real macOS recording session.
 
+## 2026-05-26 Post-Round 4 Code Review Findings
+
+> Review input: current working tree after commit `6d7dc08 fix(record): Round 4 修复停止管线、时间戳同步与音频配对策略`.
+> Review focus: whether Phase 1 / Phase 2 are fully complete, and whether Phase 2 still has capture-main-path blocking, memory safety, thread safety, or resource-release risks.
+
+### Fresh Verification Evidence
+
+Commands run during this review:
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+```
+
+Observed results:
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` exited 0.
+- `cargo test --manifest-path src-tauri/Cargo.toml` passed `54` Rust tests.
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` exited 0, but still emitted warnings:
+  - macOS FFI naming warnings in `src-tauri/src/platform/macos/screen_capture_kit.rs`.
+  - `unused_unsafe` warning around nested `Retained::retain(content)`.
+  - dead-code warnings for unused CoreMedia helpers and the `SendStream` tuple field.
+- `cargo build --manifest-path src-tauri/Cargo.toml` exited 0 with the same warning class.
+- `npm run build` exited 0.
+- `npm test -- --run` passed `8` Vitest tests, with the existing jsdom `Window.scrollTo()` not-implemented warning.
+
+Manual verification not performed in this review:
+
+- Real `npm run tauri dev` recording session.
+- 1080p 3-minute recording stability.
+- 5 repeated start/stop cycles.
+- Playable local artifact validation.
+- Real microphone/system-audio capture validation.
+- Native safety review of ScreenCaptureKit/cpal unsafe wrappers.
+
+### Completion Judgment
+
+Phase 1 status: **not complete yet**.
+
+- Completed: Tauri/React scaffold builds; Rust state machine and command wiring exist; `start_recording` / `stop_recording` are moved to `spawn_blocking`; frame/audio streams remain in Rust; `RecordingResult` is camelCase; fake `outputPath` is no longer returned.
+- Not complete: the app still does not produce a playable local recording artifact. `MacRecordingService::start()` still uses `CountingRecordingWriter::new(None)`, and `FfmpegRecordingWriter` still does not encode, mux, or create a file.
+
+Phase 2 status: **not complete yet**.
+
+- Completed: bounded non-blocking media queues are used; cpal callback no longer holds the prior running-state mutex; ScreenCaptureKit system-audio parsing handles basic interleaved and non-interleaved PCM; `captureSystemAudio` is respected; BUG-002 false drag-region regression in `ErrorView` has been removed and covered by Vitest; Round 4 changed stop ordering so native captures are stopped before the consumer final drain.
+- Not complete: microphone and ScreenCaptureKit timestamps still do not share one real session clock; non-interleaved audio conversion still has callback panic / layout mismatch risk; audio synchronization has a watermark sentinel bug; pause/resume is state-only; macOS permission probing remains a placeholder; several unsafe ownership paths still need human review.
+
+### Blocking Findings
+
+#### R5-001 Blocking: Phase 1/2 artifact requirement remains unmet
+
+Evidence:
+
+- `src-tauri/src/platform/macos_service.rs`
+  - `MacRecordingService::start()` creates `Box::new(CountingRecordingWriter::new(None))`.
+  - This writer counts frames/audio only; it does not create a recording file.
+- `src-tauri/src/media/ffmpeg_writer.rs`
+  - `FfmpegRecordingWriter::push_video()` and `push_audio()` only increment counters.
+  - `finish()` returns `output_path: None`, correctly avoiding a fake path, but still does not produce the Phase 1 artifact.
+
+Impact:
+
+- Phase 1 cannot satisfy "recording ends with a playable local video file".
+- Phase 2 cannot satisfy "recording file contains an audio track".
+- Manual artifact acceptance must remain unchecked.
+
+Required remediation:
+
+- Keep `CountingRecordingWriter` as an explicit development/test fallback.
+- Implement a real writer path behind the existing `ffmpeg` feature or another human-approved writer boundary.
+- Return a non-empty `outputPath` only after the file exists and is closed/flushed.
+- Add a writer-level verification that checks `output_path.exists()` before returning it.
+
+Verification after remediation:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml media::recording_writer
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run build
+```
+
+Manual acceptance:
+
+```text
+1. Start a 1080p recording for at least 5 seconds.
+2. Stop recording.
+3. Confirm frameCount > 0.
+4. Confirm outputPath is non-empty only when the file exists.
+5. Open the file locally and confirm it contains video.
+6. Enable audio and confirm the file contains an audio track.
+```
+
+#### R5-002 Important: Microphone and ScreenCaptureKit timestamps still do not share one real session clock
+
+Evidence:
+
+- `src-tauri/src/platform/macos_service.rs::start()` starts `MacScreenCapture::start_combined(...)` first.
+- Only after ScreenCaptureKit starts does the service create `SessionClock` and pass it to `CpalMicrophoneCapture`.
+- `src-tauri/src/platform/macos/screen_capture_kit.rs` still uses `TimestampNormalizer` over CMSampleBuffer presentation timestamps and normalizes the first SCK sample to 0.
+- `src-tauri/src/platform/macos/cpal_microphone.rs` anchors only cpal timestamps to `SessionClock`.
+
+Impact:
+
+- SCK video/system audio and cpal microphone are still on different effective clock bases.
+- Real start-time offset between SCK and cpal can be erased or distorted.
+- Phase 2 timestamp pairing can mix chunks that are not actually simultaneous.
+
+Required remediation:
+
+- Create the shared session clock before starting any capture source.
+- Thread that shared clock into both ScreenCaptureKit and cpal timestamp conversion.
+- For SCK, convert raw CMSampleBuffer timestamps into the same session-relative basis rather than using a separate first-sample-zero normalizer.
+- For cpal, prefer callback timing when available; if unavailable, derive timestamps from session start plus accumulated frames.
+- Add tests that simulate staggered SCK and mic start times and verify the expected offset is preserved.
+
+Verification after remediation:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml core::clock
+cargo test --manifest-path src-tauri/Cargo.toml media::audio_synchronizer
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+#### R5-003 Important: Non-interleaved audio conversion can panic or produce metadata/sample layout mismatches
+
+Evidence:
+
+- `src-tauri/src/platform/macos/screen_capture_kit.rs::deinterleave_buffers()` derives `frames` from only `buffers[0].mDataByteSize`.
+- The function builds `channel_samples` with `.take(channels).filter(...)`, so the number of collected channel buffers may be lower than `channels`.
+- The interleave loop indexes `channel[frame_idx]` for every collected channel without verifying that all channel sample vectors are at least `frames` long.
+- The returned `AudioChunk` keeps `channels` from ASBD even if fewer channel buffers were actually converted.
+
+Impact:
+
+- A shorter second channel buffer can panic inside the ScreenCaptureKit audio callback.
+- Missing/null channel buffers can produce samples that do not match `AudioChunk.channels`.
+- This remains a native callback safety risk and a Phase 2 audio correctness blocker.
+
+Required remediation:
+
+- Reject non-interleaved buffers unless `buffers.len() >= channels`.
+- Verify every converted channel buffer has exactly the same frame count before interleaving.
+- If any channel buffer is null, short, or malformed, drop that sample buffer without panicking.
+- Add tests for:
+  - non-interleaved buffers with mismatched lengths,
+  - fewer buffers than ASBD channel count,
+  - null/empty channel buffer rejection,
+  - valid non-interleaved stereo success.
+
+Verification after remediation:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml platform::macos::screen_capture_kit::audio_conversion_tests
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Manual review gate:
+
+```text
+Human reviewer must inspect non-interleaved AudioBufferList handling, panic-free callback behavior, and sample layout assumptions before accepting Phase 2 native audio.
+```
+
+#### R5-004 Important: AudioSynchronizer watermark uses `0` as a sentinel even though `0` is a valid media timestamp
+
+Evidence:
+
+- `src-tauri/src/media/audio_synchronizer.rs::latest_system_ts` is initialized to `0`.
+- `drain_mixed()` treats `latest_system_ts == 0` as "no system chunks have ever been seen".
+- The first normalized system chunk can legitimately have timestamp `0`.
+
+Impact:
+
+- After seeing a real system chunk at timestamp 0, unmatched mic chunks can still be emitted immediately as mic-only.
+- The intended hold/age-out behavior is bypassed at the beginning of a normal recording session.
+- Jittered early callbacks can create avoidable single-source audio chunks.
+
+Required remediation:
+
+- Replace `latest_system_ts: u64` with `Option<u64>`.
+- Treat `None` as "no system chunks ever seen" and `Some(0)` as a valid watermark.
+- Add tests for:
+  - system chunk at timestamp 0 followed by unmatched mic chunk,
+  - delayed matching after a zero timestamp system chunk,
+  - age-out after the watermark advances.
+
+Verification after remediation:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml media::audio_synchronizer
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+#### R5-005 Important: Stop-timeout policy is now conservative, but resource and retry behavior still needs explicit acceptance
+
+Evidence:
+
+- `src-tauri/src/platform/macos/screen_capture_kit.rs::stop()` keeps `stream` and `delegate` retained when `stopCaptureWithCompletionHandler` times out, sets `running = false`, and sets `needs_reset = true`.
+- `start_stream()` rejects later starts while `needs_reset` is true with "上次停止录制超时，请重启应用后再试".
+- This avoids dropping live native handles, but it intentionally leaves the native lifecycle unrecoverable until app restart.
+
+Impact:
+
+- The current policy is safer than freeing uncertain native handles, but it can retain native resources after a stop timeout.
+- UI retry can move back to idle while the backend will reject a later start until restart.
+- Manual/resource validation is still required before Phase 2 can be accepted.
+
+Required remediation:
+
+- Document the conservative timeout policy in code comments, `HANDOFF.md`, and the manual checklist.
+- Make frontend retry/back behavior surface "restart required" clearly after this error.
+- Add tests with a mock capture adapter for stop-timeout state transitions and frontend failed-state behavior.
+- If a recoverable policy is desired later, retain old handles until a late completion callback or other native signal proves the old stream is stopped before release.
+
+Verification after remediation:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml app::state_machine
+cargo test --manifest-path src-tauri/Cargo.toml
+npm test -- --run
+```
+
+Manual acceptance:
+
+```text
+1. Force or simulate ScreenCaptureKit stop timeout.
+2. Confirm stop_recording returns a Chinese structured error.
+3. Confirm recording-state-changed emits failed.
+4. Confirm retry clearly returns restart-required behavior, or succeeds only after safe cleanup is proven.
+5. Confirm retained native resources do not keep sending media after sinks are cleared.
+```
+
+#### R5-006 Moderate: Pause/resume is state-only and does not pause capture or writing
+
+Evidence:
+
+- `src-tauri/src/platform/macos_service.rs::pause()` only calls `self.state_machine.pause()`.
+- `src-tauri/src/platform/macos_service.rs::resume()` only calls `self.state_machine.resume()`.
+- ScreenCaptureKit, cpal, the consumer thread, and the writer continue running while the state is `Paused`.
+
+Impact:
+
+- UI can show "paused" while media capture and counting continue.
+- A paused section will still be present in the eventual recording artifact.
+- If pause/resume is considered part of Phase 2 command completion, its backend semantics are incomplete.
+
+Required remediation:
+
+- Decide the MVP pause semantics:
+  - true pause: stop or suppress capture/writer input while paused;
+  - UI-only pause placeholder: disable/hide pause controls until real semantics are implemented.
+- If true pause is chosen, ensure the capture callback hot path still remains non-blocking and uses an atomic pause gate or writer-side segment handling.
+- Add tests proving frame/audio counts do not advance during pause, or document pause as not accepted yet.
+
+Verification after remediation:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml app::state_machine
+cargo test --manifest-path src-tauri/Cargo.toml
+npm test -- --run
+```
+
+#### R5-007 Moderate: macOS permission probe remains a placeholder
+
+Evidence:
+
+- `src-tauri/src/platform/macos/permissions.rs::MacPermissionProbe` returns `PermissionStatus::Unknown` for both screen recording and microphone.
+
+Impact:
+
+- UI cannot accurately show `denied` or `notDetermined` on real macOS permission failures.
+- Phase 1 permission guidance is not fully complete.
+
+Required remediation:
+
+- Keep `PermissionService` as the test seam.
+- Implement real macOS permission probes only after native safety review:
+  - screen recording via `CGPreflightScreenCaptureAccess()`;
+  - microphone via `AVAudioApplication.recordPermission` or `AVCaptureDevice.authorizationStatus(for: .audio)`.
+- Until then, keep permission checklist items unchecked and document `Unknown` as a dated limitation.
+
+Verification after remediation:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml app::permission_service
+npm test -- --run
+```
+
+Manual acceptance:
+
+```text
+1. Run with Screen Recording permission denied.
+2. Confirm UI shows a Chinese denied message.
+3. Run with Microphone permission denied.
+4. Confirm UI shows a Chinese denied message.
+5. Grant both permissions.
+6. Confirm UI no longer shows denied warnings.
+```
+
+### BUG.md Rule Check
+
+Checked during this review:
+
+- `src-tauri/Cargo.toml` still keeps Tauri `macos-private-api`.
+- `src-tauri/tauri.conf.json` still keeps `macOSPrivateApi: true`, `transparent: true`, and `acceptFirstMouse: true`.
+- `src-tauri/capabilities/default.json` still keeps `core:window:allow-start-dragging`.
+- No current source file contains container-level `data-tauri-drag-region={false}` or `data-tauri-drag-region="false"`.
+- Current `whileTap` uses are on `motion.button` itself, not on a wrapper around a nested `Button`; this does not reintroduce BUG-003's exact failure pattern.
+
+### Post-Round 4 Remediation Task List
+
+Use this list as the next execution order:
+
+1. [ ] Implement or explicitly defer the real artifact writer path; keep Phase 1 artifact acceptance unchecked until a playable file exists.
+2. [ ] Create the shared session clock before all capture starts and thread it into both ScreenCaptureKit and cpal timestamp conversion.
+3. [ ] Harden non-interleaved audio conversion so malformed channel buffers are rejected without callback panic.
+4. [ ] Replace `AudioSynchronizer::latest_system_ts` sentinel with `Option<u64>` and add zero-timestamp watermark tests.
+5. [ ] Document and test the conservative stop-timeout policy, including frontend retry/restart-required behavior.
+6. [ ] Decide pause semantics; either implement true capture/write suppression or mark pause as UI-only/not accepted.
+7. [ ] Implement or explicitly document the macOS permission probe placeholder limitation.
+8. [ ] Clean up non-FFI warnings where low risk; keep FFI naming warnings only if intentionally allowed.
+9. [ ] Update `tests/phase-1-2-remediation-checklist.md` so artifact, real mic/system audio, long recording, repeated start/stop, stop-timeout, and unsafe review remain unchecked until manually verified.
+10. [ ] Re-run full automated verification.
+11. [ ] Run real macOS recording acceptance before marking Phase 1/2 complete.
+
+### Post-Round 4 Definition of Done
+
+The next remediation pass is complete only when:
+
+- `outputPath` is non-empty only when a real playable local file exists.
+- Video, system audio, and microphone timestamps share one real session clock basis.
+- Non-interleaved audio conversion is panic-free and rejects malformed channel layouts.
+- Audio synchronizer watermark behavior is correct when the first valid timestamp is `0`.
+- Stop timeout has one documented policy and frontend retry behavior follows it.
+- Pause/resume either has true backend semantics or is clearly not part of accepted Phase 1/2 behavior.
+- macOS permission behavior is either implemented or explicitly left unchecked with dated rationale.
+- Automated verification passes with current working tree.
+- Manual checklist items remain unchecked until verified on a real macOS recording session and native safety review.
+
 ## Self-Review
 
 - Spec coverage: The plan maps each audit finding to a task: build blocker (Task 1), unbounded channels (Task 2), timestamp mismatch (Task 3), unsafe audio extraction (Task 4), command blocking and tick leaks (Task 5), stop timeout (Task 6), missing mix pipeline (Task 7), missing writer boundary/artifact (Tasks 8-9), command payload mismatch (Task 10), permissions (Task 11), BUG.md drag rule (Task 12), Windows boundary (Task 13), verification (Tasks 14-15).
