@@ -47,7 +47,11 @@ impl RecordingWriter for FfmpegRecordingWriter {
             duration_secs: 0,
             frame_count: self.frame_count,
             mixed_audio_chunk_count: self.mixed_audio_chunk_count,
-            output_path: Some(self.output_path.to_string_lossy().to_string()),
+            // This is a skeleton writer — no file is actually created.
+            // Return None to avoid misleading callers into thinking a
+            // playable artifact exists. The path is stored for future use
+            // when FFmpeg muxing is implemented.
+            output_path: None,
         })
     }
 }
