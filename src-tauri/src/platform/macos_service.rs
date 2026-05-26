@@ -79,9 +79,14 @@ impl MacRecordingService {
         self.video_receiver = Some(video_receiver);
         self.system_audio_receiver = Some(audio_receiver);
 
+        // Create a shared session clock so microphone timestamps share the
+        // same host-clock basis as ScreenCaptureKit CMSampleBuffer timestamps.
+        let session_clock = Arc::new(crate::core::clock::SessionClock::new());
+
         // Start microphone capture if requested.
         if audio_config.capture_microphone {
             let (mic_sender, mic_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY);
+            self.mic_capture.set_session_clock(session_clock);
             if let Err(error) = self.mic_capture.start(audio_config, mic_sender) {
                 // Rollback: stop screen capture.
                 let _ = ScreenCapture::stop(&mut self.screen_capture);
@@ -120,30 +125,29 @@ impl MacRecordingService {
 
     /// Stops all captures and finalizes the recording session.
     pub fn stop(&mut self) -> AppResult<RecordingResult> {
+        // Stop native captures first so no new media can be enqueued.
+        // The consumer thread may still be draining, but once sinks are
+        // cleared and native streams are stopped, the queues are bounded
+        // and will be fully drained before writer.finish().
+        let capture_result = ScreenCapture::stop(&mut self.screen_capture);
+        let mic_result = self.mic_capture.stop();
+
         // Signal the consumer thread to stop.
         if let Some(flag) = &self.stop_flag {
             flag.store(true, Ordering::Relaxed);
         }
 
-        // Stop captures.
-        let capture_result = ScreenCapture::stop(&mut self.screen_capture);
-        let mic_result = self.mic_capture.stop();
-
         // Join the consumer thread and get writer result.
+        let empty_result = RecordingResult {
+            duration_secs: 0,
+            frame_count: 0,
+            mixed_audio_chunk_count: 0,
+            output_path: None,
+        };
         let result = if let Some(handle) = self.consumer_handle.take() {
-            handle.join().unwrap_or_else(|_| RecordingResult {
-                duration_secs: 0,
-                frame_count: 0,
-                mixed_audio_chunk_count: 0,
-                output_path: None,
-            })
+            handle.join().unwrap_or(empty_result)
         } else {
-            RecordingResult {
-                duration_secs: 0,
-                frame_count: 0,
-                mixed_audio_chunk_count: 0,
-                output_path: None,
-            }
+            empty_result
         };
 
         self.stop_flag = None;
@@ -253,7 +257,7 @@ impl MacRecordingService {
             }
         }
 
-        writer.finish().unwrap_or_else(|_| RecordingResult {
+        writer.finish().unwrap_or(RecordingResult {
             duration_secs: 0,
             frame_count: 0,
             mixed_audio_chunk_count: 0,

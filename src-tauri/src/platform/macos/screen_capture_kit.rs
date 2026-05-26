@@ -249,8 +249,19 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
     // Validate bounds before pointer arithmetic.
     let list_ref = &*buffer_list;
     let num_buffers = list_ref.mNumberBuffers as usize;
-    let minimum_size =
-        std::mem::size_of::<u32>() + num_buffers * std::mem::size_of::<AudioBuffer>();
+    if num_buffers == 0 {
+        if !block_buffer.is_null() {
+            cf_release(block_buffer as *const _);
+        }
+        return;
+    }
+    // Compute minimum size accounting for C struct layout:
+    // AudioBufferList has mNumberBuffers (u32) + mBuffers ([AudioBuffer; 1]).
+    // Additional buffers beyond the first are at offset size_of::<AudioBufferList>()
+    // plus (n-1)*size_of::<AudioBuffer>(). This correctly accounts for padding
+    // between mNumberBuffers and the mBuffers array on 64-bit targets.
+    let minimum_size = std::mem::size_of::<AudioBufferList>()
+        + (num_buffers - 1) * std::mem::size_of::<AudioBuffer>();
     if needed_size < minimum_size {
         if !block_buffer.is_null() {
             cf_release(block_buffer as *const _);
@@ -511,13 +522,14 @@ impl MacScreenCapture {
     ) -> AppResult<()> {
         use objc2_foundation::NSArray;
 
-        // If a previous stop timed out, drop stale native handles before
-        // creating new ones. We are on the caller's thread (not a callback),
-        // so releasing Retained objects here is safe.
+        // Conservative policy: if a previous stop timed out, the native
+        // stream lifecycle is uncertain — SCKit may still invoke callbacks
+        // on the old delegate/stream. Dropping them could cause use-after-free.
+        // Refuse to start until the app is restarted.
         if self.needs_reset {
-            self.stream = None;
-            self.delegate = None;
-            self.needs_reset = false;
+            return Err(AppError::NativeCaptureUnavailable {
+                reason: "上次停止录制超时，请重启应用后再试",
+            });
         }
 
         // ⚠️ 人工审查：此调用阻塞当前线程等待异步回调。

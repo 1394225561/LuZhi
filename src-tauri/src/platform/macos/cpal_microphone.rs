@@ -8,6 +8,7 @@ use crate::app::error::{AppError, AppResult};
 use crate::core::capture::{
     AudioCapabilities, AudioCapture, AudioChunkSink, AudioConfig, AudioDevice,
 };
+use crate::core::clock::SessionClock;
 use crate::core::frame::AudioChunk;
 
 /// Wrapper to make `cpal::Stream` `Send`.
@@ -30,6 +31,7 @@ unsafe impl Send for SendStream {}
 pub struct CpalMicrophoneCapture {
     stream: Option<SendStream>,
     running: Arc<AtomicBool>,
+    session_clock: Option<Arc<SessionClock>>,
 }
 
 impl CpalMicrophoneCapture {
@@ -37,7 +39,14 @@ impl CpalMicrophoneCapture {
         Self {
             stream: None,
             running: Arc::new(AtomicBool::new(false)),
+            session_clock: None,
         }
+    }
+
+    /// Sets the shared session clock so microphone timestamps use the same
+    /// time basis as ScreenCaptureKit (host clock).
+    pub fn set_session_clock(&mut self, clock: Arc<SessionClock>) {
+        self.session_clock = Some(clock);
     }
 }
 
@@ -105,6 +114,7 @@ impl AudioCapture for CpalMicrophoneCapture {
         let running = self.running.clone();
         let sample_rate_val = sample_rate.0;
         let channels_val = channels;
+        let session_clock = self.session_clock.clone();
 
         // Build the input stream based on the sample format.
         // cpal provides f32, i16, and u16 sample formats.
@@ -116,6 +126,7 @@ impl AudioCapture for CpalMicrophoneCapture {
                 running.clone(),
                 sample_rate_val,
                 channels_val,
+                session_clock.clone(),
             ),
             SampleFormat::I16 => build_input_stream::<i16>(
                 &device,
@@ -124,6 +135,7 @@ impl AudioCapture for CpalMicrophoneCapture {
                 running.clone(),
                 sample_rate_val,
                 channels_val,
+                session_clock.clone(),
             ),
             SampleFormat::U16 => build_input_stream::<u16>(
                 &device,
@@ -132,6 +144,7 @@ impl AudioCapture for CpalMicrophoneCapture {
                 running.clone(),
                 sample_rate_val,
                 channels_val,
+                session_clock,
             ),
             _ => {
                 return Err(AppError::AudioCaptureFailed {
@@ -203,14 +216,16 @@ fn build_input_stream<T: cpal::SizedSample>(
     running: Arc<AtomicBool>,
     sample_rate: u32,
     channels: u16,
+    session_clock: Option<Arc<SessionClock>>,
 ) -> AppResult<cpal::Stream>
 where
     f32: cpal::FromSample<T>,
 {
-    let sample_clock = Arc::new(crate::core::clock::AudioSampleClock::new(
-        sample_rate,
-        channels,
-    ));
+    let mut sample_clock = crate::core::clock::AudioSampleClock::new(sample_rate, channels);
+    if let Some(ref clock) = session_clock {
+        sample_clock = sample_clock.with_session_clock(clock);
+    }
+    let sample_clock = Arc::new(sample_clock);
 
     let stream = device
         .build_input_stream(
