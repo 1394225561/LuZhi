@@ -816,4 +816,73 @@ describe('App', () => {
     // Mic level meter should not appear when mic is disabled
     expect(screen.queryByTestId('mic-level-meter')).toBeNull()
   })
+
+  it('sends beautify config when cursor smoothing is toggled in preview', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 30, clickEffectCount: 1, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[1])
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('set_beautify_config', {
+        config: {
+          cursorMagnification: true,
+          magnificationFactor: 2,
+          cursorSmoothing: false,
+          autoTrimSilences: false,
+          trimSensitivity: 'medium',
+        },
+      })
+    })
+  })
+
+  it('calls export_video from preview export button', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      if (command === 'export_video') {
+        return Promise.resolve({
+          frameCount: 30,
+          clickEffectCount: 1,
+          effectTimelinePath: '/tmp/effects.json',
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    await screen.findByText('预览与美化')
+    // Wait for initial status/permissions calls to settle
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('recording_status', undefined)
+    })
+    invokeMock.mockClear()
+
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('export_video', { preset: 'bilibili' })
+    })
+  })
 })

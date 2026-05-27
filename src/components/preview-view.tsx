@@ -23,7 +23,14 @@ import {
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { motion } from 'framer-motion'
-import type { BeautifyConfig, ExportPreset, RecordingResult } from '@/lib/tauri'
+import {
+  buildCursorEffectTimeline,
+  exportVideo,
+  setBeautifyConfig,
+  type BeautifyConfig,
+  type ExportPreset,
+  type RecordingResult,
+} from '@/lib/tauri'
 
 interface PreviewViewProps {
   onBack: () => void
@@ -49,15 +56,27 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
-  // 预留 Tauri invoke 接口
+  const currentBeautifyConfig = (patch: Partial<BeautifyConfig>): BeautifyConfig => ({
+    cursorMagnification,
+    magnificationFactor: magnificationFactor[0],
+    cursorSmoothing,
+    autoTrimSilences,
+    trimSensitivity,
+    ...patch,
+  })
+
   const handleBeautifyChange = (config: Partial<BeautifyConfig>) => {
-    console.log('set_beautify_config', config)
-    // TODO: invoke('set_beautify_config', { config })
+    void setBeautifyConfig(currentBeautifyConfig(config))
+      .then(() => buildCursorEffectTimeline())
+      .catch((error) => {
+        console.error('光标效果处理失败', error)
+      })
   }
 
   const handleExport = (preset: ExportPreset) => {
-    console.log('export_video', preset)
-    // TODO: invoke('export_video', { preset })
+    void exportVideo(preset).catch((error) => {
+      console.error('导出失败', error)
+    })
   }
 
   const exportPresets: Array<{
