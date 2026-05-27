@@ -26,6 +26,7 @@ pub struct CaptureConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    pub show_system_cursor: bool,
 }
 
 impl CaptureConfig {
@@ -36,6 +37,7 @@ impl CaptureConfig {
             width: 1920,
             height: 1080,
             fps: 30,
+            show_system_cursor: true,
         }
     }
 }
@@ -88,5 +90,12 @@ mod tests {
     fn parse_empty_string_returns_error() {
         let result = CaptureMode::mode_from_str("");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_config_records_system_cursor_until_effect_pipeline_is_enabled() {
+        let config = CaptureConfig::full_screen_1080p_30fps();
+
+        assert!(config.show_system_cursor);
     }
 }

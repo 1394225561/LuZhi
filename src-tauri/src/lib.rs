@@ -274,12 +274,20 @@ fn set_capture_mode(
     payload: SetCaptureModePayload,
 ) -> Result<(), String> {
     let mode = core::config::CaptureMode::mode_from_str(&payload.mode)?;
+    let beautify_config = state
+        .beautify_config
+        .lock()
+        .map_err(|_| "美化配置锁已损坏".to_string())?
+        .clone();
+    let show_system_cursor =
+        !(beautify_config.cursor_magnification || beautify_config.cursor_smoothing);
     let mut config = state.capture_config.lock().unwrap();
     *config = CaptureConfig {
         mode,
         width: payload.width.unwrap_or(1920),
         height: payload.height.unwrap_or(1080),
         fps: payload.fps.unwrap_or(30),
+        show_system_cursor,
     };
     Ok(())
 }

@@ -564,7 +564,7 @@ impl MacScreenCapture {
             stream_config.setCapturesAudio(capture_system_audio);
             stream_config.setSampleRate(48000);
             stream_config.setChannelCount(2);
-            stream_config.setShowsCursor(true);
+            stream_config.setShowsCursor(config.show_system_cursor);
             stream_config.setQueueDepth(8);
 
             // BGRA pixel format (0x42475241 = 'BGRA')
