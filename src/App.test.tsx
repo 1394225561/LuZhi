@@ -171,7 +171,7 @@ describe('App', () => {
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
-      if (command === 'stop_recording') return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null })
+      if (command === 'stop_recording') return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: '/tmp/cursor.json', effectTimelinePath: null })
       return Promise.reject(new Error(`unexpected command ${command}`))
     })
 
@@ -468,6 +468,8 @@ describe('App', () => {
           frameCount: 150,
           mixedAudioChunkCount: 50,
           outputPath: '/tmp/test.mp4',
+          cursorMetadataPath: '/tmp/cursor.json',
+          effectTimelinePath: null,
         })
       }
       return Promise.reject(new Error(`unexpected command ${command}`))
@@ -570,7 +572,7 @@ describe('App', () => {
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
       if (command === 'stop_recording') {
-        return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null })
+        return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: null, effectTimelinePath: null })
       }
       return Promise.reject(new Error(`unexpected command ${command}`))
     })

@@ -186,6 +186,8 @@ export default function App() {
         frameCount: result.frameCount,
         mixedAudioChunkCount: result.mixedAudioChunkCount,
         outputPath: result.outputPath ?? null,
+        cursorMetadataPath: result.cursorMetadataPath ?? null,
+        effectTimelinePath: result.effectTimelinePath ?? null,
       })
       // Fallback: sync state via backend query in case recording-state-changed event is lost.
       const stopStatus = await fetchRecordingStatus()

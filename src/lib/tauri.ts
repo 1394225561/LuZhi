@@ -51,7 +51,10 @@ export type RecordingResult = {
   frameCount: number
   mixedAudioChunkCount: number
   outputPath: string | null
+  cursorMetadataPath: string | null
+  effectTimelinePath: string | null
 }
+
 
 // ─── Tauri Commands ───
 

@@ -13,6 +13,8 @@ pub struct RecordingResult {
     pub frame_count: u64,
     pub mixed_audio_chunk_count: u64,
     pub output_path: Option<String>,
+    pub cursor_metadata_path: Option<String>,
+    pub effect_timeline_path: Option<String>,
 }
 
 /// Trait for writing recorded media to a file or other sink.
@@ -60,6 +62,8 @@ impl RecordingWriter for CountingRecordingWriter {
                 .output_path
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
+            cursor_metadata_path: None,
+            effect_timeline_path: None,
         })
     }
 }
@@ -94,5 +98,24 @@ mod tests {
 
         assert_eq!(result.frame_count, 1);
         assert_eq!(result.mixed_audio_chunk_count, 1);
+        assert_eq!(result.cursor_metadata_path, None);
+        assert_eq!(result.effect_timeline_path, None);
+    }
+
+    #[test]
+    fn recording_result_serializes_sidecar_paths_as_camel_case() {
+        let result = RecordingResult {
+            duration_secs: 1,
+            frame_count: 30,
+            mixed_audio_chunk_count: 2,
+            output_path: None,
+            cursor_metadata_path: Some("/tmp/cursor.json".to_string()),
+            effect_timeline_path: Some("/tmp/effects.json".to_string()),
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+
+        assert!(json.contains("\"cursorMetadataPath\":\"/tmp/cursor.json\""));
+        assert!(json.contains("\"effectTimelinePath\":\"/tmp/effects.json\""));
     }
 }

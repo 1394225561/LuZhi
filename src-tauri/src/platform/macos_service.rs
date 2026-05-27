@@ -2,8 +2,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use super::macos::cpal_microphone::CpalMicrophoneCapture;
+use super::macos::cursor_source::MacCursorSource;
 use super::macos::screen_capture_kit::MacScreenCapture;
+use crate::app::cursor_metadata_runtime::CursorMetadataRuntime;
 use crate::app::error::AppResult;
 use crate::app::state_machine::{RecordingState, RecordingStateMachine};
 use crate::core::capture::{AudioCapture, AudioConfig, ScreenCapture};
@@ -12,6 +17,7 @@ use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
 use crate::media::audio_mixer::SimpleAudioMixer;
 use crate::media::mic_level::MicLevelDetector;
+use crate::media::recording_metadata::RecordingMetadataWriter;
 use crate::media::recording_writer::{CountingRecordingWriter, RecordingResult, RecordingWriter};
 
 /// Non-generic recording service for macOS.
@@ -33,6 +39,19 @@ pub struct MacRecordingService {
     frame_count: Arc<std::sync::atomic::AtomicU64>,
     /// 当前麦克风 RMS 电平值 (0.0 ~ 1.0)，由消费线程周期性更新，外部通过 `mic_level()` 读取。
     mic_level: Arc<Mutex<f64>>,
+    cursor_runtime: Option<CursorMetadataRuntime>,
+    last_cursor_metadata_path: Option<String>,
+    last_effect_timeline_path: Option<String>,
+}
+
+impl MacRecordingService {
+    pub fn last_cursor_metadata_path(&self) -> Option<String> {
+        self.last_cursor_metadata_path.clone()
+    }
+
+    pub fn set_last_effect_timeline_path(&mut self, path: Option<String>) {
+        self.last_effect_timeline_path = path;
+    }
 }
 
 impl MacRecordingService {
@@ -49,6 +68,9 @@ impl MacRecordingService {
             consumer_handle: None,
             frame_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mic_level: Arc::new(Mutex::new(0.0)),
+            cursor_runtime: None,
+            last_cursor_metadata_path: None,
+            last_effect_timeline_path: None,
         }
     }
 
@@ -105,7 +127,7 @@ impl MacRecordingService {
         // Start microphone capture if requested.
         if audio_config.capture_microphone {
             let (mic_sender, mic_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY);
-            self.mic_capture.set_session_clock(session_clock);
+            self.mic_capture.set_session_clock(session_clock.clone());
             if let Err(error) = self.mic_capture.start(audio_config, mic_sender) {
                 // Rollback: stop screen capture.
                 let _ = ScreenCapture::stop(&mut self.screen_capture);
@@ -116,6 +138,13 @@ impl MacRecordingService {
             }
             self.mic_receiver = Some(mic_receiver);
         }
+
+        // Start cursor metadata runtime for cursor effects.
+        self.cursor_runtime = Some(CursorMetadataRuntime::spawn(
+            MacCursorSource::new(),
+            config.fps,
+            session_clock.clone(),
+        ));
 
         // Spawn frame consumer thread (drain mode).
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -164,14 +193,35 @@ impl MacRecordingService {
             frame_count: 0,
             mixed_audio_chunk_count: 0,
             output_path: None,
+            cursor_metadata_path: None,
+            effect_timeline_path: None,
         };
-        let result = if let Some(handle) = self.consumer_handle.take() {
+        let mut result = if let Some(handle) = self.consumer_handle.take() {
             handle.join().unwrap_or(empty_result)
         } else {
             empty_result
         };
 
         self.stop_flag = None;
+
+        // Stop cursor runtime and write metadata sidecar.
+        let cursor_metadata = self
+            .cursor_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.stop());
+        self.cursor_runtime = None;
+
+        let cursor_metadata_path = if let Some(metadata) = cursor_metadata {
+            let path = cursor_metadata_path();
+            RecordingMetadataWriter::write_metadata(&path, &metadata)?;
+            Some(path.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        result.cursor_metadata_path = cursor_metadata_path.clone();
+        result.effect_timeline_path = self.last_effect_timeline_path.clone();
+        self.last_cursor_metadata_path = cursor_metadata_path;
 
         // Reset mic level after session ends.
         if let Ok(mut guard) = self.mic_level.lock() {
@@ -295,6 +345,8 @@ impl MacRecordingService {
             frame_count: 0,
             mixed_audio_chunk_count: 0,
             output_path: None,
+            cursor_metadata_path: None,
+            effect_timeline_path: None,
         })
     }
 }
@@ -303,4 +355,15 @@ impl Default for MacRecordingService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn cursor_metadata_path() -> PathBuf {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+
+    std::env::temp_dir()
+        .join("luzhi-recordings")
+        .join(format!("cursor-metadata-{millis}.json"))
 }
