@@ -89,6 +89,118 @@ fn is_large_jump(samples: &[CursorSample], index: usize, threshold: f32) -> bool
     (dx * dx + dy * dy).sqrt() >= threshold
 }
 
+/// Samples smoothed cursor samples at video-frame timestamps using cubic Bezier segments.
+pub struct BezierInterpolator {
+    fps: u32,
+}
+
+impl BezierInterpolator {
+    pub fn new(fps: u32) -> Self {
+        Self { fps: fps.max(1) }
+    }
+
+    pub fn sample_frames(&self, samples: &[CursorSample], duration_nanos: u64) -> Vec<CursorFrame> {
+        if samples.is_empty() {
+            return Vec::new();
+        }
+
+        let frame_interval = 1_000_000_000u64 / self.fps as u64;
+        let mut frames = Vec::new();
+        let mut timestamp = 0u64;
+
+        while timestamp <= duration_nanos {
+            let position = if samples.len() == 1 {
+                samples[0]
+            } else {
+                self.sample_at(samples, timestamp)
+            };
+
+            frames.push(CursorFrame {
+                timestamp: MediaTimestamp::from_nanos(timestamp),
+                x: position.x,
+                y: position.y,
+                scale: 1.0,
+                opacity: 1.0,
+            });
+
+            timestamp = timestamp.saturating_add(frame_interval);
+            if frame_interval == 0 {
+                break;
+            }
+        }
+
+        frames
+    }
+
+    fn sample_at(&self, samples: &[CursorSample], timestamp: u64) -> CursorSample {
+        let segment_index = samples
+            .windows(2)
+            .position(|pair| {
+                timestamp >= pair[0].timestamp.nanos && timestamp <= pair[1].timestamp.nanos
+            })
+            .unwrap_or_else(|| {
+                if timestamp < samples[0].timestamp.nanos {
+                    0
+                } else {
+                    samples.len().saturating_sub(2)
+                }
+            });
+
+        let p0 = samples[segment_index.saturating_sub(1)];
+        let p1 = samples[segment_index];
+        let p2 = samples[(segment_index + 1).min(samples.len() - 1)];
+        let p3 = samples[(segment_index + 2).min(samples.len() - 1)];
+
+        let span = p2.timestamp.nanos.saturating_sub(p1.timestamp.nanos).max(1);
+        let t = ((timestamp.saturating_sub(p1.timestamp.nanos)) as f32 / span as f32).clamp(0.0, 1.0);
+
+        let distance = distance_between(p1, p2);
+        let strength = (distance / 240.0).clamp(0.15, 0.65);
+
+        let c1 = (
+            p1.x + (p2.x - p0.x) * strength / 3.0,
+            p1.y + (p2.y - p0.y) * strength / 3.0,
+        );
+        let c2 = (
+            p2.x - (p3.x - p1.x) * strength / 3.0,
+            p2.y - (p3.y - p1.y) * strength / 3.0,
+        );
+
+        let (x, y) = cubic_bezier((p1.x, p1.y), c1, c2, (p2.x, p2.y), t);
+
+        CursorSample {
+            timestamp: MediaTimestamp::from_nanos(timestamp),
+            x,
+            y,
+        }
+    }
+}
+
+fn distance_between(a: CursorSample, b: CursorSample) -> f32 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn cubic_bezier(
+    p0: (f32, f32),
+    c1: (f32, f32),
+    c2: (f32, f32),
+    p3: (f32, f32),
+    t: f32,
+) -> (f32, f32) {
+    let inv = 1.0 - t;
+    let b0 = inv * inv * inv;
+    let b1 = 3.0 * inv * inv * t;
+    let b2 = 3.0 * inv * t * t;
+    let b3 = t * t * t;
+
+    (
+        b0 * p0.0 + b1 * c1.0 + b2 * c2.0 + b3 * p3.0,
+        b0 * p0.1 + b1 * c1.1 + b2 * c2.1 + b3 * p3.1,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +281,54 @@ mod tests {
     fn adaptive_window_differs_between_30fps_and_60fps() {
         assert_eq!(SmoothingConfig::for_fps(30).window_size, 5);
         assert_eq!(SmoothingConfig::for_fps(60).window_size, 9);
+    }
+
+    #[test]
+    fn interpolation_empty_input_returns_empty() {
+        let interpolator = BezierInterpolator::new(30);
+
+        assert!(interpolator.sample_frames(&[], 1_000_000_000).is_empty());
+    }
+
+    #[test]
+    fn interpolation_single_point_covers_each_frame_timestamp() {
+        let interpolator = BezierInterpolator::new(30);
+        let input = vec![sample(0, 50.0, 80.0)];
+
+        let frames = interpolator.sample_frames(&input, 100_000_000);
+
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[0].timestamp.nanos, 0);
+        assert_eq!(frames[1].timestamp.nanos, 33_333_333);
+        assert_eq!(frames[2].timestamp.nanos, 66_666_666);
+        assert_eq!(frames[3].timestamp.nanos, 99_999_999);
+        assert!(frames.iter().all(|frame| frame.x == 50.0 && frame.y == 80.0));
+    }
+
+    #[test]
+    fn interpolation_reaches_last_sample_position() {
+        let interpolator = BezierInterpolator::new(60);
+        let input = vec![
+            sample(0, 0.0, 0.0),
+            sample(50_000_000, 30.0, 30.0),
+            sample(100_000_000, 120.0, 80.0),
+        ];
+
+        let frames = interpolator.sample_frames(&input, 100_000_000);
+        let last = frames.last().unwrap();
+
+        assert!(last.x > 100.0, "last x too far from final sample: {}", last.x);
+        assert!(last.y > 65.0, "last y too far from final sample: {}", last.y);
+    }
+
+    #[test]
+    fn interpolation_uses_60fps_frame_interval() {
+        let interpolator = BezierInterpolator::new(60);
+        let input = vec![sample(0, 0.0, 0.0), sample(50_000_000, 60.0, 0.0)];
+
+        let frames = interpolator.sample_frames(&input, 50_000_000);
+
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[1].timestamp.nanos, 16_666_666);
     }
 }
