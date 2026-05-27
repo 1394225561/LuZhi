@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Monotonic timestamp shared by video frames, audio chunks, and UI events.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct MediaTimestamp {
     pub nanos: u64,
 }
