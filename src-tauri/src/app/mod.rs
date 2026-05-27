@@ -1,3 +1,4 @@
+pub mod cursor_metadata_runtime;
 pub mod error;
 pub mod events;
 pub mod mic_level_runtime;
