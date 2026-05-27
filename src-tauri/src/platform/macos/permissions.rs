@@ -48,6 +48,9 @@ fn map_av_authorization_status(status: isize) -> PermissionStatus {
     }
 }
 
+#[link(name = "AVFoundation", kind = "framework")]
+extern "C" {}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     /// macOS 10.15+ 屏幕录制权限预检。

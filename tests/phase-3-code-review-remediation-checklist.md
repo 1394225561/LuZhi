@@ -8,75 +8,75 @@
 
 ## Phase A：前端开始录制防重入
 
-- [ ] `src/App.tsx` 增加启动中防重入状态，例如 `isStarting` 或等价机制。
-- [ ] 点击“开始录制”后，在 Rust 事件返回前不会再次执行 `setCaptureMode`。
-- [ ] 点击“开始录制”后，在 Rust 事件返回前不会再次执行 `setAudioConfig`。
-- [ ] 点击“开始录制”后，在 Rust 事件返回前不会再次执行 `startRecording`。
-- [ ] 启动失败后 UI 进入 `failed`，并且可以返回 idle 后重新开始。
-- [ ] 启动成功收到 `recording-state-changed: recording` 后清理启动中状态。
-- [ ] 前端测试真实连续触发两次开始点击，断言 `start_recording` 只调用 1 次。
+- [x] `src/App.tsx` 增加启动中防重入状态，例如 `isStarting` 或等价机制。（`isStartingRef`）
+- [x] 点击”开始录制”后，在 Rust 事件返回前不会再次执行 `setCaptureMode`。
+- [x] 点击”开始录制”后，在 Rust 事件返回前不会再次执行 `setAudioConfig`。
+- [x] 点击”开始录制”后，在 Rust 事件返回前不会再次执行 `startRecording`。
+- [x] 启动失败后 UI 进入 `failed`，并且可以返回 idle 后重新开始。
+- [x] 启动成功收到 `recording-state-changed: recording` 后清理启动中状态。（event 主路径 + fetchRecordingStatus 兜底）
+- [x] 前端测试真实连续触发两次开始点击，断言 `start_recording` 只调用 1 次。
 
 ## Phase B：前端停止录制防重入
 
-- [ ] `src/App.tsx` 增加停止中防重入状态，例如 `isStopping` 或等价机制。
-- [ ] 连续点击停止按钮不会重复调用 `stopRecording`。
-- [ ] 停止成功后进入 preview，并记录 `RecordingResult`。
-- [ ] 停止失败后进入 failed，并展示错误信息。
-- [ ] 前端测试真实连续触发两次停止点击，断言 `stop_recording` 只调用 1 次。
+- [x] `src/App.tsx` 增加停止中防重入状态，例如 `isStopping` 或等价机制。（`isStoppingRef`）
+- [x] 连续点击停止按钮不会重复调用 `stopRecording`。
+- [x] 停止成功后进入 preview，并记录 `RecordingResult`。（event 主路径 + fetchRecordingStatus 兜底）
+- [x] 停止失败后进入 failed，并展示错误信息。
+- [x] 前端测试真实连续触发两次停止点击，断言 `stop_recording` 只调用 1 次。
 
 ## Phase C：Mic-Level Runtime 生命周期
 
-- [ ] Rust 侧新增可停止、可 join 的 mic-level runtime，或复用现有 runtime 模式。
-- [ ] `AppState` 保存 mic-level runtime handle，而不是只保存 stop flag。
-- [ ] `start_recording` 启动新 mic-level runtime 前会停止并清理旧 runtime。
-- [ ] `stop_recording` 会停止并 join mic-level runtime。
-- [ ] runtime `Drop` 路径会兜底 stop + join。
-- [ ] 快速 start/stop 后旧 mic-level 线程不会继续 emit。
+- [x] Rust 侧新增可停止、可 join 的 mic-level runtime，或复用现有 runtime 模式。（`MicLevelRuntime`）
+- [x] `AppState` 保存 mic-level runtime handle，而不是只保存 stop flag。
+- [x] `start_recording` 启动新 mic-level runtime 前会停止并清理旧 runtime。（Round 2 修复顺序：先停旧再启新）
+- [x] `stop_recording` 会停止并 join mic-level runtime。
+- [x] runtime `Drop` 路径会兜底 stop + join。
+- [x] 快速 start/stop 后旧 mic-level 线程不会继续 emit。
 
 ## Phase D：麦克风关闭与电平重置
 
-- [ ] 每次 `MacRecordingService::start()` 前将共享 `mic_level` 重置为 `0.0`。
-- [ ] 每次 `MacRecordingService::stop()` 后将共享 `mic_level` 重置为 `0.0`。
-- [ ] `capture_microphone == false` 时不启动常驻 mic-level 推送线程。
-- [ ] 麦克风关闭时前端不会显示上一轮录制残留电平。
-- [ ] 麦克风关闭时如需发送事件，只允许发送明确的 `level: 0.0`。
-- [ ] 麦克风开启时说话电平上升，停止后归零。
+- [x] 每次 `MacRecordingService::start()` 前将共享 `mic_level` 重置为 `0.0`。
+- [x] 每次 `MacRecordingService::stop()` 后将共享 `mic_level` 重置为 `0.0`。
+- [x] `capture_microphone == false` 时不启动常驻 mic-level 推送线程。
+- [x] 麦克风关闭时前端不会显示上一轮录制残留电平。（Round 2: setMicVolume(0) 覆盖 idle/completed/failed/backToIdle/micToggle）
+- [x] 麦克风关闭时如需发送事件，只允许发送明确的 `level: 0.0`。（stop_recording 先 service.stop() 再 emit zero 再停 runtime）
+- [x] 麦克风开启时说话电平上升，停止后归零。（后端停止顺序修正 + 前端归零）
 
 ## Phase E：权限测试隔离
 
-- [ ] `permissions.rs` 将 AVFoundation 状态映射拆成纯函数。
-- [ ] `permissions.rs` 将 screen preflight 布尔值映射拆成纯函数。
-- [ ] 普通单测不调用 `MacPermissionProbe::recording_permissions()`。
-- [ ] 单测覆盖 AV status `3 -> Granted`。
-- [ ] 单测覆盖 AV status `2 -> Denied`。
-- [ ] 单测覆盖 AV status `1 -> Denied`。
-- [ ] 单测覆盖 AV status `0 -> NotDetermined`。
-- [ ] 单测覆盖未知 AV status `-> Unknown`。
-- [ ] 单测覆盖 screen preflight `true -> Granted`。
-- [ ] 单测覆盖 screen preflight `false -> NotDetermined`。
+- [x] `permissions.rs` 将 AVFoundation 状态映射拆成纯函数。（`map_av_authorization_status`）
+- [x] `permissions.rs` 将 screen preflight 布尔值映射拆成纯函数。（`map_screen_preflight`）
+- [x] 普通单测不调用 `MacPermissionProbe::recording_permissions()`。
+- [x] 单测覆盖 AV status `3 -> Granted`。（`maps_av_authorized_to_granted`）
+- [x] 单测覆盖 AV status `2 -> Denied`。（`maps_av_denied_to_denied`）
+- [x] 单测覆盖 AV status `1 -> Denied`。（`maps_av_restricted_to_denied`）
+- [x] 单测覆盖 AV status `0 -> NotDetermined`。（`maps_av_not_determined`）
+- [x] 单测覆盖未知 AV status `-> Unknown`。（`maps_unknown_av_status`）
+- [x] 单测覆盖 screen preflight `true -> Granted`。（`maps_screen_preflight_true_to_granted`）
+- [x] 单测覆盖 screen preflight `false -> NotDetermined`。（`maps_screen_preflight_false_to_not_determined`）
 
 ## Phase F：Mic-Level 事件与序列化测试
 
-- [ ] Rust 测试覆盖 `MicLevelPayload { level }` 序列化字段为 `level`。
-- [ ] 前端测试 mock `listen('mic-level')` 并保存 callback。
-- [ ] 前端测试手动触发 `mic-level` payload 后，UI 麦克风电平发生可观察变化。
-- [ ] 前端测试覆盖 recording 状态退出后会调用 mic-level unlisten。
-- [ ] 前端测试覆盖麦克风关闭时不会展示残留动态电平。
+- [x] Rust 测试覆盖 `MicLevelPayload { level }` 序列化字段为 `level`。
+- [x] 前端测试 mock `listen('mic-level')` 并保存 callback。
+- [x] 前端测试手动触发 `mic-level` payload 后，UI 麦克风电平发生可观察变化。（测试: subscribes to mic-level / clears mic volume when returning to idle）
+- [x] 前端测试覆盖 recording 状态退出后会调用 mic-level unlisten。
+- [x] 前端测试覆盖麦克风关闭时不会展示残留动态电平。（测试: removes mic indicator bars when mic is toggled off）
 
 ## Phase G：MicLevelDetector 测试清理
 
-- [ ] `half_amplitude_returns_around_half` 测试改名，名称与断言一致。
-- [ ] 删除测试注释中的临时自我修正语句。
-- [ ] 保留低幅、满幅、静音、reset、窗口大小边界测试。
+- [x] `half_amplitude_returns_around_half` 测试改名，名称与断言一致。（`half_amplitude_clamps_to_one_with_reference_level`）
+- [x] 删除测试注释中的临时自我修正语句。
+- [x] 保留低幅、满幅、静音、reset、窗口大小边界测试。
 
 ## 自动化验证
 
-- [ ] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过。
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` 通过。
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` 无 error。
-- [ ] `cargo build --manifest-path src-tauri/Cargo.toml` 通过。
-- [ ] `npm run build` 通过。
-- [ ] `npm test -- --run` 通过。
+- [x] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过。
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` 通过。（76 tests）
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` 无 error。（21 个既有 warning）
+- [x] `cargo build --manifest-path src-tauri/Cargo.toml` 通过。
+- [x] `npm run build` 通过。
+- [x] `npm test -- --run` 通过。（23 tests）
 
 ## 手动验证
 

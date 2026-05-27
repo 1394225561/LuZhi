@@ -8,7 +8,7 @@
 
 ## UI 验证
 
-- [x] 全屏录制入口显示中文文案。（自动化：14 tests 覆盖全部中文文案渲染）
+- [x] 全屏录制入口显示中文文案。（自动化：21 tests 覆盖全部中文文案渲染）
 - [x] 窗口录制入口显示中文文案。
 - [x] 区域录制入口显示中文文案。
 - [x] 分辨率和帧率参数可选择。（自动化：renders resolution and fps selectors 测试）
@@ -34,14 +34,14 @@
 
 ## 稳定性验证
 
-- [x] 快速点击开始/停止不会导致状态错乱。（代码加固：handleStartRecording 检查 appState !== 'idle' 直接 return）
+- [x] 快速点击开始/停止不会导致状态错乱。（代码加固：isStartingRef/isStoppingRef 防重入 + fetchRecordingStatus 兜底确认）
 - [x] 录制失败后可恢复到可再次录制状态。（handleBackToIdle + handleRetry 重置全部状态）
 - [ ] 设备不可用时不崩溃。（需手动：断开麦克风后开始录制）
 - [x] 权限变更后重新检测状态正确。（handleBackToIdle 中调用 fetchRecordingPermissions 重新检测）
 
 ## 测试要求
 
-- [x] React 录制控制组件有 Vitest 测试。（14 个测试，覆盖 idling/recording/failed 全状态）
+- [x] React 录制控制组件有 Vitest 测试。（23 个测试，覆盖 idling/recording/failed/preview 全状态 + 事件丢失兜底 + 麦克风电平归零 + 录制态 mic meter 可见性）
 - [x] Tauri `invoke` 已 mock。（vi.mock 覆盖 @tauri-apps/api/core + @tauri-apps/api/event）
 - [x] 错误提示组件有测试。（error view + notDetermined 权限引导测试）
 - [x] 权限提示组件有测试。（denied 权限 + notDetermined 权限两类提示均有测试覆盖）

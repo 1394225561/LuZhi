@@ -81,38 +81,79 @@ W1-W12 Phase：
 
 ## 工作任务记录
 
-### 2026-05-26：Phase 3 Code Review 整改完成 (Round 2 — 3 Important 修复)
+### 2026-05-27：Phase 3 Round 3 整改（复审后的剩余问题修复）
+
+输入文件：
+
+- `docs/superpowers/plans/2026-05-26-phase-3-code-review-remediation.md` Section 11
+
+本轮修复（5 个 Phase）：
+
+1. **R3-B**：`MicLevelRuntime` 旧 runtime 清理提升到 `mic_enabled` 分支之前，确保新 session 开始前无条件清理
+2. **R3-C**：修复 `audio_clock_with_session_offset_starts_at_elapsed_time` flaky 测试（增加 1ms sleep）
+3. **R3-A**：录制态麦克风电平可见闭环 — `RecordingStatusBar` 新增 `micEnabled`/`micVolume` props 和 5 段电平指示条，补充 `data-level` 测试
+4. **R3-D**：文档与 checklist 状态同步
+5. **R3-E**：`PreviewView` 导出卡片移除 `motion.div whileTap`，改用 CSS `active:scale-[0.98]`
+
+验证结果：
+
+- `cargo fmt --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` **76 tests** 通过（flaky 已修复）
+- `cargo clippy --all-targets` 无 error（21 pre-existing warnings）
+- `cargo build` 通过
+- `npm run build` 通过
+- `npm test -- --run` **23 tests** 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/lib.rs`, `src-tauri/src/core/clock.rs`, `src/components/recording-status-bar.tsx`, `src/App.tsx`, `src/App.test.tsx`, `src/components/preview-view.tsx`, `tests/phase-3-code-review-remediation-checklist.md`, `tests/phase-3-w5-w6-checklist.md`, `HANDOFF.md`
+
+剩余待完成（不阻塞合并判断但需关注）：
+
+- `npm run tauri dev` 手动验证（录制态 mic 电平可见性、快速点击稳定性、麦克风断开不崩溃）
+- `permissions.rs` FFI Native Safety Gate 人工逐行审查
+- 架构红线人工复核
+- BUG.md 预防规则人工复核
+
+---
+
+### 2026-05-26：Phase 3 Code Review 首版整改 (Round 2)
 
 输入文件：
 
 - `docs/superpowers/plans/2026-05-26-phase-3-code-review-remediation.md`
 - `tests/phase-3-code-review-remediation-checklist.md`
 
-已完成（7 个 Phase 全部完成）：
+Round 2 完成项（7 个 Phase）：
 
-1. **Phase A**：前端开始录制防重入 — `App.tsx` 增加 `isStartingRef` 守卫，阻止快速双击触发多组启动命令
+1. **Phase A**：前端开始录制防重入 — `App.tsx` 增加 `isStartingRef` 守卫
 2. **Phase B**：前端停止录制防重入 — `App.tsx` 增加 `isStoppingRef` 守卫
-3. **Phase C**：`MicLevelRuntime` 生命周期管理 — 新建 `app/mic_level_runtime.rs`，实现可停止、可 join、可 Drop 的线程管理，替换原裸 `thread::spawn` + `Arc<AtomicBool>`
-4. **Phase D**：麦克风关闭与电平重置 — `start_recording` 仅当 `capture_microphone == true` 时启动 mic runtime；`MacRecordingService::start()`/`stop()` 中重置 `mic_level = 0.0`
-5. **Phase E**：权限测试隔离 — `permissions.rs` 提取 `map_av_authorization_status()`、`map_screen_preflight()` 纯函数，替换调用真实 API 的测试
-6. **Phase F**：测试补齐 — `MicLevelPayload` 序列化测试 + `mic-level` 事件监听测试 + 真实双击防重入测试
-7. **Phase G**：`MicLevelDetector` 测试清理 — 重命名 `half_amplitude_clamps_to_one_with_reference_level`，清理注释
+3. **Phase C**：`MicLevelRuntime` 生命周期管理 — 新建 `app/mic_level_runtime.rs`，实现 stop/join/Drop
+4. **Phase D**：麦克风关闭与电平重置 — `capture_microphone == false` 时不启常驻 mic runtime；start/stop 中重置 `mic_level`
+5. **Phase E**：权限测试隔离 — 提取 `map_av_authorization_status()`、`map_screen_preflight()` 纯函数
+6. **Phase F**：测试补齐 — `MicLevelPayload` 序列化测试 + mic-level 事件测试 + 双击防重入测试
+7. **Phase G**：`MicLevelDetector` 测试清理 — 重命名测试、清理注释
+
+Round 2 复审发现的问题（已进入 Round 3 修复）：
+- 防重入锁完全依赖事件清理，事件丢失可能造成 UI/Rust 脱节
+- 录制态 UI 无 mic-level 可见展示入口
+- `start_recording` 旧 `MicLevelRuntime` 清理只在 mic_enabled 分支执行
+- Rust 时钟测试 flaky
+- HANDOFF/checklist 状态与代码事实不一致
 
 验证结果：
 
 - `cargo fmt --check` 通过
-- `cargo test --manifest-path src-tauri/Cargo.toml` **76 tests** 通过
-- `cargo clippy --all-targets` 无 error（21 pre-existing warnings）
+- `cargo test` **76 tests** 通过（1 flaky 需复跑）
+- `cargo clippy --all-targets` 无 error
 - `cargo build` 通过
 - `npm run build` 通过
-- `npm test -- --run` **17 tests** 通过（+3 vs 首版整改）
+- `npm test -- --run` **21 tests** 通过（Round 2 结束时实际为 21，HANDOFF 曾误写为 17）
 
 改动文件：
 
 - **新增**: `src-tauri/src/app/mic_level_runtime.rs`
 - **修改**: `src/App.tsx`, `src/App.test.tsx`, `src-tauri/src/lib.rs`, `src-tauri/src/app/mod.rs`, `src-tauri/src/platform/macos/permissions.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/app/events.rs`, `src-tauri/src/media/mic_level.rs`
-
-后续入口：`tests/phase-3-w5-w6-checklist.md` 中仍有手动验证项待执行（需 `npm run tauri dev`）；`permissions.rs` FFI 需人工 Native Safety Gate 审查。
 
 ---
 

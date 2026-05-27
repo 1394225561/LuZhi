@@ -376,7 +376,7 @@ describe('App', () => {
     fireEvent.click(startButtons[0])
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledTimes(3)
+      expect(invokeMock).toHaveBeenCalledTimes(4)
     })
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, 'set_capture_mode', {
@@ -392,6 +392,7 @@ describe('App', () => {
       },
     })
     expect(invokeMock).toHaveBeenNthCalledWith(3, 'start_recording', undefined)
+    expect(invokeMock).toHaveBeenNthCalledWith(4, 'recording_status', undefined)
   })
 
   it('does not call Tauri when window mode is selected', async () => {
@@ -514,5 +515,303 @@ describe('App', () => {
     expect(screen.getByText('预览与美化')).toBeTruthy()
     // Verify stop_recording returned camelCase result
     expect(invokeMock).toHaveBeenCalledWith('stop_recording', undefined)
+  })
+
+  it('enters recording state via status fallback when event is not emitted', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    vi.mocked(listen).mockImplementation(() => Promise.resolve(() => {}))
+
+    let statusCalls = 0
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') {
+        statusCalls++
+        if (statusCalls === 1) return Promise.resolve({ state: 'idle', canStart: true })
+        return Promise.resolve({ state: 'recording', canStart: false })
+      }
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    const startButtons = await screen.findAllByText('开始录制')
+    fireEvent.click(startButtons[0])
+
+    // Should enter recording state via fallback, without any recording-state-changed event
+    await screen.findByText('正在录制 全屏')
+  })
+
+  it('enters preview state via status fallback when completed event is not emitted', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    const stateCallbacks: Array<(status: { state: string }) => void> = []
+
+    vi.mocked(listen).mockImplementation(
+      (event: string, callback: (event: { event: string; id: number; payload: unknown }) => void) => {
+        if (event === 'recording-state-changed') {
+          stateCallbacks.push((status) => callback({ event, id: 0, payload: status }))
+        }
+        return Promise.resolve(() => {})
+      },
+    )
+
+    let statusCalls = 0
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') {
+        statusCalls++
+        if (statusCalls === 1) return Promise.resolve({ state: 'idle', canStart: true })
+        if (statusCalls === 2) return Promise.resolve({ state: 'recording', canStart: false })
+        return Promise.resolve({ state: 'completed', canStart: true })
+      }
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      if (command === 'stop_recording') {
+        return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    // Enter recording via event
+    const startButtons = await screen.findAllByText('开始录制')
+    fireEvent.click(startButtons[0])
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('start_recording', undefined)
+    })
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'recording' })
+      }
+    })
+
+    // Find stop button
+    await vi.waitFor(() => {
+      const buttons = screen.getAllByRole('button')
+      expect(buttons.length).toBeGreaterThan(0)
+    })
+    const buttons = screen.getAllByRole('button')
+    const stopButton = buttons[buttons.length - 1]
+
+    // Clear callbacks to simulate completed event loss
+    stateCallbacks.length = 0
+
+    await act(async () => {
+      fireEvent.click(stopButton)
+    })
+
+    // Should enter preview state via fallback
+    await screen.findByText('预览与美化')
+  })
+
+  it('clears mic volume when returning to idle', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    const stateCallbacks: Array<(status: { state: string }) => void> = []
+    const micCallbacks: Array<(payload: { level: number }) => void> = []
+
+    vi.mocked(listen).mockImplementation(
+      (event: string, callback: (event: { event: string; id: number; payload: unknown }) => void) => {
+        if (event === 'recording-state-changed') {
+          stateCallbacks.push((status) => callback({ event, id: 0, payload: status }))
+        }
+        if (event === 'mic-level') {
+          micCallbacks.push((payload) => callback({ event, id: 0, payload }))
+        }
+        return Promise.resolve(() => {})
+      },
+    )
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    // Enable microphone so bars are visible in idle state
+    const micButton = screen.getByText('麦克风').closest('button')!
+    fireEvent.click(micButton)
+
+    // Start recording
+    const startButtons = await screen.findAllByText('开始录制')
+    fireEvent.click(startButtons[0])
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('start_recording', undefined)
+    })
+
+    // Enter recording and trigger high mic level
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'recording' })
+      }
+    })
+    act(() => {
+      for (const cb of micCallbacks) {
+        cb({ level: 0.8 })
+      }
+    })
+
+    // In recording state the mic indicator bars should exist (mic is enabled)
+    const micBars = document.querySelectorAll('.rounded-full')
+    expect(micBars.length).toBeGreaterThan(0)
+
+    // Return to idle — should clear micVolume to 0
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'idle' })
+      }
+    })
+
+    // Should be back in idle state showing the start button
+    await screen.findAllByText('开始录制')
+  })
+
+  it('removes mic indicator bars when mic is toggled off', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    // Initially mic is off — bars container should not exist
+    let micBars = document.querySelectorAll('.rounded-full.bg-muted-foreground\\/60')
+    expect(micBars.length).toBe(0)
+
+    // Enable microphone — bars should appear in idle RecordingPanel
+    const micButton = screen.getByText('麦克风').closest('button')!
+
+    await act(async () => {
+      fireEvent.click(micButton)
+    })
+
+    micBars = document.querySelectorAll('.rounded-full.bg-muted-foreground\\/60')
+    expect(micBars.length).toBe(5)
+
+    // Toggle mic off — bars container should be removed
+    await act(async () => {
+      fireEvent.click(micButton)
+    })
+
+    micBars = document.querySelectorAll('.rounded-full.bg-muted-foreground\\/60')
+    expect(micBars.length).toBe(0)
+  })
+
+  it('shows mic level meter in recording status bar when mic is enabled', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    const stateCallbacks: Array<(status: { state: string }) => void> = []
+    const micCallbacks: Array<(payload: { level: number }) => void> = []
+
+    vi.mocked(listen).mockImplementation(
+      (event: string, callback: (event: { event: string; id: number; payload: unknown }) => void) => {
+        if (event === 'recording-state-changed') {
+          stateCallbacks.push((status) => callback({ event, id: 0, payload: status }))
+        }
+        if (event === 'mic-level') {
+          micCallbacks.push((payload) => callback({ event, id: 0, payload }))
+        }
+        return Promise.resolve(() => {})
+      },
+    )
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    // Enable microphone
+    const micButton = screen.getByText('麦克风').closest('button')!
+    fireEvent.click(micButton)
+
+    // Start recording
+    const startButtons = await screen.findAllByText('开始录制')
+    fireEvent.click(startButtons[0])
+
+    // Enter recording state — meter should appear (mic is enabled)
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'recording' })
+      }
+    })
+
+    // Mic level meter should be present with level 0 initially
+    let meter = screen.getByTestId('mic-level-meter')
+    expect(meter).toBeDefined()
+    expect(meter.getAttribute('data-level')).toBe('0')
+
+    // Trigger high mic level
+    act(() => {
+      for (const cb of micCallbacks) {
+        cb({ level: 0.8 })
+      }
+    })
+
+    // Meter should reflect the updated level
+    expect(meter.getAttribute('data-level')).toBe('80')
+
+    // Trigger zero mic level — bars should collapse
+    act(() => {
+      for (const cb of micCallbacks) {
+        cb({ level: 0.0 })
+      }
+    })
+
+    // Meter should be back to zero
+    meter = screen.getByTestId('mic-level-meter')
+    expect(meter.getAttribute('data-level')).toBe('0')
+  })
+
+  it('hides mic level meter when recording with mic disabled', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    const stateCallbacks: Array<(status: { state: string }) => void> = []
+
+    vi.mocked(listen).mockImplementation(
+      (event: string, callback: (event: { event: string; id: number; payload: unknown }) => void) => {
+        if (event === 'recording-state-changed') {
+          stateCallbacks.push((status) => callback({ event, id: 0, payload: status }))
+        }
+        return Promise.resolve(() => {})
+      },
+    )
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    // Mic is disabled by default; start recording directly
+    const startButtons = await screen.findAllByText('开始录制')
+    fireEvent.click(startButtons[0])
+
+    // Enter recording state
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'recording' })
+      }
+    })
+
+    // Mic level meter should not appear when mic is disabled
+    expect(screen.queryByTestId('mic-level-meter')).toBeNull()
   })
 })

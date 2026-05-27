@@ -145,6 +145,7 @@ mod tests {
     #[test]
     fn audio_clock_with_session_offset_starts_at_elapsed_time() {
         let session = SessionClock::new();
+        std::thread::sleep(std::time::Duration::from_millis(1));
         let clock = AudioSampleClock::new(48_000, 2).with_session_clock(&session);
 
         let first = clock.timestamp_for_interleaved_sample_count(960);

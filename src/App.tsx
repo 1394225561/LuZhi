@@ -66,6 +66,7 @@ export default function App() {
     void onRecordingStateChanged((status) => {
       if (status.state === 'idle') {
         setAppState('idle')
+        setMicVolume(0)
         isStartingRef.current = false
         isStoppingRef.current = false
       }
@@ -78,11 +79,13 @@ export default function App() {
       else if (status.state === 'processing') setAppState('processing')
       else if (status.state === 'completed') {
         setAppState('preview')
+        setMicVolume(0)
         isStoppingRef.current = false
       }
       else if (status.state === 'failed') {
         setAppState('failed')
         setErrorMessage('录制过程中发生错误')
+        setMicVolume(0)
         isStartingRef.current = false
         isStoppingRef.current = false
       }
@@ -114,6 +117,11 @@ export default function App() {
     return () => { cancelled = true; unlisten?.() }
   }, [appState])
 
+  // 麦克风关闭时清空残留电平
+  useEffect(() => {
+    if (!micEnabled) setMicVolume(0)
+  }, [micEnabled])
+
   const handleStartRecording = useCallback(async () => {
     if (appState !== 'idle' || isStartingRef.current) return
 
@@ -141,6 +149,13 @@ export default function App() {
         channels: 2,
       })
       await startRecording()
+      // Fallback: sync state via backend query in case recording-state-changed event is lost.
+      const startStatus = await fetchRecordingStatus()
+      if (startStatus.state === 'recording') {
+        setAppState('recording')
+        setIsPaused(false)
+        isStartingRef.current = false
+      }
     } catch (e) {
       setAppState('failed')
       setErrorMessage(String(e))
@@ -172,6 +187,12 @@ export default function App() {
         mixedAudioChunkCount: result.mixedAudioChunkCount,
         outputPath: result.outputPath ?? null,
       })
+      // Fallback: sync state via backend query in case recording-state-changed event is lost.
+      const stopStatus = await fetchRecordingStatus()
+      if (stopStatus.state === 'completed') {
+        setAppState('preview')
+        isStoppingRef.current = false
+      }
     } catch (e) {
       setAppState('failed')
       setErrorMessage(String(e))
@@ -183,6 +204,7 @@ export default function App() {
     setAppState('idle')
     setElapsedTime(0)
     setIsPaused(false)
+    setMicVolume(0)
     setErrorMessage('')
     setRecordingResult(null)
     // 重新检测权限（用户可能在系统设置中修改了权限）
@@ -285,6 +307,8 @@ export default function App() {
               isPaused={isPaused}
               onPause={handlePauseRecording}
               onStop={handleStopRecording}
+              micEnabled={micEnabled}
+              micVolume={micVolume}
             />
           </AnimatePresence>
         </div>

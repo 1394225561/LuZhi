@@ -123,6 +123,17 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
         let _ = tick_app.emit("recording-tick", serde_json::json!({ "elapsed": elapsed }));
     }));
 
+    // Clean up any previous mic-level runtime before starting a new session.
+    {
+        let mut runtime_guard = state
+            .mic_level_runtime
+            .lock()
+            .map_err(|_| "麦克风电平锁已损坏".to_string())?;
+        if let Some(mut existing) = runtime_guard.take() {
+            existing.stop();
+        }
+    }
+
     // Start mic-level runtime only when microphone capture is enabled.
     if mic_enabled {
         let mic_level = {
@@ -138,15 +149,10 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
             let _ = mic_app.emit("mic-level", MicLevelPayload { level });
         });
 
-        let mut runtime_guard = state
+        *state
             .mic_level_runtime
             .lock()
-            .map_err(|_| "麦克风电平锁已损坏".to_string())?;
-        // Stop any previous runtime before replacing.
-        if let Some(mut existing) = runtime_guard.take() {
-            existing.stop();
-        }
-        *runtime_guard = Some(mic_runtime);
+            .map_err(|_| "麦克风电平锁已损坏".to_string())? = Some(mic_runtime);
     } else {
         // Emit a single zero-level event so the frontend knows mic is off.
         let _ = app.emit("mic-level", MicLevelPayload { level: 0.0 });
@@ -170,16 +176,6 @@ async fn stop_recording(
         tick.stop();
     }
 
-    // Stop the mic-level runtime.
-    if let Some(mut mic_runtime) = state
-        .mic_level_runtime
-        .lock()
-        .map_err(|_| "麦克风电平锁已损坏".to_string())?
-        .take()
-    {
-        mic_runtime.stop();
-    }
-
     let service = state.service.clone();
 
     let (new_state, result) = tauri::async_runtime::spawn_blocking(move || {
@@ -190,6 +186,20 @@ async fn stop_recording(
     })
     .await
     .map_err(|e| format!("停止录制任务失败: {e}"))??;
+
+    // Emit final zero mic-level before stopping the runtime so the frontend
+    // receives the zero value and clears its indicator.
+    let _ = app.emit("mic-level", MicLevelPayload { level: 0.0 });
+
+    // Stop the mic-level runtime.
+    if let Some(mut mic_runtime) = state
+        .mic_level_runtime
+        .lock()
+        .map_err(|_| "麦克风电平锁已损坏".to_string())?
+        .take()
+    {
+        mic_runtime.stop();
+    }
 
     emit_state_changed(&app, new_state);
 

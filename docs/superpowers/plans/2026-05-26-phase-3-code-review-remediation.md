@@ -1111,3 +1111,638 @@ let mic_runtime = MicLevelRuntime::spawn(...);
 - 完整自动化矩阵全部通过。
 - `npm run tauri dev` 手动验证完成。
 - `permissions.rs` FFI 完成人工逐行审查。
+
+---
+
+## 11. Round 2 整改后再复审结果（2026-05-27）
+
+### 11.1 本轮复审结论
+
+本轮复审对象是 Phase 3 第 2 轮整改后的工作区改动。与 10.x 中记录的 Round 2 复审阻塞项相比，当前代码已经修复了大部分上一轮问题：
+
+- `src/App.tsx` 已在 start / stop 成功路径加入 `fetchRecordingStatus()` 兜底，降低 `recording-state-changed` 事件丢失导致 UI 卡死的风险。
+- `src-tauri/src/platform/macos/permissions.rs` 已显式链接 `AVFoundation` framework。
+- `stop_recording` 已在停止 mic runtime 前 emit `mic-level { level: 0.0 }`，前端也在 idle / completed / failed / backToIdle / mic toggle off 路径中清理 `micVolume`。
+- 前端测试数量已扩展到 21 个，覆盖 start / stop 防重入、事件丢失兜底、mic-level 监听和关闭麦克风时移除指示条。
+
+本轮没有发现新的 Critical 级问题；捕获主链路没有新增明显阻塞点，音视频帧仍未进入前端 JS 层，媒体队列仍是有界非阻塞发送。
+
+但当前仍不建议标记为“Phase 3 完整完成 / 可合并完成”。剩余风险集中在：
+
+1. `mic-level` 事件虽然进入前端状态，但录制态 UI 没有展示入口，真实麦克风电平反馈没有形成用户可见闭环。
+2. `start_recording` 只在麦克风开启分支清理旧 `MicLevelRuntime`；如果异常路径遗留旧 runtime，再以麦克风关闭状态开始录制，旧线程仍可能继续 emit。
+3. Rust 自动化验证暴露一个时间敏感 flaky 测试；完整测试第一次失败，复跑才通过。
+4. checklist 和 HANDOFF 的完成状态仍有不一致：代码中 Phase E 已实现，但 remediation checklist 仍未勾选；HANDOFF 中测试数量仍写 17 tests，而本轮实际前端测试为 21 tests。
+5. BUG.md 预防规则存在 residual 风险：`PreviewView` 中仍有 `motion.div whileTap` 包裹包含 `Button` 的导出卡片，虽然不阻塞当前录制主链路，但与 BUG-003 的交互拦截风险同类。
+
+### 11.2 本轮复审输入
+
+复审依据：
+
+- `HANDOFF.md`
+- `BUG.md`
+- `.codex/rules/0-global.md`
+- `.codex/rules/1-coding-style.md`
+- `.codex/rules/2-testing.md`
+- `.codex/rules/3-git-commit.md`
+- `.codex/rules/4-security.md`
+- `.codex/rules/5-docs.md`
+- `docs/superpowers/plans/2026-05-26-phase-3-plan.md`
+- `docs/superpowers/plans/2026-05-26-phase-3-code-review-remediation.md`
+- `tests/phase-3-w5-w6-checklist.md`
+- `tests/phase-3-code-review-remediation-checklist.md`
+
+复审范围：
+
+- 当前分支：`feat/architecture-planning`
+- 最近提交：`2807455 feat(record): 完成Phase 3录制联调整改`
+- 当前工作区改动文件：
+  - `src/App.tsx`
+  - `src/App.test.tsx`
+  - `src-tauri/src/lib.rs`
+  - `src-tauri/src/platform/macos/permissions.rs`
+  - `tests/phase-3-code-review-remediation-checklist.md`
+  - `tests/phase-3-w5-w6-checklist.md`
+- 结合已提交 Phase 3 整体实现进行完整性复核：
+  - `src-tauri/src/app/mic_level_runtime.rs`
+  - `src-tauri/src/platform/macos_service.rs`
+  - `src-tauri/src/app/events.rs`
+  - `src-tauri/src/media/mic_level.rs`
+  - `src/lib/tauri.ts`
+  - `src/components/recording-panel.tsx`
+  - `src/components/recording-status-bar.tsx`
+  - `src/components/preview-view.tsx`
+
+### 11.3 本轮验证记录
+
+已执行命令：
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml core::clock::tests::audio_clock_with_session_offset_starts_at_elapsed_time -- --exact
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+git diff --check
+```
+
+验证结果：
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`：通过。
+- 第一次 `cargo test --manifest-path src-tauri/Cargo.toml`：失败，76 tests 中 75 passed / 1 failed。
+  - 失败项：`core::clock::tests::audio_clock_with_session_offset_starts_at_elapsed_time`
+  - 失败断言：`src/core/clock.rs:153` 的 `assert!(first.nanos > 0)`
+- 单独复跑失败项：通过，1 passed。
+- 第二次完整 `cargo test --manifest-path src-tauri/Cargo.toml`：通过，76 passed。
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`：exit 0；保留 21 个既有 warning。
+- `cargo build --manifest-path src-tauri/Cargo.toml`：通过；保留 21 个既有 warning。
+- `npm run build`：通过。
+- `npm test -- --run`：通过，21 tests passed。
+- `git diff --check`：通过。
+
+未执行：
+
+- `npm run tauri dev` GUI 手动验证未执行。
+- `permissions.rs` Native Safety Gate 人工逐行审查未执行。
+
+本轮验证含义：
+
+- 自动化矩阵大体可通过，但不能写成“稳定全绿”，因为 Rust 测试出现过一次真实失败。
+- 前端 build / test 已能证明 TypeScript 和现有 Vitest 测试通过。
+- 当前测试仍没有证明“录制中 UI 对用户可见地展示 mic-level 动态变化”。
+
+### 11.4 完成度复核
+
+#### 已确认满足
+
+- `CaptureMode` 已扩展 `FullScreen` / `Window` / `Area`，后端能解析三种模式。
+- `set_capture_mode` 接受三种模式参数，`start_recording` 对非全屏返回中文错误，不进入实际捕获。
+- `MacPermissionProbe` 已接入真实 macOS API，并拆出纯函数映射测试。
+- 权限普通单测不再调用真实 macOS 权限 API。
+- `MicLevelDetector` 已实现 RMS 计算，且具备静音、满幅、低幅、reset、窗口边界等测试。
+- `MacRecordingService::start()` / `stop()` 会重置共享 `mic_level = 0.0`。
+- `MicLevelRuntime` 有 stop / join / Drop 生命周期管理。
+- 前端开始录制和停止录制已有 `isStartingRef` / `isStoppingRef` 防重入。
+- start / stop 成功后已有 `fetchRecordingStatus()` 兜底。
+- 前端未接收视频帧或音频流。
+- 前端未拼接 FFmpeg 参数。
+- Rust 捕获回调没有新增等待锁、阻塞 channel send 或 Tauri emit。
+- 音视频队列仍通过 `MediaSender::try_send_drop_newest()` 非阻塞发送。
+- Tauri capability 未新增 `allow-all`。
+- 没有执行 `git push` / publish / 生产配置修改。
+
+#### 尚未完整满足
+
+- 录制态 UI 未展示麦克风电平，因此“真实麦克风电平实时反馈”还不是用户可见功能。
+- `tests/phase-3-code-review-remediation-checklist.md` 中 Phase E 仍未勾选，尽管代码已经存在纯函数映射测试。
+- `tests/phase-3-code-review-remediation-checklist.md` 的架构红线复核、BUG.md 复核和合并门槛仍未勾选。
+- `tests/phase-3-w5-w6-checklist.md` 中录制中计时、停止后预览、断开麦克风等手动项仍未验证。
+- `HANDOFF.md` 记录“整改完成 / 自动化全部通过 / npm test 17 tests”，与当前复审发现和 21 tests 输出不一致。
+- `permissions.rs` FFI 仍需人工 Native Safety Gate 审查。
+- Rust flaky test 需要修复，否则 CI 或后续本地验证可能随机失败。
+
+### 11.5 Important Findings
+
+#### Important 1: `mic-level` 事件进入前端状态，但录制态 UI 没有展示入口
+
+**文件：**
+
+- `src/App.tsx:105`
+- `src/App.tsx:254`
+- `src/App.tsx:299`
+- `src/components/recording-panel.tsx:182`
+- `src/components/recording-status-bar.tsx:19`
+- `src/App.test.tsx:611`
+
+**现状：**
+
+`App.tsx` 只在 `appState === 'recording'` 时订阅 `mic-level`：
+
+```ts
+if (appState === 'recording') {
+  void onMicLevel((level) => {
+    if (!cancelled) setMicVolume(Math.round(level * 100))
+  })
+}
+```
+
+但 `micVolume` 只传给 idle 状态下的 `RecordingPanel`：
+
+```tsx
+<RecordingPanel
+  micEnabled={micEnabled}
+  micVolume={micVolume}
+  ...
+/>
+```
+
+进入 recording 状态后渲染的是 `RecordingStatusBar` 和占位录制区域：
+
+```tsx
+<RecordingStatusBar
+  elapsedTime={elapsedTime}
+  isPaused={isPaused}
+  onPause={handlePauseRecording}
+  onStop={handleStopRecording}
+/>
+```
+
+`RecordingStatusBar` 没有 `micVolume` / `micEnabled` props，也没有任何麦克风电平条或数值展示。因此 `mic-level` payload 更新了 React state，但用户在录制中看不到任何电平变化。
+
+**为什么重要：**
+
+- Phase 3 目标明确包含“真实麦克风电平实时反馈”。
+- 当前只完成“后端计算 + 事件传输 + 前端状态更新”，未完成“录制态 UI 展示”。
+- 手动验收项“麦克风开启时开始录制，说话电平明显上升”无法通过当前 UI 观察。
+- `App.test.tsx:611` 的测试名是“clears mic volume when returning to idle”，但只断言存在若干 `.rounded-full` 元素，没有断言 `mic-level { level: 0.8 }` 导致可见高度、类名、文本或 aria 状态变化，属于弱覆盖。
+
+**风险等级：**
+
+Important。它不直接阻塞捕获线程，也不导致内存泄漏，但会让 Phase 3 的用户可见功能未完成。
+
+**整改建议：**
+
+方案 A：把 mic indicator 放进 `RecordingStatusBar`。
+
+- `RecordingStatusBarProps` 增加：
+
+```ts
+micEnabled: boolean
+micVolume: number
+```
+
+- 在录制状态条里显示麦克风图标和 5 段电平条。
+- 当 `micEnabled === false` 时不显示动态条，或显示静默态。
+- 测试触发 `mic-level { level: 0.8 }` 后断言录制态状态条出现可观察变化。
+
+方案 B：在录制态占位区域底部显示独立 mic meter。
+
+- 不改 `RecordingStatusBar` API，但 `App.tsx` recording branch 渲染一个小型 `MicLevelMeter`。
+- 复用 `RecordingPanel` 中的 5 段条逻辑，抽成小组件更清晰。
+
+验收标准：
+
+- 麦克风开启、录制中、收到 `mic-level { level: 0.8 }` 后 UI 有可测试的动态变化。
+- 麦克风关闭时录制中 UI 不显示上一轮动态电平。
+- completed / idle / failed 后 UI 归零或移除动态 meter。
+- 测试不应只查 `.rounded-full` 数量；应查具体 meter 元素的 `data-level`、`aria-valuenow`、文本百分比或段数状态。
+
+#### Important 2: `start_recording` 只在麦克风开启分支清理旧 `MicLevelRuntime`
+
+**文件：**
+
+- `src-tauri/src/lib.rs:126`
+- `src-tauri/src/lib.rs:156`
+- `src-tauri/src/app/mic_level_runtime.rs:38`
+
+**现状：**
+
+当前 `start_recording` 在 `mic_enabled` 为 true 时会先清理旧 runtime：
+
+```rust
+if mic_enabled {
+    {
+        let mut runtime_guard = state.mic_level_runtime.lock()?;
+        if let Some(mut existing) = runtime_guard.take() {
+            existing.stop();
+        }
+    }
+
+    let mic_runtime = MicLevelRuntime::spawn(...);
+    *state.mic_level_runtime.lock()? = Some(mic_runtime);
+} else {
+    let _ = app.emit("mic-level", MicLevelPayload { level: 0.0 });
+}
+```
+
+如果所有 stop 路径都正常执行，旧 runtime 会在 `stop_recording` 中被 take + stop，因此常规路径没有明显泄漏。
+
+但资源释放路径需要覆盖异常情况。例如：
+
+- 上一次录制 stop 过程中出现错误或未来新增路径未清理 runtime。
+- 应用状态被恢复为可 start，但 `mic_level_runtime` 中仍残留旧线程。
+- 用户下一次以 `capture_microphone == false` 开始录制。
+
+此时 `else` 分支只发送一次 zero event，不会 take + stop 旧 runtime。旧线程仍可能继续每 100ms emit 旧 session 的 mic-level。
+
+**为什么重要：**
+
+- 这是资源释放路径异常风险，不是当前最常见主路径 bug。
+- 录制类应用需要把后台线程生命周期做成“新 session 开始前必定清理旧 session runtime”。
+- 当前实现对 mic-enabled / mic-disabled 两个分支的清理语义不一致，后续维护容易踩坑。
+
+**风险等级：**
+
+Important。正常路径下风险较低，但它直接关联线程生命周期和异常路径资源释放。
+
+**整改建议：**
+
+将旧 runtime 清理提升到 `if mic_enabled` 之前：
+
+```rust
+{
+    let mut runtime_guard = state
+        .mic_level_runtime
+        .lock()
+        .map_err(|_| "麦克风电平锁已损坏".to_string())?;
+    if let Some(mut existing) = runtime_guard.take() {
+        existing.stop();
+    }
+}
+
+if mic_enabled {
+    let mic_runtime = MicLevelRuntime::spawn(...);
+    *state.mic_level_runtime.lock()? = Some(mic_runtime);
+} else {
+    let _ = app.emit("mic-level", MicLevelPayload { level: 0.0 });
+}
+```
+
+验收标准：
+
+- 新 session 开始前，无论麦克风开关状态如何，旧 `MicLevelRuntime` 都会被 stop + join。
+- 可补 Rust 单元测试或结构化测试：预置 `mic_level_runtime = Some(...)`，调用麦克风关闭的 start 路径后确认 runtime 被 take。
+- 若当前 `AppState` 私有难以测试，至少保留代码顺序清晰和注释，方便人工审计。
+
+#### Important 3: Rust 测试存在时间敏感 flaky，不能作为稳定合并证据
+
+**文件：**
+
+- `src-tauri/src/core/clock.rs:146`
+- `src-tauri/src/core/clock.rs:153`
+
+**现象：**
+
+第一次完整运行：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+结果：
+
+- 76 tests 中 75 passed / 1 failed。
+- 失败测试：`core::clock::tests::audio_clock_with_session_offset_starts_at_elapsed_time`
+- 失败断言：
+
+```rust
+assert!(first.nanos > 0);
+```
+
+随后单独复跑该测试通过，完整 `cargo test` 第二次也通过。
+
+**初步根因判断：**
+
+`AudioSampleClock::with_session_clock()` 里直接读取：
+
+```rust
+self.session_offset_nanos = session.elapsed_nanos();
+```
+
+测试中创建 `SessionClock` 后立即调用：
+
+```rust
+let session = SessionClock::new();
+let clock = AudioSampleClock::new(48_000, 2).with_session_clock(&session);
+let first = clock.timestamp_for_interleaved_sample_count(960);
+assert!(first.nanos > 0);
+```
+
+在很快的执行路径中，`session.elapsed_nanos()` 可能返回 0，于是 `first.nanos == 0`，测试失败。这说明测试假设“创建 Instant 后立刻 elapsed 必定大于 0”不稳定。
+
+**为什么重要：**
+
+- 合并门槛里写了自动化验证全部通过，但当前存在随机失败可能。
+- 该测试失败不一定代表产品功能失败，但会降低 CI 和本地验证可信度。
+- 这是 Phase 1/2 时间戳链路的测试质量问题，虽然不是本轮代码直接引入，也应该在进入下一阶段前修掉。
+
+**风险等级：**
+
+Important。它是验证稳定性风险，不是运行时主链路 bug。
+
+**整改建议：**
+
+不要依赖“立即 elapsed > 0”。可选方案：
+
+方案 A：测试里在创建 `SessionClock` 后 sleep 一个极短时间。
+
+```rust
+let session = SessionClock::new();
+std::thread::sleep(std::time::Duration::from_millis(1));
+let clock = AudioSampleClock::new(48_000, 2).with_session_clock(&session);
+let first = clock.timestamp_for_interleaved_sample_count(960);
+assert!(first.nanos > 0);
+```
+
+方案 B：调整断言为更贴合行为，不要求首帧一定大于 0。
+
+```rust
+assert!(first.nanos <= session.elapsed_nanos() + 1_000_000);
+```
+
+但方案 B 会弱化“带 session offset”相对默认 0 起点的验证。更稳妥是方案 A，并保留上界断言。
+
+验收标准：
+
+- 连续运行多次完整 `cargo test --manifest-path src-tauri/Cargo.toml` 不再出现该失败。
+- 不改变生产代码，只修正测试时序假设。
+
+#### Important 4: 文档和 checklist 状态与代码事实不一致
+
+**文件：**
+
+- `HANDOFF.md:84`
+- `HANDOFF.md:101`
+- `tests/phase-3-code-review-remediation-checklist.md:45`
+- `tests/phase-3-code-review-remediation-checklist.md:72`
+- `tests/phase-3-code-review-remediation-checklist.md:92`
+- `tests/phase-3-w5-w6-checklist.md:55`
+
+**现状：**
+
+`HANDOFF.md` 当前记录：
+
+- “Phase 3 Code Review 整改完成”
+- “7 个 Phase 全部完成”
+- `npm test -- --run` 17 tests 通过
+
+但本轮复审显示：
+
+- 前端实际测试是 21 tests。
+- 仍有 Important 级功能闭环和资源释放风险。
+- remediation checklist 的 Phase E 仍未勾选，虽然代码已经实现 `map_av_authorization_status()` / `map_screen_preflight()` 纯函数和测试。
+- remediation checklist 的手动验证、架构红线复核、BUG.md 复核、合并门槛均未完成。
+
+**为什么重要：**
+
+- 后续 agent 或人工继续整改时，会以 HANDOFF 和 checklist 作为入口。
+- 文档过度声称“完成”，会误导后续合并判断。
+- 项目约定要求每个 phase 都有完整自测清单，清单状态必须反映事实。
+
+**风险等级：**
+
+Important。它不影响运行时，但影响协作和合并安全。
+
+**整改建议：**
+
+- 更新 `HANDOFF.md` 最新记录：改为“Round 2 复审完成，仍有 Important 待整改”，不要写“全部完成”。
+- 更新 `tests/phase-3-code-review-remediation-checklist.md`：
+  - Phase E 按代码事实勾选。
+  - 自动化验证项根据最新输出更新为 21 frontend tests，但注明 Rust test 曾出现 flaky。
+  - 手动验证保持未勾选。
+  - 架构红线和 BUG.md 复核若已人工确认，可逐项勾选并标注本轮复核；否则保持未勾选。
+- 更新 `tests/phase-3-w5-w6-checklist.md`：
+  - 保留 `npm run tauri dev` 手动项未执行。
+  - 不把“代码加固”直接等价为“快速点击 10 次手动通过”。
+
+### 11.6 Minor / Residual Findings
+
+#### Minor 1: `PreviewView` 仍有 `motion.div whileTap` 包裹包含 Button 的交互区域
+
+**文件：**
+
+- `src/components/preview-view.tsx:317`
+- `src/components/preview-view.tsx:331`
+
+**问题：**
+
+`PreviewView` 的导出预设卡片使用：
+
+```tsx
+<motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+  ...
+  <Button onClick={() => handleExport(preset.id)}>导出</Button>
+</motion.div>
+```
+
+这与 BUG-003 的预防规则同类：不要用 `motion.div` 直接包裹可点击 Button 来实现按压动画。
+
+当前导出按钮还是 TODO / console log，不属于 Phase 3 录制主链路，因此本轮不列为阻塞合并的 Important。但进入 Phase 6 导出或补交互测试前应处理。
+
+**整改建议：**
+
+- 将卡片按压动画改为 CSS `active:scale-[0.98]`。
+- 或把 motion 直接作用于真正的可点击元素，而不是包裹内部 Button 的父级。
+- 为导出按钮增加点击测试，确认不会被父级 pointer / tap 行为吞掉。
+
+### 11.7 主链路、内存安全、线程安全、资源释放专项复核
+
+#### 捕获主链路
+
+本轮未发现新增阻塞捕获回调的改动：
+
+- ScreenCaptureKit 回调仍只做必要拷贝、时间戳归一化和 `try_send_drop_newest()`。
+- cpal callback 仍通过有界 channel 非阻塞发送 `AudioChunk`。
+- `mic-level` 事件 emit 不在捕获回调中执行，而是在独立 runtime 线程中每 100ms 读取共享电平。
+- `start_recording` / `stop_recording` 仍通过 `tauri::async_runtime::spawn_blocking` 执行可能阻塞的 native start / stop。
+
+剩余注意点：
+
+- `recording_status()`、`pause_recording()`、`resume_recording()`、`set_capture_mode()`、`set_audio_config()` 中仍有 `lock().unwrap()`；不是本轮新增问题，但后续若追求零 panic，应统一改为错误返回。
+- `MacScreenCapture::stop()` 等 Native path 仍需人工审查超时、delegate 生命周期和 `Retained<SCStream>` 的 Send 包装安全性。
+
+#### 内存安全
+
+本轮 Round 2 diff 没有新增 unsafe 内存读写。新增的 `#[link(name = "AVFoundation", kind = "framework")] extern "C" {}` 只用于链接 framework，不直接引入新的 unsafe 调用。
+
+仍需 Native Safety Gate 的区域：
+
+- `src-tauri/src/platform/macos/permissions.rs`
+  - `AnyClass::get(c"AVCaptureDevice")`
+  - `NSString::from_str("soun")`
+  - `msg_send![cls, authorizationStatusForMediaType: &*media_type]`
+- `src-tauri/src/platform/macos/screen_capture_kit.rs`
+  - `CVPixelBuffer` base address lock / unlock 成对性。
+  - `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` 的 two-call size query。
+  - `CFRelease(block_buffer)` 是否覆盖所有成功持有路径。
+  - `SendSCStream` / `SendStream` 的 unsafe Send 断言。
+
+本轮未发现明显新增 use-after-free 或内存泄漏路径，但上述 FFI 仍必须由人工逐行审查。
+
+#### 线程安全
+
+已改善：
+
+- `MicLevelRuntime` 保存 `JoinHandle`，`stop()` 会 set flag 并 join。
+- `Drop` 会兜底调用 `stop()`。
+- `mic_level` 使用 `Arc<Mutex<f64>>`，读写粒度很小，不在捕获回调中 emit。
+
+剩余风险：
+
+- `start_recording` 的旧 `MicLevelRuntime` 清理应移到 `mic_enabled` 分支外，确保任何新 session 开始前都先清理旧 runtime。
+- `MicLevelRuntime::stop()` 最多等待当前 100ms sleep 结束，当前可接受；若未来要求 stop 更快，可改为 Condvar / channel wakeup。
+- `std::thread::spawn` 的 consumer thread 在 `MacRecordingService::stop()` join；如果 writer.finish 未来接入真实 FFmpeg 并可能阻塞，需要增加超时或取消策略。
+
+#### 资源释放路径
+
+已改善：
+
+- stop 时先停止 tick runtime。
+- `service.stop()` 停止 native capture、mic capture、consumer thread，并重置 mic level。
+- stop 后 emit zero mic-level，再 stop mic runtime。
+- `MicLevelRuntime` 有 Drop 兜底。
+
+剩余风险：
+
+- mic-disabled start 分支不清旧 mic runtime。
+- `MacRecordingService::start()` 在 `screen_capture.start_combined()` 成功后，如果后续 `mic_capture.start()` 失败，会 stop screen capture 并清 receiver/state；这条 rollback 已存在，但仍需 macOS 设备断开手动验证。
+- `ScreenCaptureKit stopCaptureWithCompletionHandler` 超时后保留 native handles 并设置 `needs_reset`，这是保守策略；必须人工确认不会导致后续旧 callback 向已释放 sink 发送数据。目前 `delegate.clear_sinks()` 在 stop 前执行，可降低风险。
+
+### 11.8 建议继续整改 Phase 拆分
+
+#### Phase R3-A: 录制态麦克风电平可见闭环
+
+**目标：** 让 `mic-level` payload 在 recording UI 中对用户可见，而不是只更新不可见 state。
+
+**建议改动文件：**
+
+- `src/App.tsx`
+- `src/components/recording-status-bar.tsx`
+- 或新增 `src/components/mic-level-meter.tsx`
+- `src/App.test.tsx`
+
+**验收标准：**
+
+- 录制中、麦克风开启时显示电平 meter。
+- 触发 `mic-level { level: 0.8 }` 后，meter 有可测试的高电平状态。
+- 触发 `mic-level { level: 0.0 }` 后，meter 回到静默状态。
+- 麦克风关闭时不显示动态 meter 或显示明确静默态。
+- 测试通过可访问属性或稳定 DOM 标识断言，不依赖泛化 `.rounded-full` 数量。
+
+#### Phase R3-B: `MicLevelRuntime` 新 session 前统一清理
+
+**目标：** 无论本次是否启用麦克风，开始新 session 前都清理旧 mic runtime。
+
+**建议改动文件：**
+
+- `src-tauri/src/lib.rs`
+
+**验收标准：**
+
+- `start_recording` 在读取 `mic_enabled` 后、进入分支前执行 `take + stop existing runtime`。
+- mic-enabled 分支只负责 spawn 新 runtime。
+- mic-disabled 分支只负责 emit zero event，不可能留下旧 runtime。
+- 可人工审查确认没有旧线程跨 session emit 的路径。
+
+#### Phase R3-C: 修复 flaky Rust 测试
+
+**目标：** 让时钟测试不依赖纳秒级调度偶然性。
+
+**建议改动文件：**
+
+- `src-tauri/src/core/clock.rs`
+
+**验收标准：**
+
+- 连续运行 3 次 `cargo test --manifest-path src-tauri/Cargo.toml` 均通过。
+- 只调整测试或测试辅助逻辑，不改生产时间戳行为，除非先单独论证生产行为确有 bug。
+
+#### Phase R3-D: 文档与 checklist 状态同步
+
+**目标：** 让 HANDOFF、Phase 3 checklist、remediation checklist 与代码事实一致。
+
+**建议改动文件：**
+
+- `HANDOFF.md`
+- `tests/phase-3-code-review-remediation-checklist.md`
+- `tests/phase-3-w5-w6-checklist.md`
+
+**验收标准：**
+
+- 不再写“全部完成 / 可合并”这类与本轮复审不一致的结论。
+- Phase E 权限测试隔离按实际代码勾选。
+- 自动化验证数量更新为 Rust 76 tests、前端 21 tests，并注明 flaky 已修复后再写稳定通过。
+- 手动验证未执行项保持未勾选。
+- Native Safety Gate 未执行前保持未勾选。
+
+#### Phase R3-E: BUG.md 预防规则清理
+
+**目标：** 消除 `PreviewView` 中与 BUG-003 同类的 future-risk。
+
+**建议改动文件：**
+
+- `src/components/preview-view.tsx`
+- `src/App.test.tsx` 或独立组件测试
+
+**验收标准：**
+
+- 不再用带 `whileTap` 的 `motion.div` 包住内部 Button。
+- 导出按钮点击不会被父级 motion tap 行为吞掉。
+- 若当前导出仍是 TODO，可至少保留可点击行为测试或删除父级 whileTap。
+
+### 11.9 本轮建议合并门槛
+
+继续整改后，建议满足以下条件再进入合并或 Phase 4：
+
+- Important 1 修复：录制态 UI 可见展示 mic-level，且有真实 payload 驱动测试。
+- Important 2 修复：新 session 开始前无条件清理旧 `MicLevelRuntime`。
+- Important 3 修复：`cargo test` 连续多次稳定通过，不再依赖复跑。
+- Important 4 修复：HANDOFF 和 checklist 与实际状态一致。
+- Minor 1 至少形成明确处理记录；若不立即修复，需写入后续任务。
+- 完整自动化矩阵通过：
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+git diff --check
+```
+
+- `npm run tauri dev` 手动验证完成，并更新 `tests/phase-3-w5-w6-checklist.md`。
+- `permissions.rs` 和 ScreenCaptureKit/cpal unsafe 边界完成人工 Native Safety Gate 审查。
+
+### 11.10 推荐整改顺序
+
+建议按风险和依赖关系处理：
+
+1. **Phase R3-B**：先修 runtime 清理顺序，改动小，直接降低线程生命周期风险。
+2. **Phase R3-C**：修 flaky test，让后续验证可信。
+3. **Phase R3-A**：补录制态 mic-level 可见闭环和测试，这是 Phase 3 功能完整性的核心剩余项。
+4. **Phase R3-D**：同步 checklist / HANDOFF，避免后续继续被旧状态误导。
+5. **Phase R3-E**：清理 `PreviewView whileTap` residual risk；若暂不处理，至少记录到后续 UI 交互整改。

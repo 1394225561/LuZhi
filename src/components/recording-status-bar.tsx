@@ -1,4 +1,4 @@
-import { Pause, Square, Circle } from 'lucide-react'
+import { Mic, Pause, Square, Circle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { motion } from 'framer-motion'
 
@@ -7,6 +7,8 @@ interface RecordingStatusBarProps {
   isPaused: boolean
   onPause: () => void
   onStop: () => void
+  micEnabled: boolean
+  micVolume: number
 }
 
 function formatTime(seconds: number): string {
@@ -21,6 +23,8 @@ export function RecordingStatusBar({
   isPaused,
   onPause,
   onStop,
+  micEnabled,
+  micVolume,
 }: RecordingStatusBarProps) {
   return (
     <motion.div
@@ -60,6 +64,24 @@ export function RecordingStatusBar({
       <div className="font-mono text-lg font-semibold text-foreground tabular-nums min-w-[80px] text-center">
         {formatTime(elapsedTime)}
       </div>
+
+      {/* Mic Level Indicator */}
+      {micEnabled && (
+        <div className="flex items-center gap-1.5" data-testid="mic-level-meter" data-level={micVolume}>
+          <Mic className="w-3.5 h-3.5 text-muted-foreground" />
+          <div className="flex gap-px items-end h-4">
+            {[...Array(5)].map((_, i) => (
+              <motion.div
+                key={i}
+                initial={{ height: 2 }}
+                animate={{ height: i < Math.ceil(micVolume / 20) ? 4 + i * 2 : 2 }}
+                transition={{ duration: 0.1 }}
+                className="w-1 rounded-full bg-muted-foreground/60"
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Controls */}
       <div className="flex items-center gap-1.5">

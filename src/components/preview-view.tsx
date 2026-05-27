@@ -314,13 +314,11 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
 
           <div className="space-y-3">
             {exportPresets.map((preset) => (
-              <motion.div
+              <div
                 key={preset.id}
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
                 className={cn(
                   'relative overflow-hidden rounded-xl border border-border/50 p-4 cursor-pointer transition-all duration-200',
-                  'bg-secondary/30 hover:border-border',
+                  'bg-secondary/30 hover:border-border hover:scale-[1.02] active:scale-[0.98]',
                 )}
               >
                 <div className="flex items-center justify-between">
@@ -336,7 +334,7 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
                     导出
                   </Button>
                 </div>
-              </motion.div>
+              </div>
             ))}
           </div>
         </div>
