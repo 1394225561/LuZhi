@@ -37,6 +37,9 @@ pub enum AppError {
     RecordingFinalizeFailed {
         reason: String,
     },
+    CursorProcessingFailed {
+        reason: String,
+    },
 }
 
 impl Display for AppError {
@@ -71,6 +74,9 @@ impl Display for AppError {
             }
             AppError::RecordingFinalizeFailed { reason } => {
                 write!(formatter, "完成录制文件失败：{reason}")
+            }
+            AppError::CursorProcessingFailed { reason } => {
+                write!(formatter, "光标效果处理失败：{reason}")
             }
         }
     }

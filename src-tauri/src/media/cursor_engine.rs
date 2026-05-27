@@ -352,6 +352,102 @@ impl ClickEffectBuilder {
     }
 }
 
+/// Pure post-recording cursor effect engine.
+pub struct CursorEffectEngine {
+    click_config: ClickAnimationConfig,
+    smoothing_enabled: bool,
+}
+
+impl CursorEffectEngine {
+    pub fn new(click_config: ClickAnimationConfig) -> Self {
+        Self {
+            click_config,
+            smoothing_enabled: true,
+        }
+    }
+
+    pub fn with_smoothing(click_config: ClickAnimationConfig, smoothing_enabled: bool) -> Self {
+        Self {
+            click_config,
+            smoothing_enabled,
+        }
+    }
+}
+
+impl Default for CursorEffectEngine {
+    fn default() -> Self {
+        Self::new(ClickAnimationConfig::default())
+    }
+}
+
+impl CursorProcessor for CursorEffectEngine {
+    fn build_timeline(
+        &self,
+        samples: &[CursorSample],
+        clicks: &[CursorClick],
+        fps: u32,
+        duration_nanos: u64,
+    ) -> AppResult<EffectTimeline> {
+        if fps == 0 {
+            return Err(AppError::CursorProcessingFailed {
+                reason: "帧率必须大于 0".to_string(),
+            });
+        }
+
+        if samples.is_empty() {
+            return Ok(EffectTimeline {
+                fps,
+                duration_nanos,
+                frames: Vec::new(),
+                click_effects: Vec::new(),
+            });
+        }
+
+        let smoothed = if self.smoothing_enabled {
+            let smoother = CursorSmoother::new(SmoothingConfig::for_fps(fps));
+            smoother.smooth(samples)
+        } else {
+            samples.to_vec()
+        };
+        let interpolator = BezierInterpolator::new(fps);
+        let mut frames = interpolator.sample_frames(&smoothed, duration_nanos);
+        let click_effects = ClickEffectBuilder::new(self.click_config).build(clicks);
+
+        apply_click_scale_to_frames(&mut frames, &click_effects);
+
+        Ok(EffectTimeline {
+            fps,
+            duration_nanos,
+            frames,
+            click_effects,
+        })
+    }
+}
+
+fn apply_click_scale_to_frames(frames: &mut [CursorFrame], effects: &[CursorClickEffect]) {
+    for frame in frames {
+        for effect in effects {
+            if frame.timestamp.nanos < effect.start.nanos || frame.timestamp.nanos > effect.end.nanos
+            {
+                continue;
+            }
+
+            let span = effect.end.nanos.saturating_sub(effect.start.nanos).max(1);
+            let t = (frame.timestamp.nanos.saturating_sub(effect.start.nanos) as f32 / span as f32)
+                .clamp(0.0, 1.0);
+            let wave = if t <= 0.35 {
+                t / 0.35
+            } else {
+                1.0 - ((t - 0.35) / 0.65)
+            }
+            .clamp(0.0, 1.0);
+
+            frame.scale = frame.scale.max(1.0 + (effect.max_scale - 1.0) * wave);
+            frame.opacity = frame.opacity.max(effect.peak_opacity * wave);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +635,49 @@ mod tests {
 
         assert_eq!(effects.len(), 2);
         assert!(effects[0].end.nanos <= effects[1].start.nanos + 450_000_000);
+    }
+
+    #[test]
+    fn engine_builds_empty_timeline_for_empty_samples() {
+        let engine = CursorEffectEngine::default();
+
+        let timeline = engine.build_timeline(&[], &[], 30, 1_000_000_000).unwrap();
+
+        assert_eq!(timeline.fps, 30);
+        assert_eq!(timeline.duration_nanos, 1_000_000_000);
+        assert!(timeline.frames.is_empty());
+        assert!(timeline.click_effects.is_empty());
+    }
+
+    #[test]
+    fn engine_builds_frames_and_click_effects() {
+        let engine = CursorEffectEngine::default();
+        let samples = vec![
+            sample(0, 10.0, 10.0),
+            sample(33_333_333, 30.0, 20.0),
+            sample(66_666_666, 80.0, 50.0),
+        ];
+        let clicks = vec![
+            click(33_333_333, ClickPhase::Down, 30.0, 20.0),
+            click(80_000_000, ClickPhase::Up, 30.0, 20.0),
+        ];
+
+        let timeline = engine
+            .build_timeline(&samples, &clicks, 30, 100_000_000)
+            .unwrap();
+
+        assert_eq!(timeline.fps, 30);
+        assert_eq!(timeline.frames.len(), 4);
+        assert_eq!(timeline.click_effects.len(), 1);
+    }
+
+    #[test]
+    fn engine_rejects_zero_fps() {
+        let engine = CursorEffectEngine::default();
+        let error = engine
+            .build_timeline(&[sample(0, 1.0, 1.0)], &[], 0, 100_000_000)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("帧率"));
     }
 }
