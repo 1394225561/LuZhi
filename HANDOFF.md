@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-26 | Phase 3 Code Review 整改完成（自动化验证全部通过，手动验证待执行）。
+> 最后更新：2026-05-27 | Phase 4 光标平滑与点击放大实现完成（自动化验证全部通过，Native Safety Gate 待人工审查）。
 >
 > 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,44 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-05-27：Phase 4 光标平滑与点击放大实现
+
+输入文件：
+
+- `docs/superpowers/plans/2026-05-27-phase-4-cursor-effects.md`
+- `tests/phase-4-w7-w8-checklist.md`
+
+本轮完成（15 Tasks）：
+
+1. `core/timeline.rs` 建立 `CursorSample` / `CursorClick` / `EffectTimeline` serde 模型。
+2. `media/cursor_engine.rs` 实现移动平均、贝塞尔插值、点击放大状态机、CursorEffectEngine 组合。
+3. `app/cursor_metadata_runtime.rs` 和 `platform/macos/cursor_source.rs` 建立录制期光标元数据采集。
+4. `MacRecordingService` 停止录制后写入光标元数据边车文件。
+5. Tauri 命令（`set_beautify_config`、`build_cursor_effect_timeline`、`export_video`）和预览页接入光标美化配置与时间线生成。
+6. `CaptureConfig.show_system_cursor` 控制 SCK 原始光标绘制（美化开启时隐藏系统光标防双光标）。
+
+验证结果：
+
+- `cargo fmt --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` **103 tests** 通过（+27 相比 Phase 3）
+- `cargo clippy --all-targets` 无 error（22 pre-existing SCK FFI warnings）
+- `cargo build` 通过
+- `npm run build` 通过
+- `npm test -- --run` **25 tests** 通过（+2 相比 Phase 3）
+
+改动文件：
+
+- **新增**: `src-tauri/src/core/timeline.rs`, `src-tauri/src/core/processor.rs`, `src-tauri/src/media/cursor_engine.rs`, `src-tauri/src/media/recording_metadata.rs`, `src-tauri/src/app/cursor_metadata_runtime.rs`, `src-tauri/src/platform/macos/cursor_source.rs`
+- **修改**: `src-tauri/src/core/frame.rs`, `src-tauri/src/core/mod.rs`, `src-tauri/src/core/config.rs`, `src-tauri/src/media/mod.rs`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/app/mod.rs`, `src-tauri/src/app/error.rs`, `src-tauri/src/app/events.rs`, `src-tauri/src/platform/macos/mod.rs`, `src-tauri/src/platform/macos/screen_capture_kit.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri.ts`, `src/components/preview-view.tsx`, `src/App.tsx`, `src/App.test.tsx`, `tests/phase-4-w7-w8-checklist.md`
+
+剩余待完成（不阻塞合并判断但需关注）：
+
+- `npm run tauri dev` 手动验证光标元数据、点击采集、时间线 JSON 和双光标策略。
+- `platform/macos/cursor_source.rs` CoreGraphics FFI Native Safety Gate 人工逐行审查。
+- Phase 6 接入生产 FFmpeg compositor 后做真实视频光标效果人工验收。
+
+---
 
 ### 2026-05-27：Phase 3 Round 3 整改（复审后的剩余问题修复）
 
