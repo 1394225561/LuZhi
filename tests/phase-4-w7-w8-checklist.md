@@ -10,7 +10,8 @@
 
 - [x] 录制期能记录 `CursorSample`。（Task 8 自动测试：`recorder_keeps_samples_in_order`）
 - [x] 录制期能记录 `CursorClick`。（Task 8 自动测试：`recorder_detects_left_click_down_and_up`）
-- [x] 光标事件与视频帧使用同一时间基。（CursorMetadataRuntime 使用 SessionClock）
+- [x] 光标代码路径已使用 PTS → session origin 映射（CMSampleBuffer PTS 经 pts_origin 归一化至 SessionClock 域；extract_timestamp_nanos 返回 Option<u64>，无效 PTS 被丢弃不污染 origin）
+- [ ] CMSampleBuffer PTS 与真实 macOS 录制对齐已验证（需人工 `npm run tauri dev` 检查 click timestamp 与视频动作匹配度，以及乱序/跨流 PTS 边界）
 - [x] 光标元数据保存到中间录制元数据中。（Task 10 集成到 MacRecordingService.stop()）
 
 ## 算法验证
@@ -62,11 +63,11 @@
 - [ ] `platform/macos/screen_capture_kit.rs` `showsCursor` 通过 `CaptureConfig.show_system_cursor` 受控
 - [ ] 确认光标美化开启时无系统光标（双光标检查）
 
-## Verification Summary (2026-05-27)
+## Verification Summary (2026-05-27, Round 3)
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: PASS
-- `cargo test --manifest-path src-tauri/Cargo.toml`: **103 tests** PASS
-- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS (22 pre-existing SCK FFI warnings)
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **108 tests** PASS (+4 PTS origin tests, +4 since Round 2)
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS (21 pre-existing SCK FFI warnings)
 - `cargo build --manifest-path src-tauri/Cargo.toml`: PASS
 - `npm run build`: PASS
-- `npm test -- --run`: **25 tests** PASS
+- `npm test -- --run`: **29 tests** PASS (+1 debounce strict ordering test)

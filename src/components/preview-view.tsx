@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Play,
   Pause,
@@ -65,12 +65,34 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
     ...patch,
   })
 
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Clean up debounce timer on unmount so a stale timer from a destroyed
+  // PreviewView doesn't fire backend calls against a new recording session.
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current)
+      }
+    }
+  }, [])
+
   const handleBeautifyChange = (config: Partial<BeautifyConfig>) => {
-    void setBeautifyConfig(currentBeautifyConfig(config))
-      .then(() => buildCursorEffectTimeline())
-      .catch((error) => {
-        console.error('光标效果处理失败', error)
-      })
+    const nextConfig = currentBeautifyConfig(config)
+
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current)
+    }
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null
+      // Await config write before building timeline so we never build with
+      // a stale configuration.
+      void setBeautifyConfig(nextConfig)
+        .then(() => buildCursorEffectTimeline())
+        .catch((error) => {
+          console.error('光标效果处理失败', error)
+        })
+    }, 300)
   }
 
   const handleExport = (preset: ExportPreset) => {

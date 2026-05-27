@@ -52,7 +52,9 @@ unsafe impl Send for SendSCStream {}
 struct StreamOutputIvars {
     video_sink: Mutex<Option<VideoFrameSink>>,
     audio_sink: Mutex<Option<AudioChunkSink>>,
-    timestamp_normalizer: crate::core::clock::TimestampNormalizer,
+    session_clock: Arc<crate::core::clock::SessionClock>,
+    /// (first_cmsamplebuffer_pts_nanos, session_clock_elapsed_at_first_pts)
+    pts_origin: Mutex<Option<(u64, u64)>>,
 }
 
 // Only protocol conformance goes inside define_class! — all helper functions
@@ -93,11 +95,16 @@ objc2::define_class!(
 );
 
 impl StreamOutput {
-    fn new(video_sink: VideoFrameSink, audio_sink: AudioChunkSink) -> Retained<Self> {
+    fn new(
+        video_sink: VideoFrameSink,
+        audio_sink: AudioChunkSink,
+        session_clock: Arc<crate::core::clock::SessionClock>,
+    ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(StreamOutputIvars {
             video_sink: Mutex::new(Some(video_sink)),
             audio_sink: Mutex::new(Some(audio_sink)),
-            timestamp_normalizer: crate::core::clock::TimestampNormalizer::default(),
+            session_clock,
+            pts_origin: Mutex::new(None),
         });
         unsafe { objc2::msg_send![super(this), init] }
     }
@@ -114,6 +121,46 @@ impl StreamOutput {
 // Frame/audio extraction helpers (outside define_class! to avoid method macro)
 // ---------------------------------------------------------------------------
 
+/// Core PTS normalization, factored for testability. The first valid PTS
+/// establishes the origin; subsequent PTS values are shifted so they share the
+/// same time domain as cursor samples.
+///
+/// Uses i64 arithmetic for the PTS delta so that a valid sample with a PTS
+/// earlier than `first_pts` (e.g. audio callback arriving before video despite
+/// having an earlier PTS) maps to a proportionally lower session-relative time
+/// rather than being silently flattened to `session_at_first`.
+fn compute_normalized_pts(
+    origin: &mut Option<(u64, u64)>,
+    pts_nanos: u64,
+    session_entry_nanos: u64,
+) -> u64 {
+    match *origin {
+        Some((first_pts, session_at_first)) => {
+            let delta = pts_nanos as i64 - first_pts as i64;
+            let result = delta.saturating_add(session_at_first as i64);
+            result.max(0) as u64
+        }
+        None => {
+            *origin = Some((pts_nanos, session_entry_nanos));
+            session_entry_nanos
+        }
+    }
+}
+
+/// Maps a CMSampleBuffer PTS (host-time nanoseconds) to a session-relative
+/// timestamp anchored to the shared SessionClock. The first PTS seen by any
+/// stream (video or system audio) establishes the mapping; subsequent PTS
+/// values are shifted so they share the same time domain as cursor samples
+/// (which use SessionClock directly via the cursor metadata runtime).
+///
+/// `session_entry_nanos` must be captured at callback entry, before any pixel
+/// copy or audio conversion, so the origin does not include callback-internal
+/// processing delay.
+fn normalize_pts(delegate: &StreamOutput, pts_nanos: u64, session_entry_nanos: u64) -> u64 {
+    let mut origin = delegate.ivars().pts_origin.lock().unwrap();
+    compute_normalized_pts(&mut origin, pts_nanos, session_entry_nanos)
+}
+
 /// Extracts BGRA pixel data from CMSampleBuffer and sends as VideoFrameRef.
 ///
 /// # Safety
@@ -121,6 +168,15 @@ impl StreamOutput {
 /// Reads pixel data from the CMSampleBuffer's CVPixelBuffer.
 /// Data is copied into Arc<[u8]> before the sample buffer is released.
 unsafe fn handle_video_frame(delegate: &StreamOutput, sample_buffer: &CMSampleBuffer) {
+    // Read CMSampleBuffer PTS at callback entry. If PTS is invalid, discard the
+    // frame rather than using a fallback that would poison the pts_origin.
+    let Some(pts_nanos) = extract_timestamp_nanos(sample_buffer) else {
+        return;
+    };
+    // Capture session time at callback entry so origin establishment does not
+    // include pixel-copy delay.
+    let session_entry_nanos = delegate.ivars().session_clock.elapsed_nanos();
+
     let Some(image_buffer) = cmsamplebuffer_get_image_buffer(sample_buffer) else {
         return;
     };
@@ -149,11 +205,10 @@ unsafe fn handle_video_frame(delegate: &StreamOutput, sample_buffer: &CMSampleBu
 
     cvpixelbuffer_unlock_base_address(image_buffer, 0);
 
-    let timestamp_nanos = extract_timestamp_nanos(sample_buffer);
-    let timestamp = delegate
-        .ivars()
-        .timestamp_normalizer
-        .normalize(timestamp_nanos);
+    // Map PTS to session-relative time only after all validations pass so an
+    // invalid sample never establishes the global pts_origin.
+    let timestamp_nanos = normalize_pts(delegate, pts_nanos, session_entry_nanos);
+    let timestamp = crate::core::frame::MediaTimestamp::from_nanos(timestamp_nanos);
 
     let frame = VideoFrame {
         timestamp,
@@ -175,6 +230,15 @@ unsafe fn handle_video_frame(delegate: &StreamOutput, sample_buffer: &CMSampleBu
 ///
 /// Reads audio data from the CMSampleBuffer's audio buffer list.
 unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBuffer) {
+    // Read CMSampleBuffer PTS at callback entry. If PTS is invalid, discard the
+    // chunk rather than using a fallback that would poison the pts_origin.
+    let Some(pts_nanos) = extract_timestamp_nanos(sample_buffer) else {
+        return;
+    };
+    // Capture session time at callback entry so origin establishment does not
+    // include audio-conversion delay.
+    let session_entry_nanos = delegate.ivars().session_clock.elapsed_nanos();
+
     let Some(format_desc) = cmsamplebuffer_get_format_description(sample_buffer) else {
         return;
     };
@@ -299,11 +363,10 @@ unsafe fn handle_audio_chunk(delegate: &StreamOutput, sample_buffer: &CMSampleBu
         return;
     }
 
-    let timestamp_nanos = extract_timestamp_nanos(sample_buffer);
-    let timestamp = delegate
-        .ivars()
-        .timestamp_normalizer
-        .normalize(timestamp_nanos);
+    // Map PTS to session-relative time only after all validations pass so an
+    // invalid sample never establishes the global pts_origin.
+    let timestamp_nanos = normalize_pts(delegate, pts_nanos, session_entry_nanos);
+    let timestamp = crate::core::frame::MediaTimestamp::from_nanos(timestamp_nanos);
 
     let chunk = AudioChunk {
         timestamp,
@@ -464,7 +527,8 @@ unsafe fn cf_release(ptr: *const std::ffi::c_void) {
 }
 
 /// Extract display timestamp from CMSampleBuffer as nanoseconds.
-unsafe fn extract_timestamp_nanos(sample_buffer: &CMSampleBuffer) -> u64 {
+/// Returns `None` when the sample buffer has no valid presentation timestamp.
+unsafe fn extract_timestamp_nanos(sample_buffer: &CMSampleBuffer) -> Option<u64> {
     let mut timing_info = std::mem::MaybeUninit::<CMSampleBufferTimingInfo>::uninit();
     let status =
         CMSampleBufferGetSampleTimingInfo(sample_buffer as *const _, 0, timing_info.as_mut_ptr());
@@ -474,10 +538,10 @@ unsafe fn extract_timestamp_nanos(sample_buffer: &CMSampleBuffer) -> u64 {
         let pts = info.presentationTimeStamp;
         if pts.timescale > 0 {
             let seconds = pts.value as f64 / pts.timescale as f64;
-            return (seconds * 1_000_000_000.0) as u64;
+            return Some((seconds * 1_000_000_000.0) as u64);
         }
     }
-    0
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +583,7 @@ impl MacScreenCapture {
         capture_system_audio: bool,
         video_sink: VideoFrameSink,
         audio_sink: AudioChunkSink,
+        session_clock: Arc<crate::core::clock::SessionClock>,
     ) -> AppResult<()> {
         use objc2_foundation::NSArray;
 
@@ -582,7 +647,7 @@ impl MacScreenCapture {
         }
 
         // Create the stream delegate.
-        let delegate = StreamOutput::new(video_sink, audio_sink);
+        let delegate = StreamOutput::new(video_sink, audio_sink, session_clock);
 
         // Create the SCStream.
         let stream = unsafe {
@@ -716,7 +781,8 @@ impl ScreenCapture for MacScreenCapture {
             tx
         });
 
-        self.start_stream(&config, true, sink, audio_sink)
+        let session_clock = Arc::new(crate::core::clock::SessionClock::new());
+        self.start_stream(&config, true, sink, audio_sink, session_clock)
     }
 
     fn stop(&mut self) -> AppResult<()> {
@@ -797,6 +863,7 @@ impl MacScreenCapture {
         capture_system_audio: bool,
         video_sink: VideoFrameSink,
         audio_sink: AudioChunkSink,
+        session_clock: Arc<crate::core::clock::SessionClock>,
     ) -> AppResult<()> {
         if self.running {
             return Err(AppError::InvalidState {
@@ -804,7 +871,13 @@ impl MacScreenCapture {
                 action: "start",
             });
         }
-        self.start_stream(&config, capture_system_audio, video_sink, audio_sink)
+        self.start_stream(
+            &config,
+            capture_system_audio,
+            video_sink,
+            audio_sink,
+            session_clock,
+        )
     }
 }
 
@@ -1099,5 +1172,55 @@ mod tests {
     fn mac_audio_stop_when_not_running_succeeds() {
         let mut capture = MacScreenCapture::new();
         assert!(AudioCapture::stop(&mut capture).is_ok());
+    }
+
+    #[test]
+    fn pts_normalize_first_call_establishes_origin() {
+        let mut origin: Option<(u64, u64)> = None;
+        let result = compute_normalized_pts(&mut origin, 100_000_000, 5_000_000);
+        // First PTS maps to session elapsed time at that point.
+        assert_eq!(result, 5_000_000);
+        assert_eq!(origin, Some((100_000_000, 5_000_000)));
+    }
+
+    #[test]
+    fn pts_normalize_second_call_shifts_by_first_pts() {
+        let mut origin = Some((100_000_000, 5_000_000));
+        let result = compute_normalized_pts(&mut origin, 200_000_000, 105_000_000);
+        // 200M - 100M + 5M = 105M
+        assert_eq!(result, 105_000_000);
+        // Origin unchanged.
+        assert_eq!(origin, Some((100_000_000, 5_000_000)));
+    }
+
+    #[test]
+    fn pts_normalize_later_valid_pts_not_compressed_by_invalid_first() {
+        // If an invalid PTS were to establish origin (e.g. 0), a later valid PTS
+        // would produce a huge shift. This test simulates that the first call
+        // that actually establishes origin uses the real PTS.
+        let mut origin: Option<(u64, u64)> = None;
+        // Valid first call with real PTS.
+        let first = compute_normalized_pts(&mut origin, 1_000_000_000, 10_000_000);
+        assert_eq!(first, 10_000_000);
+        // Later PTS: (2B - 1B + 10M) = 1.01B
+        let second = compute_normalized_pts(&mut origin, 2_000_000_000, 1_010_000_000);
+        assert_eq!(second, 1_010_000_000);
+    }
+
+    #[test]
+    fn earlier_valid_pts_gets_lower_session_time() {
+        // When an audio callback arrives first and establishes origin,
+        // a subsequent video callback with an earlier PTS should map
+        // to a proportionally lower session-relative time, not be
+        // silently flattened to session_at_first.
+        let mut origin = Some((200_000_000, 10_000_000));
+        let result = compute_normalized_pts(&mut origin, 100_000_000, 0);
+        // delta = 100M - 200M = -100M, result = -100M + 10M = -90M → max(0)
+        assert_eq!(result, 0);
+        // But a slightly earlier PTS preserves the ordering:
+        let mut origin2 = Some((200_000_000, 10_000_000));
+        let result2 = compute_normalized_pts(&mut origin2, 195_000_000, 0);
+        // delta = 195M - 200M = -5M, result = -5M + 10M = 5M
+        assert_eq!(result2, 5_000_000);
     }
 }

@@ -82,6 +82,9 @@ pub struct CursorEffectSummaryPayload {
 pub struct PostProcessProgressPayload {
     pub stage: &'static str,
     pub progress: u8,
+    /// When set, indicates the post-process stage failed with this message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[cfg(test)]
@@ -132,11 +135,27 @@ mod tests {
         let payload = PostProcessProgressPayload {
             stage: "cursor",
             progress: 100,
+            error: None,
         };
 
         let json = serde_json::to_string(&payload).unwrap();
 
         assert!(json.contains("\"stage\":\"cursor\""));
         assert!(json.contains("\"progress\":100"));
+        // error field should be absent when None
+        assert!(!json.contains("error"));
+    }
+
+    #[test]
+    fn post_process_progress_includes_error_when_present() {
+        let payload = PostProcessProgressPayload {
+            stage: "cursor",
+            progress: 0,
+            error: Some("构建失败".to_string()),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+
+        assert!(json.contains("\"error\":\"构建失败\""));
     }
 }

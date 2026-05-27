@@ -885,4 +885,153 @@ describe('App', () => {
       expect(invokeMock).toHaveBeenCalledWith('export_video', { preset: 'bilibili' })
     })
   })
+
+  it('debounces consecutive beautify changes into a single timeline build', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 10, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    vi.useFakeTimers()
+
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[0])
+    fireEvent.click(switches[0])
+
+    await act(async () => {
+      vi.advanceTimersByTime(350)
+    })
+
+    const setBeautifyCalls = invokeMock.mock.calls.filter(
+      (call: unknown[]) => (call[0] as string) === 'set_beautify_config',
+    )
+    expect(setBeautifyCalls).toHaveLength(1)
+
+    const buildCalls = invokeMock.mock.calls.filter(
+      (call: unknown[]) => (call[0] as string) === 'build_cursor_effect_timeline',
+    )
+    expect(buildCalls).toHaveLength(1)
+
+    vi.useRealTimers()
+  })
+
+  it('clears debounce timer on unmount so no backend call fires after leaving preview', async () => {
+    let buildCalled = false
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        buildCalled = true
+        return Promise.resolve({ frameCount: 10, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    const { unmount } = render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[1])
+
+    // Unmount before the 300ms debounce fires.
+    unmount()
+
+    // Wait well past the debounce window.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+
+    expect(buildCalled).toBe(false)
+  })
+
+  it('does not build timeline when set_beautify_config rejects', async () => {
+    let buildCalled = false
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_beautify_config') return Promise.reject(new Error('config write failed'))
+      if (command === 'build_cursor_effect_timeline') {
+        buildCalled = true
+        return Promise.resolve({ frameCount: 10, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[1])
+
+    // Wait past the debounce window.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+
+    // set_beautify_config was called (and rejected).
+    expect(invokeMock).toHaveBeenCalledWith('set_beautify_config', expect.anything())
+    // build_cursor_effect_timeline must NOT be called after rejection.
+    expect(buildCalled).toBe(false)
+  })
+
+  it('delays timeline build until set_beautify_config resolves', async () => {
+    let resolveConfig: (value: void) => void = () => {}
+    let buildCalled = false
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_beautify_config') {
+        return new Promise<void>((resolve) => {
+          resolveConfig = resolve
+        })
+      }
+      if (command === 'build_cursor_effect_timeline') {
+        buildCalled = true
+        return Promise.resolve({ frameCount: 10, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+    buildCalled = false
+
+    // Switch to fake timers after React has finished rendering.
+    vi.useFakeTimers()
+
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[0])
+
+    // Advance past the 300ms debounce window.
+    await act(async () => {
+      vi.advanceTimersByTime(350)
+    })
+
+    // set_beautify_config should have been called by now.
+    expect(invokeMock).toHaveBeenCalledWith('set_beautify_config', expect.anything())
+    // build_cursor_effect_timeline must NOT be called while config is pending.
+    expect(buildCalled).toBe(false)
+
+    // Resolve the config promise.
+    await act(async () => {
+      resolveConfig()
+    })
+
+    // After config resolves, build_cursor_effect_timeline should be called.
+    await vi.waitFor(() => {
+      expect(buildCalled).toBe(true)
+    })
+
+    vi.useRealTimers()
+  })
 })

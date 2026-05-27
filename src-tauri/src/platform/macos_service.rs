@@ -42,6 +42,9 @@ pub struct MacRecordingService {
     cursor_runtime: Option<CursorMetadataRuntime>,
     last_cursor_metadata_path: Option<String>,
     last_effect_timeline_path: Option<String>,
+    /// Monotonically incrementing session counter. Used to guard async
+    /// post-process jobs against writing stale results into a new session.
+    session_id: u64,
 }
 
 impl MacRecordingService {
@@ -51,6 +54,10 @@ impl MacRecordingService {
 
     pub fn set_last_effect_timeline_path(&mut self, path: Option<String>) {
         self.last_effect_timeline_path = path;
+    }
+
+    pub fn current_session_id(&self) -> u64 {
+        self.session_id
     }
 }
 
@@ -71,6 +78,7 @@ impl MacRecordingService {
             cursor_runtime: None,
             last_cursor_metadata_path: None,
             last_effect_timeline_path: None,
+            session_id: 0,
         }
     }
 
@@ -96,10 +104,20 @@ impl MacRecordingService {
     pub fn start(&mut self, config: CaptureConfig, audio_config: AudioConfig) -> AppResult<()> {
         self.state_machine.start()?;
 
+        // Clear stale session state from any previous recording.
+        self.last_cursor_metadata_path = None;
+        self.last_effect_timeline_path = None;
+        self.session_id = self.session_id.wrapping_add(1);
+
         // Reset mic level from any previous session.
         if let Ok(mut guard) = self.mic_level.lock() {
             *guard = 0.0;
         }
+
+        // Create a shared session clock before any capture starts so video,
+        // system audio, microphone, and cursor timestamps all share the same
+        // monotonic origin (Instant::now()).
+        let session_clock = Arc::new(crate::core::clock::SessionClock::new());
 
         // Create bounded channels for video and system audio.
         const VIDEO_QUEUE_CAPACITY: usize = 90;
@@ -113,16 +131,13 @@ impl MacRecordingService {
             audio_config.capture_system_audio,
             video_sender,
             audio_sender,
+            session_clock.clone(),
         ) {
             self.state_machine.fail();
             return Err(error);
         }
         self.video_receiver = Some(video_receiver);
         self.system_audio_receiver = Some(audio_receiver);
-
-        // Create a shared session clock so microphone timestamps share the
-        // same host-clock basis as ScreenCaptureKit CMSampleBuffer timestamps.
-        let session_clock = Arc::new(crate::core::clock::SessionClock::new());
 
         // Start microphone capture if requested.
         if audio_config.capture_microphone {
@@ -174,11 +189,24 @@ impl MacRecordingService {
     }
 
     /// Stops all captures and finalizes the recording session.
+    ///
+    /// All resource-release steps (capture stop, consumer join, cursor stop,
+    /// mic reset, state machine transition) are executed regardless of
+    /// intermediate errors. Errors are collected and returned together so
+    /// a sidecar write failure never skips cleanup.
     pub fn stop(&mut self) -> AppResult<RecordingResult> {
-        // Stop native captures first so no new media can be enqueued.
-        // The consumer thread may still be draining, but once sinks are
-        // cleared and native streams are stopped, the queues are bounded
-        // and will be fully drained before writer.finish().
+        let mut errors: Vec<String> = Vec::new();
+
+        // Stop cursor runtime BEFORE native captures so the metadata duration
+        // reflects the moment we decided to stop, not the SCK async teardown
+        // (stopCaptureWithCompletionHandler can block for up to 5s).
+        let cursor_metadata = self
+            .cursor_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.stop());
+        self.cursor_runtime = None;
+
+        // Stop native captures so no new media can be enqueued.
         let capture_result = ScreenCapture::stop(&mut self.screen_capture);
         let mic_result = self.mic_capture.stop();
 
@@ -204,44 +232,55 @@ impl MacRecordingService {
 
         self.stop_flag = None;
 
-        // Stop cursor runtime and write metadata sidecar.
-        let cursor_metadata = self
-            .cursor_runtime
-            .as_mut()
-            .and_then(|runtime| runtime.stop());
-        self.cursor_runtime = None;
-
-        let cursor_metadata_path = if let Some(metadata) = cursor_metadata {
-            let path = cursor_metadata_path();
-            RecordingMetadataWriter::write_metadata(&path, &metadata)?;
-            Some(path.to_string_lossy().to_string())
-        } else {
-            None
+        // Write cursor metadata sidecar (cursor runtime is already stopped).
+        let cursor_metadata_path = match cursor_metadata {
+            Some(metadata) => {
+                let path = cursor_metadata_path();
+                match RecordingMetadataWriter::write_metadata(&path, &metadata) {
+                    Ok(()) => Some(path.to_string_lossy().to_string()),
+                    Err(e) => {
+                        errors.push(format!("光标元数据写入失败: {e}"));
+                        None
+                    }
+                }
+            }
+            None => None,
         };
 
         result.cursor_metadata_path = cursor_metadata_path.clone();
         result.effect_timeline_path = self.last_effect_timeline_path.clone();
         self.last_cursor_metadata_path = cursor_metadata_path;
 
-        // Reset mic level after session ends.
+        // Reset mic level after session ends — always executed.
         if let Ok(mut guard) = self.mic_level.lock() {
             *guard = 0.0;
         }
 
-        // If either capture failed to stop, transition to Failed state.
+        // Collect capture/mic stop errors.
         if let Err(e) = capture_result {
-            self.state_machine.fail();
-            return Err(e);
+            errors.push(format!("屏幕录制停止失败: {e}"));
         }
         if let Err(e) = mic_result {
-            self.state_machine.fail();
-            return Err(e);
+            errors.push(format!("麦克风停止失败: {e}"));
         }
 
-        self.state_machine.stop()?;
-        self.state_machine.complete()?;
-
-        Ok(result)
+        // Always drive state machine to a terminal state.
+        if errors.is_empty() {
+            if let Err(e) = self.state_machine.stop() {
+                self.state_machine.fail();
+                return Err(e);
+            }
+            if let Err(e) = self.state_machine.complete() {
+                self.state_machine.fail();
+                return Err(e);
+            }
+            Ok(result)
+        } else {
+            self.state_machine.fail();
+            Err(crate::app::error::AppError::RecordingFinalizeFailed {
+                reason: errors.join("; "),
+            })
+        }
     }
 
     pub fn pause(&mut self) -> AppResult<()> {
@@ -358,12 +397,14 @@ impl Default for MacRecordingService {
 }
 
 fn cursor_metadata_path() -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     std::env::temp_dir()
         .join("luzhi-recordings")
-        .join(format!("cursor-metadata-{millis}.json"))
+        .join(format!("cursor-metadata-{millis}-{seq}.json"))
 }

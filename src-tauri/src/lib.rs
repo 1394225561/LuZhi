@@ -332,18 +332,37 @@ fn set_beautify_config(
 }
 
 #[tauri::command]
-fn build_cursor_effect_timeline(
+async fn build_cursor_effect_timeline(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<CursorEffectSummaryPayload, String> {
-    let metadata_path = {
+    // Reject during active recording — timeline must be built post-recording.
+    {
         let service = state
             .service
             .lock()
             .map_err(|_| "录制服务锁已损坏".to_string())?;
-        service
+        if matches!(
+            service.state(),
+            RecordingState::Recording | RecordingState::Paused | RecordingState::Processing
+        ) {
+            return Err("录制进行中，无法构建光标效果时间线。请先停止录制。".to_string());
+        }
+    }
+
+    // Capture session id and metadata path atomically so we can verify after
+    // the async build that no new session has started (which would make our
+    // result stale).
+    let (session_id, metadata_path) = {
+        let service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        let sid = service.current_session_id();
+        let path = service
             .last_cursor_metadata_path()
-            .ok_or_else(|| "没有可用的光标元数据，请先完成一次录制".to_string())?
+            .ok_or_else(|| "没有可用的光标元数据，请先完成一次录制".to_string())?;
+        (sid, path)
     };
 
     let _ = app.emit(
@@ -351,65 +370,122 @@ fn build_cursor_effect_timeline(
         PostProcessProgressPayload {
             stage: "cursor",
             progress: 0,
+            error: None,
         },
     );
 
-    let metadata = RecordingMetadataWriter::read_metadata(PathBuf::from(&metadata_path).as_path())
-        .map_err(|error| error.to_string())?;
     let config = state
         .beautify_config
         .lock()
         .map_err(|_| "美化配置锁已损坏".to_string())?
         .clone();
 
-    let engine = CursorEffectEngine::with_smoothing(
-        ClickAnimationConfig {
-            max_scale: if config.cursor_magnification {
-                config.magnification_factor.clamp(1.0, 3.0)
-            } else {
-                1.0
-            },
-            peak_opacity: if config.cursor_magnification {
-                0.35
-            } else {
-                0.0
-            },
-        },
-        config.cursor_smoothing,
-    );
-
-    let clicks = if config.cursor_magnification {
-        metadata.cursor_clicks.as_slice()
-    } else {
-        &[]
-    };
-
-    let timeline = engine
-        .build_timeline(
-            &metadata.cursor_samples,
-            clicks,
-            metadata.fps,
-            metadata.duration_nanos,
+    let app_for_blocking = app.clone();
+    let metadata_path_for_blocking = metadata_path.clone();
+    let join_result = tauri::async_runtime::spawn_blocking(move || {
+        let metadata = RecordingMetadataWriter::read_metadata(
+            PathBuf::from(&metadata_path_for_blocking).as_path(),
         )
         .map_err(|error| error.to_string())?;
 
-    let path = effect_timeline_path();
-    RecordingMetadataWriter::write_effect_timeline(&path, &timeline)
-        .map_err(|error| error.to_string())?;
+        let engine = CursorEffectEngine::with_smoothing(
+            ClickAnimationConfig {
+                max_scale: if config.cursor_magnification {
+                    config.magnification_factor.clamp(1.0, 3.0)
+                } else {
+                    1.0
+                },
+                peak_opacity: if config.cursor_magnification {
+                    0.35
+                } else {
+                    0.0
+                },
+            },
+            config.cursor_smoothing,
+        );
 
+        let clicks = if config.cursor_magnification {
+            metadata.cursor_clicks.as_slice()
+        } else {
+            &[]
+        };
+
+        let timeline = engine
+            .build_timeline(
+                &metadata.cursor_samples,
+                clicks,
+                metadata.fps,
+                metadata.duration_nanos,
+            )
+            .map_err(|error| error.to_string())?;
+
+        let path = effect_timeline_path();
+        RecordingMetadataWriter::write_effect_timeline(&path, &timeline)
+            .map_err(|error| error.to_string())?;
+
+        Ok::<_, String>((path, timeline))
+    })
+    .await;
+
+    let (path, timeline) = match join_result {
+        Ok(Ok(inner)) => inner,
+        Ok(Err(e)) => {
+            let _ = app_for_blocking.emit(
+                "post-process-progress",
+                PostProcessProgressPayload {
+                    stage: "cursor",
+                    progress: 0,
+                    error: Some(format!("光标效果构建失败: {e}")),
+                },
+            );
+            return Err(e);
+        }
+        Err(join_error) => {
+            let msg = format!("光标效果时间线构建任务失败: {join_error}");
+            let _ = app_for_blocking.emit(
+                "post-process-progress",
+                PostProcessProgressPayload {
+                    stage: "cursor",
+                    progress: 0,
+                    error: Some(msg.clone()),
+                },
+            );
+            return Err(msg);
+        }
+    };
+
+    // Only write back the effect path if the session hasn't changed and the
+    // metadata path still matches. If the session changed, the build is stale
+    // and must not return success to the caller.
     {
         let mut service = state
             .service
             .lock()
             .map_err(|_| "录制服务锁已损坏".to_string())?;
-        service.set_last_effect_timeline_path(Some(path.to_string_lossy().to_string()));
+        if service.current_session_id() == session_id
+            && service.last_cursor_metadata_path().as_deref() == Some(metadata_path.as_str())
+        {
+            service.set_last_effect_timeline_path(Some(path.to_string_lossy().to_string()));
+        } else {
+            let msg = "录制会话已变更，光标效果构建已取消".to_string();
+            let _ = app_for_blocking.emit(
+                "post-process-progress",
+                PostProcessProgressPayload {
+                    stage: "cursor",
+                    progress: 0,
+                    error: Some(msg.clone()),
+                },
+            );
+            return Err(msg);
+        }
     }
 
-    let _ = app.emit(
+    let _ = app_for_blocking.emit(
         "post-process-progress",
         PostProcessProgressPayload {
             stage: "cursor",
             progress: 100,
+            error: None,
         },
     );
 
@@ -421,7 +497,7 @@ fn build_cursor_effect_timeline(
 }
 
 #[tauri::command]
-fn export_video(
+async fn export_video(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     preset: String,
@@ -430,18 +506,20 @@ fn export_video(
         return Err(format!("未知导出预设：{preset}"));
     }
 
-    build_cursor_effect_timeline(app, state)
+    build_cursor_effect_timeline(app, state).await
 }
 
 fn effect_timeline_path() -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     std::env::temp_dir()
         .join("luzhi-recordings")
-        .join(format!("cursor-effects-{millis}.json"))
+        .join(format!("cursor-effects-{millis}-{seq}.json"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

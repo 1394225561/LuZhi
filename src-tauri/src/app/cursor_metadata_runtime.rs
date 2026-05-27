@@ -1,5 +1,6 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use crate::core::timeline::{ClickPhase, CursorClick, CursorSample, MouseButton};
 use crate::media::recording_metadata::RecordingMetadata;
 
 const DEFAULT_MAX_CURSOR_SAMPLES: usize = 120_000;
+const DEFAULT_MAX_CURSOR_CLICKS: usize = 10_000;
 
 /// Snapshot of the current cursor position and button states.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,8 +32,9 @@ pub trait CursorSnapshotSource: Send + 'static {
 pub struct CursorMetadataRecorder {
     fps: u32,
     max_samples: usize,
-    samples: Vec<CursorSample>,
-    clicks: Vec<CursorClick>,
+    max_clicks: usize,
+    samples: VecDeque<CursorSample>,
+    clicks: VecDeque<CursorClick>,
     previous_snapshot: Option<CursorSnapshot>,
 }
 
@@ -44,18 +47,19 @@ impl CursorMetadataRecorder {
         Self {
             fps,
             max_samples,
-            samples: Vec::new(),
-            clicks: Vec::new(),
+            max_clicks: DEFAULT_MAX_CURSOR_CLICKS,
+            samples: VecDeque::new(),
+            clicks: VecDeque::new(),
             previous_snapshot: None,
         }
     }
 
     pub fn record_snapshot(&mut self, timestamp: MediaTimestamp, snapshot: CursorSnapshot) {
         if self.samples.len() >= self.max_samples {
-            self.samples.remove(0);
+            self.samples.pop_front();
         }
 
-        self.samples.push(CursorSample {
+        self.samples.push_back(CursorSample {
             timestamp,
             x: snapshot.x,
             y: snapshot.y,
@@ -100,7 +104,11 @@ impl CursorMetadataRecorder {
             return;
         }
 
-        self.clicks.push(CursorClick {
+        if self.clicks.len() >= self.max_clicks {
+            self.clicks.pop_front();
+        }
+
+        self.clicks.push_back(CursorClick {
             timestamp,
             button,
             phase: if is_down {
@@ -117,8 +125,8 @@ impl CursorMetadataRecorder {
         RecordingMetadata {
             fps: self.fps,
             duration_nanos,
-            cursor_samples: self.samples,
-            cursor_clicks: self.clicks,
+            cursor_samples: self.samples.into(),
+            cursor_clicks: self.clicks.into(),
         }
     }
 }
