@@ -46,6 +46,12 @@ export type MicLevelPayload = {
 
 export type ExportPreset = 'bilibili' | 'douyin' | 'xiaohongshu'
 
+export type CursorEffectSummary = {
+  frameCount: number
+  clickEffectCount: number
+  effectTimelinePath: string
+}
+
 export type RecordingResult = {
   durationSecs: number
   frameCount: number
@@ -94,8 +100,12 @@ export async function setBeautifyConfig(config: BeautifyConfig): Promise<void> {
   return invoke('set_beautify_config', { config })
 }
 
-export async function exportVideo(preset: ExportPreset): Promise<void> {
-  return invoke('export_video', { preset })
+export async function buildCursorEffectTimeline(): Promise<CursorEffectSummary> {
+  return invoke<CursorEffectSummary>('build_cursor_effect_timeline')
+}
+
+export async function exportVideo(preset: ExportPreset): Promise<CursorEffectSummary> {
+  return invoke<CursorEffectSummary>('export_video', { preset })
 }
 
 // ─── Tauri Events ───

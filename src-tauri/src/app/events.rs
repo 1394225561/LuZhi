@@ -67,6 +67,23 @@ impl From<RecordingPermissions> for PermissionPayload {
     }
 }
 
+/// Summary returned after building a cursor effect timeline.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorEffectSummaryPayload {
+    pub frame_count: usize,
+    pub click_effect_count: usize,
+    pub effect_timeline_path: String,
+}
+
+/// Lightweight post-processing progress payload.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostProcessProgressPayload {
+    pub stage: &'static str,
+    pub progress: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +110,33 @@ mod tests {
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("\"level\""));
         assert!(json.contains("0.75"));
+    }
+
+    #[test]
+    fn cursor_effect_summary_serializes_camel_case() {
+        let payload = CursorEffectSummaryPayload {
+            frame_count: 10,
+            click_effect_count: 2,
+            effect_timeline_path: "/tmp/effects.json".to_string(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+
+        assert!(json.contains("\"frameCount\":10"));
+        assert!(json.contains("\"clickEffectCount\":2"));
+        assert!(json.contains("\"effectTimelinePath\":\"/tmp/effects.json\""));
+    }
+
+    #[test]
+    fn post_process_progress_serializes_camel_case() {
+        let payload = PostProcessProgressPayload {
+            stage: "cursor",
+            progress: 100,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+
+        assert!(json.contains("\"stage\":\"cursor\""));
+        assert!(json.contains("\"progress\":100"));
     }
 }

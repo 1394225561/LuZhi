@@ -5,7 +5,13 @@ pub mod platform;
 
 use std::sync::{Arc, Mutex};
 
-use app::events::{MicLevelPayload, PermissionPayload, RecordingStatusPayload};
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use app::events::{
+    CursorEffectSummaryPayload, MicLevelPayload, PermissionPayload, PostProcessProgressPayload,
+    RecordingStatusPayload,
+};
 use app::mic_level_runtime::MicLevelRuntime;
 #[cfg(not(target_os = "macos"))]
 use app::permission_service::{PermissionStatus, RecordingPermissions};
@@ -13,21 +19,47 @@ use app::recording_runtime::TickRuntime;
 use app::state_machine::RecordingState;
 use core::capture::AudioConfig;
 use core::config::CaptureConfig;
+use core::processor::CursorProcessor;
+use media::cursor_engine::{ClickAnimationConfig, CursorEffectEngine};
+use media::recording_metadata::RecordingMetadataWriter;
 use media::recording_writer::RecordingResult;
 #[cfg(target_os = "macos")]
 use platform::macos_service::MacRecordingService;
 #[cfg(not(target_os = "macos"))]
 compile_error!("LuZhi recording service currently supports macOS builds only; Windows app wiring requires a WindowsRecordingService.");
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 /// Shared recording state managed by Tauri.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BeautifyConfigPayload {
+    cursor_magnification: bool,
+    magnification_factor: f32,
+    cursor_smoothing: bool,
+    auto_trim_silences: bool,
+    trim_sensitivity: String,
+}
+
+impl Default for BeautifyConfigPayload {
+    fn default() -> Self {
+        Self {
+            cursor_magnification: true,
+            magnification_factor: 2.0,
+            cursor_smoothing: true,
+            auto_trim_silences: false,
+            trim_sensitivity: "medium".to_string(),
+        }
+    }
+}
+
 struct AppState {
     service: Arc<Mutex<MacRecordingService>>,
     capture_config: Arc<Mutex<CaptureConfig>>,
     audio_config: Arc<Mutex<AudioConfig>>,
     tick_runtime: Arc<Mutex<Option<TickRuntime>>>,
     mic_level_runtime: Arc<Mutex<Option<MicLevelRuntime>>>,
+    beautify_config: Arc<Mutex<BeautifyConfigPayload>>,
 }
 
 impl Default for AppState {
@@ -44,6 +76,7 @@ impl Default for AppState {
             })),
             tick_runtime: Arc::new(Mutex::new(None)),
             mic_level_runtime: Arc::new(Mutex::new(None)),
+            beautify_config: Arc::new(Mutex::new(BeautifyConfigPayload::default())),
         }
     }
 }
@@ -277,6 +310,128 @@ fn set_audio_config(
     Ok(())
 }
 
+#[tauri::command]
+fn set_beautify_config(
+    state: tauri::State<'_, AppState>,
+    config: BeautifyConfigPayload,
+) -> Result<(), String> {
+    let mut guard = state
+        .beautify_config
+        .lock()
+        .map_err(|_| "美化配置锁已损坏".to_string())?;
+    *guard = config;
+    Ok(())
+}
+
+#[tauri::command]
+fn build_cursor_effect_timeline(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<CursorEffectSummaryPayload, String> {
+    let metadata_path = {
+        let service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        service
+            .last_cursor_metadata_path()
+            .ok_or_else(|| "没有可用的光标元数据，请先完成一次录制".to_string())?
+    };
+
+    let _ = app.emit(
+        "post-process-progress",
+        PostProcessProgressPayload {
+            stage: "cursor",
+            progress: 0,
+        },
+    );
+
+    let metadata = RecordingMetadataWriter::read_metadata(PathBuf::from(&metadata_path).as_path())
+        .map_err(|error| error.to_string())?;
+    let config = state
+        .beautify_config
+        .lock()
+        .map_err(|_| "美化配置锁已损坏".to_string())?
+        .clone();
+
+    let engine = CursorEffectEngine::with_smoothing(
+        ClickAnimationConfig {
+            max_scale: if config.cursor_magnification {
+                config.magnification_factor.clamp(1.0, 3.0)
+            } else {
+                1.0
+            },
+            peak_opacity: if config.cursor_magnification { 0.35 } else { 0.0 },
+        },
+        config.cursor_smoothing,
+    );
+
+    let clicks = if config.cursor_magnification {
+        metadata.cursor_clicks.as_slice()
+    } else {
+        &[]
+    };
+
+    let timeline = engine
+        .build_timeline(
+            &metadata.cursor_samples,
+            clicks,
+            metadata.fps,
+            metadata.duration_nanos,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let path = effect_timeline_path();
+    RecordingMetadataWriter::write_effect_timeline(&path, &timeline)
+        .map_err(|error| error.to_string())?;
+
+    {
+        let mut service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        service.set_last_effect_timeline_path(Some(path.to_string_lossy().to_string()));
+    }
+
+    let _ = app.emit(
+        "post-process-progress",
+        PostProcessProgressPayload {
+            stage: "cursor",
+            progress: 100,
+        },
+    );
+
+    Ok(CursorEffectSummaryPayload {
+        frame_count: timeline.frames.len(),
+        click_effect_count: timeline.click_effects.len(),
+        effect_timeline_path: path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn export_video(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    preset: String,
+) -> Result<CursorEffectSummaryPayload, String> {
+    if !matches!(preset.as_str(), "bilibili" | "douyin" | "xiaohongshu") {
+        return Err(format!("未知导出预设：{preset}"));
+    }
+
+    build_cursor_effect_timeline(app, state)
+}
+
+fn effect_timeline_path() -> PathBuf {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+
+    std::env::temp_dir()
+        .join("luzhi-recordings")
+        .join(format!("cursor-effects-{millis}.json"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
@@ -290,7 +445,10 @@ pub fn run() -> tauri::Result<()> {
             pause_recording,
             resume_recording,
             set_capture_mode,
-            set_audio_config
+            set_audio_config,
+            set_beautify_config,
+            build_cursor_effect_timeline,
+            export_video
         ])
         .run(tauri::generate_context!())?;
 
