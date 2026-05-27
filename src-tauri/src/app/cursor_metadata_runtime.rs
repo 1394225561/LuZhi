@@ -103,7 +103,11 @@ impl CursorMetadataRecorder {
         self.clicks.push(CursorClick {
             timestamp,
             button,
-            phase: if is_down { ClickPhase::Down } else { ClickPhase::Up },
+            phase: if is_down {
+                ClickPhase::Down
+            } else {
+                ClickPhase::Up
+            },
             x: snapshot.x,
             y: snapshot.y,
         });
@@ -157,9 +161,7 @@ impl CursorMetadataRuntime {
 
     pub fn stop(&mut self) -> Option<RecordingMetadata> {
         self.stop.store(true, Ordering::Relaxed);
-        self.handle
-            .take()
-            .and_then(|handle| handle.join().ok())
+        self.handle.take().and_then(|handle| handle.join().ok())
     }
 }
 

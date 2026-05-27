@@ -369,7 +369,11 @@ fn build_cursor_effect_timeline(
             } else {
                 1.0
             },
-            peak_opacity: if config.cursor_magnification { 0.35 } else { 0.0 },
+            peak_opacity: if config.cursor_magnification {
+                0.35
+            } else {
+                0.0
+            },
         },
         config.cursor_smoothing,
     );

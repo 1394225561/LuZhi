@@ -152,7 +152,8 @@ impl BezierInterpolator {
         let p3 = samples[(segment_index + 2).min(samples.len() - 1)];
 
         let span = p2.timestamp.nanos.saturating_sub(p1.timestamp.nanos).max(1);
-        let t = ((timestamp.saturating_sub(p1.timestamp.nanos)) as f32 / span as f32).clamp(0.0, 1.0);
+        let t =
+            ((timestamp.saturating_sub(p1.timestamp.nanos)) as f32 / span as f32).clamp(0.0, 1.0);
 
         let distance = distance_between(p1, p2);
         let strength = (distance / 240.0).clamp(0.15, 0.65);
@@ -309,7 +310,11 @@ impl ClickEffectBuilder {
         let mut effects = Vec::new();
         let mut pending_down: Option<CursorClick> = None;
 
-        for click in clicks.iter().copied().filter(|click| click.button == MouseButton::Left) {
+        for click in clicks
+            .iter()
+            .copied()
+            .filter(|click| click.button == MouseButton::Left)
+        {
             match click.phase {
                 ClickPhase::Down => {
                     pending_down = Some(click);
@@ -319,7 +324,8 @@ impl ClickEffectBuilder {
                         effects.push(CursorClickEffect {
                             start: down.timestamp,
                             end: MediaTimestamp::from_nanos(
-                                click.timestamp
+                                click
+                                    .timestamp
                                     .nanos
                                     .saturating_add(EXPAND_NANOS + HOLD_NANOS + SHRINK_NANOS),
                             ),
@@ -427,7 +433,8 @@ impl CursorProcessor for CursorEffectEngine {
 fn apply_click_scale_to_frames(frames: &mut [CursorFrame], effects: &[CursorClickEffect]) {
     for frame in frames {
         for effect in effects {
-            if frame.timestamp.nanos < effect.start.nanos || frame.timestamp.nanos > effect.end.nanos
+            if frame.timestamp.nanos < effect.start.nanos
+                || frame.timestamp.nanos > effect.end.nanos
             {
                 continue;
             }
@@ -520,8 +527,16 @@ mod tests {
 
         let output = smoother.smooth(&input);
 
-        assert!(output[2].x > 760.0, "jump was over-smoothed: {}", output[2].x);
-        assert!(output[2].y > 590.0, "jump was over-smoothed: {}", output[2].y);
+        assert!(
+            output[2].x > 760.0,
+            "jump was over-smoothed: {}",
+            output[2].x
+        );
+        assert!(
+            output[2].y > 590.0,
+            "jump was over-smoothed: {}",
+            output[2].y
+        );
     }
 
     #[test]
@@ -549,7 +564,9 @@ mod tests {
         assert_eq!(frames[1].timestamp.nanos, 33_333_333);
         assert_eq!(frames[2].timestamp.nanos, 66_666_666);
         assert_eq!(frames[3].timestamp.nanos, 99_999_999);
-        assert!(frames.iter().all(|frame| frame.x == 50.0 && frame.y == 80.0));
+        assert!(frames
+            .iter()
+            .all(|frame| frame.x == 50.0 && frame.y == 80.0));
     }
 
     #[test]
@@ -564,8 +581,16 @@ mod tests {
         let frames = interpolator.sample_frames(&input, 100_000_000);
         let last = frames.last().unwrap();
 
-        assert!(last.x > 100.0, "last x too far from final sample: {}", last.x);
-        assert!(last.y > 65.0, "last y too far from final sample: {}", last.y);
+        assert!(
+            last.x > 100.0,
+            "last x too far from final sample: {}",
+            last.x
+        );
+        assert!(
+            last.y > 65.0,
+            "last y too far from final sample: {}",
+            last.y
+        );
     }
 
     #[test]
