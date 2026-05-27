@@ -201,6 +201,157 @@ fn cubic_bezier(
     )
 }
 
+const EXPAND_NANOS: u64 = 120_000_000;
+const HOLD_NANOS: u64 = 80_000_000;
+const SHRINK_NANOS: u64 = 300_000_000;
+
+/// Click magnification animation durations and visual strength.
+#[derive(Clone, Copy, Debug)]
+pub struct ClickAnimationConfig {
+    pub max_scale: f32,
+    pub peak_opacity: f32,
+}
+
+impl Default for ClickAnimationConfig {
+    fn default() -> Self {
+        Self {
+            max_scale: 2.0,
+            peak_opacity: 0.35,
+        }
+    }
+}
+
+/// Runtime click animation state used for deterministic tests and effect construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClickAnimationState {
+    Idle,
+    PressedExpand,
+    Hold,
+    ReleaseShrink,
+}
+
+/// Small click state machine matching the Phase 4 required transition path.
+pub struct ClickAnimationMachine {
+    state: ClickAnimationState,
+    config: ClickAnimationConfig,
+    pressed_at: Option<MediaTimestamp>,
+    release_started_at: Option<MediaTimestamp>,
+}
+
+impl ClickAnimationMachine {
+    pub fn new(config: ClickAnimationConfig) -> Self {
+        Self {
+            state: ClickAnimationState::Idle,
+            config,
+            pressed_at: None,
+            release_started_at: None,
+        }
+    }
+
+    pub fn state(&self) -> ClickAnimationState {
+        self.state
+    }
+
+    pub fn apply_click(&mut self, click: CursorClick) {
+        match click.phase {
+            ClickPhase::Down => {
+                self.state = ClickAnimationState::PressedExpand;
+                self.pressed_at = Some(click.timestamp);
+                self.release_started_at = None;
+            }
+            ClickPhase::Up => {
+                if self.state != ClickAnimationState::Idle {
+                    self.state = ClickAnimationState::ReleaseShrink;
+                    self.release_started_at = Some(click.timestamp);
+                }
+            }
+        }
+    }
+
+    pub fn advance_to(&mut self, timestamp: MediaTimestamp) {
+        match self.state {
+            ClickAnimationState::PressedExpand => {
+                if let Some(start) = self.pressed_at {
+                    if timestamp.nanos.saturating_sub(start.nanos) >= EXPAND_NANOS {
+                        self.state = ClickAnimationState::Hold;
+                    }
+                }
+            }
+            ClickAnimationState::ReleaseShrink => {
+                if let Some(start) = self.release_started_at {
+                    if timestamp.nanos.saturating_sub(start.nanos) >= SHRINK_NANOS {
+                        self.state = ClickAnimationState::Idle;
+                        self.pressed_at = None;
+                        self.release_started_at = None;
+                    }
+                }
+            }
+            ClickAnimationState::Idle | ClickAnimationState::Hold => {}
+        }
+    }
+
+    pub fn config(&self) -> ClickAnimationConfig {
+        self.config
+    }
+}
+
+/// Converts recorded click transitions into magnification effect windows.
+pub struct ClickEffectBuilder {
+    config: ClickAnimationConfig,
+}
+
+impl ClickEffectBuilder {
+    pub fn new(config: ClickAnimationConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn build(&self, clicks: &[CursorClick]) -> Vec<CursorClickEffect> {
+        let mut effects = Vec::new();
+        let mut pending_down: Option<CursorClick> = None;
+
+        for click in clicks.iter().copied().filter(|click| click.button == MouseButton::Left) {
+            match click.phase {
+                ClickPhase::Down => {
+                    pending_down = Some(click);
+                }
+                ClickPhase::Up => {
+                    if let Some(down) = pending_down.take() {
+                        effects.push(CursorClickEffect {
+                            start: down.timestamp,
+                            end: MediaTimestamp::from_nanos(
+                                click.timestamp
+                                    .nanos
+                                    .saturating_add(EXPAND_NANOS + HOLD_NANOS + SHRINK_NANOS),
+                            ),
+                            x: down.x,
+                            y: down.y,
+                            max_scale: self.config.max_scale,
+                            peak_opacity: self.config.peak_opacity,
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(down) = pending_down {
+            effects.push(CursorClickEffect {
+                start: down.timestamp,
+                end: MediaTimestamp::from_nanos(
+                    down.timestamp
+                        .nanos
+                        .saturating_add(EXPAND_NANOS + HOLD_NANOS + SHRINK_NANOS),
+                ),
+                x: down.x,
+                y: down.y,
+                max_scale: self.config.max_scale,
+                peak_opacity: self.config.peak_opacity,
+            });
+        }
+
+        effects
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +481,63 @@ mod tests {
 
         assert_eq!(frames.len(), 4);
         assert_eq!(frames[1].timestamp.nanos, 16_666_666);
+    }
+
+    fn click(nanos: u64, phase: ClickPhase, x: f32, y: f32) -> CursorClick {
+        CursorClick {
+            timestamp: MediaTimestamp::from_nanos(nanos),
+            button: MouseButton::Left,
+            phase,
+            x,
+            y,
+        }
+    }
+
+    #[test]
+    fn click_state_machine_transitions_through_expected_states() {
+        let mut machine = ClickAnimationMachine::new(ClickAnimationConfig::default());
+
+        assert_eq!(machine.state(), ClickAnimationState::Idle);
+
+        machine.apply_click(click(0, ClickPhase::Down, 10.0, 20.0));
+        assert_eq!(machine.state(), ClickAnimationState::PressedExpand);
+
+        machine.advance_to(MediaTimestamp::from_nanos(140_000_000));
+        assert_eq!(machine.state(), ClickAnimationState::Hold);
+
+        machine.apply_click(click(160_000_000, ClickPhase::Up, 10.0, 20.0));
+        assert_eq!(machine.state(), ClickAnimationState::ReleaseShrink);
+
+        machine.advance_to(MediaTimestamp::from_nanos(500_000_000));
+        assert_eq!(machine.state(), ClickAnimationState::Idle);
+    }
+
+    #[test]
+    fn click_effect_has_expand_and_shrink_window() {
+        let builder = ClickEffectBuilder::new(ClickAnimationConfig::default());
+        let effects = builder.build(&[
+            click(0, ClickPhase::Down, 10.0, 20.0),
+            click(150_000_000, ClickPhase::Up, 11.0, 21.0),
+        ]);
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].start.nanos, 0);
+        assert_eq!(effects[0].end.nanos, 650_000_000);
+        assert_eq!(effects[0].x, 10.0);
+        assert_eq!(effects[0].max_scale, 2.0);
+    }
+
+    #[test]
+    fn consecutive_clicks_do_not_leave_machine_stuck() {
+        let builder = ClickEffectBuilder::new(ClickAnimationConfig::default());
+        let effects = builder.build(&[
+            click(0, ClickPhase::Down, 10.0, 20.0),
+            click(40_000_000, ClickPhase::Up, 10.0, 20.0),
+            click(90_000_000, ClickPhase::Down, 30.0, 40.0),
+            click(130_000_000, ClickPhase::Up, 30.0, 40.0),
+        ]);
+
+        assert_eq!(effects.len(), 2);
+        assert!(effects[0].end.nanos <= effects[1].start.nanos + 450_000_000);
     }
 }
