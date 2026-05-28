@@ -70,6 +70,24 @@ pub struct EffectTimeline {
     pub duration_nanos: u64,
     pub frames: Vec<CursorFrame>,
     pub click_effects: Vec<CursorClickEffect>,
+    /// Whether the raw SCK frames contain the system cursor.
+    pub raw_system_cursor_visible: bool,
+    /// Whether Phase 6 compositor should render a cursor overlay.
+    pub render_cursor_overlay: bool,
+}
+
+/// Beautify config frozen at the moment recording starts. Stored in
+/// RecordingMetadata. The `raw_system_cursor_visible` field is the immutable
+/// safety constraint; other fields serve as an audit trail.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BeautifyConfigSnapshot {
+    pub cursor_magnification: bool,
+    pub magnification_factor: f32,
+    pub cursor_smoothing: bool,
+    pub auto_trim_silences: bool,
+    pub trim_sensitivity: String,
+    pub raw_system_cursor_visible: bool,
 }
 
 #[cfg(test)]
@@ -122,6 +140,8 @@ mod tests {
                 max_scale: 2.0,
                 peak_opacity: 0.35,
             }],
+            raw_system_cursor_visible: false,
+            render_cursor_overlay: true,
         };
 
         let json = serde_json::to_string(&timeline).unwrap();

@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::app::error::{AppError, AppResult};
-use crate::core::timeline::{CursorClick, CursorSample, EffectTimeline};
+use crate::core::timeline::{BeautifyConfigSnapshot, CursorClick, CursorSample, EffectTimeline};
 
 /// Recording sidecar metadata saved next to the intermediate recording artifact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -14,6 +14,7 @@ pub struct RecordingMetadata {
     pub duration_nanos: u64,
     pub cursor_samples: Vec<CursorSample>,
     pub cursor_clicks: Vec<CursorClick>,
+    pub beautify_config: BeautifyConfigSnapshot,
 }
 
 /// JSON sidecar reader/writer for cursor metadata and effect timelines.
@@ -90,6 +91,14 @@ mod tests {
                 x: 10.0,
                 y: 20.0,
             }],
+            beautify_config: BeautifyConfigSnapshot {
+                cursor_magnification: true,
+                magnification_factor: 2.0,
+                cursor_smoothing: true,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -106,6 +115,14 @@ mod tests {
             duration_nanos: 50_000_000,
             cursor_samples: vec![],
             cursor_clicks: vec![],
+            beautify_config: BeautifyConfigSnapshot {
+                cursor_magnification: true,
+                magnification_factor: 2.0,
+                cursor_smoothing: true,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
         };
 
         RecordingMetadataWriter::write_metadata(&path, &metadata).unwrap();

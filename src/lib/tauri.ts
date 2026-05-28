@@ -96,8 +96,12 @@ export async function setAudioConfig(config: AudioConfig): Promise<void> {
   return invoke('set_audio_config', { payload: config })
 }
 
-export async function setBeautifyConfig(config: BeautifyConfig): Promise<void> {
-  return invoke('set_beautify_config', { config })
+export async function setBeautifyConfig(config: BeautifyConfig): Promise<number> {
+  return invoke<number>('set_beautify_config', { config })
+}
+
+export async function getBeautifyConfig(): Promise<BeautifyConfig> {
+  return invoke<BeautifyConfig>('get_beautify_config')
 }
 
 export async function buildCursorEffectTimeline(): Promise<CursorEffectSummary> {

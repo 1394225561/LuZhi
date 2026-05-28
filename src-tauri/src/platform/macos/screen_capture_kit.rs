@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{AnyThread, DefinedClass};
-use objc2_core_media::CMSampleBuffer;
+use objc2_core_media::{CMSampleBuffer, CMTimeFlags};
 use objc2_foundation::NSError;
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
@@ -125,10 +125,8 @@ impl StreamOutput {
 /// establishes the origin; subsequent PTS values are shifted so they share the
 /// same time domain as cursor samples.
 ///
-/// Uses i64 arithmetic for the PTS delta so that a valid sample with a PTS
-/// earlier than `first_pts` (e.g. audio callback arriving before video despite
-/// having an earlier PTS) maps to a proportionally lower session-relative time
-/// rather than being silently flattened to `session_at_first`.
+/// Uses i128 arithmetic for the PTS delta so that values beyond i64::MAX
+/// (theoretical for ScreenCaptureKit host-time PTS but possible) do not wrap.
 fn compute_normalized_pts(
     origin: &mut Option<(u64, u64)>,
     pts_nanos: u64,
@@ -136,9 +134,15 @@ fn compute_normalized_pts(
 ) -> u64 {
     match *origin {
         Some((first_pts, session_at_first)) => {
-            let delta = pts_nanos as i64 - first_pts as i64;
-            let result = delta.saturating_add(session_at_first as i64);
-            result.max(0) as u64
+            let delta = pts_nanos as i128 - first_pts as i128;
+            let result = delta + session_at_first as i128;
+            if result < 0 {
+                0
+            } else if result > u64::MAX as i128 {
+                u64::MAX
+            } else {
+                result as u64
+            }
         }
         None => {
             *origin = Some((pts_nanos, session_entry_nanos));
@@ -526,6 +530,32 @@ unsafe fn cf_release(ptr: *const std::ffi::c_void) {
     CFRelease(ptr);
 }
 
+/// Validate a CMTime and convert to nanoseconds.
+/// Factored for testability: the flag/value checks can be tested without FFI.
+fn cmtime_to_nanos(pts: &objc2_core_media::CMTime) -> Option<u64> {
+    // kCMTimeFlags_Valid must be set per Apple's CMTime specification.
+    if !pts.flags.contains(CMTimeFlags::Valid) {
+        return None;
+    }
+    // Reject special sentinel values: infinity and indefinite.
+    if pts.flags.intersects(
+        CMTimeFlags::PositiveInfinity | CMTimeFlags::NegativeInfinity | CMTimeFlags::Indefinite,
+    ) {
+        return None;
+    }
+    // Negative PTS would wrap when cast to u64.
+    if pts.value < 0 {
+        return None;
+    }
+    if pts.timescale > 0 {
+        let value = pts.value as u128;
+        let scale = pts.timescale as u128;
+        let nanos = value.checked_mul(1_000_000_000)?.checked_div(scale)?;
+        return u64::try_from(nanos).ok();
+    }
+    None
+}
+
 /// Extract display timestamp from CMSampleBuffer as nanoseconds.
 /// Returns `None` when the sample buffer has no valid presentation timestamp.
 unsafe fn extract_timestamp_nanos(sample_buffer: &CMSampleBuffer) -> Option<u64> {
@@ -535,13 +565,10 @@ unsafe fn extract_timestamp_nanos(sample_buffer: &CMSampleBuffer) -> Option<u64>
 
     if status == 0 {
         let info = timing_info.assume_init();
-        let pts = info.presentationTimeStamp;
-        if pts.timescale > 0 {
-            let seconds = pts.value as f64 / pts.timescale as f64;
-            return Some((seconds * 1_000_000_000.0) as u64);
-        }
+        cmtime_to_nanos(&info.presentationTimeStamp)
+    } else {
+        None
     }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,5 +1249,91 @@ mod tests {
         let result2 = compute_normalized_pts(&mut origin2, 195_000_000, 0);
         // delta = 195M - 200M = -5M, result = -5M + 10M = 5M
         assert_eq!(result2, 5_000_000);
+    }
+
+    // --- cmtime_to_nanos validation tests ---
+
+    fn make_cmtime(value: i64, timescale: i32, flags: CMTimeFlags) -> objc2_core_media::CMTime {
+        objc2_core_media::CMTime {
+            value,
+            timescale,
+            flags,
+            epoch: 0,
+        }
+    }
+
+    #[test]
+    fn cmtime_valid_converts_to_nanos() {
+        let pts = make_cmtime(1000, 600, CMTimeFlags::Valid);
+        // 1000 / 600 ≈ 1.666... seconds → 1_666_666_666 ns
+        let result = cmtime_to_nanos(&pts);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 1_666_666_666);
+    }
+
+    #[test]
+    fn cmtime_missing_valid_flag_returns_none() {
+        let pts = make_cmtime(1000, 600, CMTimeFlags::empty());
+        assert_eq!(cmtime_to_nanos(&pts), None);
+    }
+
+    #[test]
+    fn cmtime_positive_infinity_returns_none() {
+        let pts = make_cmtime(0, 600, CMTimeFlags::Valid | CMTimeFlags::PositiveInfinity);
+        assert_eq!(cmtime_to_nanos(&pts), None);
+    }
+
+    #[test]
+    fn cmtime_indefinite_returns_none() {
+        let pts = make_cmtime(0, 600, CMTimeFlags::Valid | CMTimeFlags::Indefinite);
+        assert_eq!(cmtime_to_nanos(&pts), None);
+    }
+
+    #[test]
+    fn cmtime_negative_value_returns_none() {
+        let pts = make_cmtime(-1000, 600, CMTimeFlags::Valid);
+        assert_eq!(cmtime_to_nanos(&pts), None);
+    }
+
+    #[test]
+    fn cmtime_zero_timescale_returns_none() {
+        let pts = make_cmtime(1000, 0, CMTimeFlags::Valid);
+        assert_eq!(cmtime_to_nanos(&pts), None);
+    }
+
+    // --- i128 PTS normalization boundary tests ---
+
+    #[test]
+    fn pts_normalize_large_pts_beyond_i64_max_no_wrap() {
+        let large_pts = (i64::MAX as u64) + 1;
+        let mut origin = Some((0, 0));
+        let result = compute_normalized_pts(&mut origin, large_pts, 0);
+        // delta = large_pts - 0 = large_pts (fits in i128)
+        assert_eq!(result, large_pts);
+    }
+
+    #[test]
+    fn pts_normalize_large_first_pts_beyond_i64_max_no_wrap() {
+        let large_first = (i64::MAX as u64) + 1;
+        let mut origin = Some((large_first, 0));
+        let result = compute_normalized_pts(&mut origin, large_first + 1000, 0);
+        // delta = 1000
+        assert_eq!(result, 1000);
+    }
+
+    #[test]
+    fn pts_normalize_result_clamped_to_u64_max() {
+        let mut origin = Some((0, u64::MAX));
+        let result = compute_normalized_pts(&mut origin, 1, 0);
+        // delta = 1, result = 1 + u64::MAX → clamped to u64::MAX
+        assert_eq!(result, u64::MAX);
+    }
+
+    #[test]
+    fn pts_normalize_extreme_negative_delta_clamped_to_zero() {
+        let mut origin = Some((u64::MAX, 0));
+        let result = compute_normalized_pts(&mut origin, 0, 0);
+        // delta = 0 - u64::MAX → huge negative, result < 0 → clamp to 0
+        assert_eq!(result, 0);
     }
 }

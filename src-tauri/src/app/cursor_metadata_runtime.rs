@@ -7,7 +7,9 @@ use std::time::Duration;
 use crate::app::error::AppResult;
 use crate::core::clock::SessionClock;
 use crate::core::frame::MediaTimestamp;
-use crate::core::timeline::{ClickPhase, CursorClick, CursorSample, MouseButton};
+use crate::core::timeline::{
+    BeautifyConfigSnapshot, ClickPhase, CursorClick, CursorSample, MouseButton,
+};
 use crate::media::recording_metadata::RecordingMetadata;
 
 const DEFAULT_MAX_CURSOR_SAMPLES: usize = 120_000;
@@ -36,14 +38,19 @@ pub struct CursorMetadataRecorder {
     samples: VecDeque<CursorSample>,
     clicks: VecDeque<CursorClick>,
     previous_snapshot: Option<CursorSnapshot>,
+    beautify_snapshot: BeautifyConfigSnapshot,
 }
 
 impl CursorMetadataRecorder {
-    pub fn new(fps: u32) -> Self {
-        Self::with_max_samples(fps, DEFAULT_MAX_CURSOR_SAMPLES)
+    pub fn new(fps: u32, beautify_snapshot: BeautifyConfigSnapshot) -> Self {
+        Self::with_max_samples(fps, DEFAULT_MAX_CURSOR_SAMPLES, beautify_snapshot)
     }
 
-    pub fn with_max_samples(fps: u32, max_samples: usize) -> Self {
+    pub fn with_max_samples(
+        fps: u32,
+        max_samples: usize,
+        beautify_snapshot: BeautifyConfigSnapshot,
+    ) -> Self {
         Self {
             fps,
             max_samples,
@@ -51,6 +58,7 @@ impl CursorMetadataRecorder {
             samples: VecDeque::new(),
             clicks: VecDeque::new(),
             previous_snapshot: None,
+            beautify_snapshot,
         }
     }
 
@@ -127,6 +135,7 @@ impl CursorMetadataRecorder {
             duration_nanos,
             cursor_samples: self.samples.into(),
             cursor_clicks: self.clicks.into(),
+            beautify_config: self.beautify_snapshot,
         }
     }
 }
@@ -138,7 +147,12 @@ pub struct CursorMetadataRuntime {
 }
 
 impl CursorMetadataRuntime {
-    pub fn spawn<S>(mut source: S, fps: u32, session_clock: Arc<SessionClock>) -> Self
+    pub fn spawn<S>(
+        mut source: S,
+        fps: u32,
+        session_clock: Arc<SessionClock>,
+        beautify_snapshot: BeautifyConfigSnapshot,
+    ) -> Self
     where
         S: CursorSnapshotSource,
     {
@@ -147,7 +161,7 @@ impl CursorMetadataRuntime {
         let interval = Duration::from_nanos(1_000_000_000u64 / fps.max(1) as u64);
 
         let handle = thread::spawn(move || {
-            let mut recorder = CursorMetadataRecorder::new(fps.max(1));
+            let mut recorder = CursorMetadataRecorder::new(fps.max(1), beautify_snapshot);
             while !thread_stop.load(Ordering::Relaxed) {
                 if let Ok(snapshot) = source.snapshot() {
                     recorder.record_snapshot(
@@ -189,7 +203,17 @@ mod tests {
 
     #[test]
     fn recorder_keeps_samples_in_order() {
-        let mut recorder = CursorMetadataRecorder::new(30);
+        let mut recorder = CursorMetadataRecorder::new(
+            30,
+            BeautifyConfigSnapshot {
+                cursor_magnification: true,
+                magnification_factor: 2.0,
+                cursor_smoothing: true,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+        );
 
         recorder.record_snapshot(
             MediaTimestamp::from_nanos(0),
@@ -221,7 +245,17 @@ mod tests {
 
     #[test]
     fn recorder_detects_left_click_down_and_up() {
-        let mut recorder = CursorMetadataRecorder::new(60);
+        let mut recorder = CursorMetadataRecorder::new(
+            60,
+            BeautifyConfigSnapshot {
+                cursor_magnification: true,
+                magnification_factor: 2.0,
+                cursor_smoothing: true,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+        );
 
         recorder.record_snapshot(
             MediaTimestamp::from_nanos(0),
@@ -264,7 +298,18 @@ mod tests {
 
     #[test]
     fn recorder_caps_sample_count_to_bound_memory() {
-        let mut recorder = CursorMetadataRecorder::with_max_samples(30, 3);
+        let mut recorder = CursorMetadataRecorder::with_max_samples(
+            30,
+            3,
+            BeautifyConfigSnapshot {
+                cursor_magnification: true,
+                magnification_factor: 2.0,
+                cursor_smoothing: true,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+        );
 
         for i in 0..10 {
             recorder.record_snapshot(
@@ -283,5 +328,21 @@ mod tests {
 
         assert_eq!(metadata.cursor_samples.len(), 3);
         assert_eq!(metadata.cursor_samples[0].x, 7.0);
+    }
+
+    #[test]
+    fn recorder_stores_beautify_snapshot_in_metadata() {
+        let snapshot = BeautifyConfigSnapshot {
+            cursor_magnification: false,
+            magnification_factor: 1.5,
+            cursor_smoothing: false,
+            auto_trim_silences: true,
+            trim_sensitivity: "high".to_string(),
+            raw_system_cursor_visible: true,
+        };
+        let recorder = CursorMetadataRecorder::new(30, snapshot.clone());
+        let metadata = recorder.finish(1_000_000_000);
+
+        assert_eq!(metadata.beautify_config, snapshot);
     }
 }

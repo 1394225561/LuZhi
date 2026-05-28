@@ -63,11 +63,11 @@
 - [ ] `platform/macos/screen_capture_kit.rs` `showsCursor` 通过 `CaptureConfig.show_system_cursor` 受控
 - [ ] 确认光标美化开启时无系统光标（双光标检查）
 
-## Verification Summary (2026-05-27, Round 3)
+## Verification Summary (2026-05-28, Round 7)
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: PASS
-- `cargo test --manifest-path src-tauri/Cargo.toml`: **108 tests** PASS (+4 PTS origin tests, +4 since Round 2)
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **120 tests** PASS (incremental: EffectTimeline render contract fields, i128 PTS normalization, cmtime integer conversion, beautify snapshot, engine tests)
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS (21 pre-existing SCK FFI warnings)
 - `cargo build --manifest-path src-tauri/Cargo.toml`: PASS
 - `npm run build`: PASS
-- `npm test -- --run`: **29 tests** PASS (+1 debounce strict ordering test)
+- `npm test -- --run`: **32 tests** PASS (+in-flight config write tracking, flush ordering)

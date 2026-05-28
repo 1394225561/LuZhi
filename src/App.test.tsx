@@ -1034,4 +1034,140 @@ describe('App', () => {
 
     vi.useRealTimers()
   })
+
+  it('initializes beautify controls from backend on preview mount', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: false,
+          magnificationFactor: 1.5,
+          cursorSmoothing: false,
+          autoTrimSilences: true,
+          trimSensitivity: 'high',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 10, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+
+    // Wait for getBeautifyConfig to resolve and React to commit the state
+    // before asserting the switch reflects the backend config value.
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('get_beautify_config', undefined)
+    })
+
+    const switches = screen.getAllByRole('switch')
+    // switches[0] = cursor magnification, switches[1] = cursor smoothing, switches[2] = auto-trim
+    await vi.waitFor(() => {
+      expect(switches[1].getAttribute('data-state')).toBe('unchecked')
+    })
+  })
+
+  it('flushes pending beautify config before export', async () => {
+    const callOrder: string[] = []
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') {
+        callOrder.push('set_beautify_config')
+        return Promise.resolve(1)
+      }
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      if (command === 'export_video') {
+        callOrder.push('export_video')
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    await screen.findByText('预览与美化')
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('get_beautify_config', undefined)
+    })
+    invokeMock.mockClear()
+    callOrder.length = 0
+
+    // Toggle cursor smoothing off → sets pending config, debounce not fired yet.
+    const switches = screen.getAllByRole('switch')
+    await act(async () => {
+      fireEvent.click(switches[1])
+    })
+
+    // Immediately click export before debounce fires.
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    // set_beautify_config must be called before export_video.
+    await vi.waitFor(() => {
+      expect(callOrder.indexOf('set_beautify_config')).toBeLessThan(callOrder.indexOf('export_video'))
+    })
+  })
+
+  it('flushes pending beautify config when navigating back from preview', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve(1)
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      if (command === 'export_video') {
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    await screen.findByText('预览与美化')
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('get_beautify_config', undefined)
+    })
+    invokeMock.mockClear()
+
+    // Toggle cursor magnification off → sets pending config.
+    const switches = screen.getAllByRole('switch')
+    await act(async () => {
+      fireEvent.click(switches[0])
+    })
+
+    // Immediately click "返回录制" before debounce fires.
+    const backButton = screen.getByText('返回录制')
+    await act(async () => {
+      fireEvent.click(backButton)
+    })
+
+    // Pending config should be flushed (set_beautify_config called on unmount).
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('set_beautify_config', expect.objectContaining({
+        config: expect.objectContaining({ cursorMagnification: false }),
+      }))
+    })
+  })
 })

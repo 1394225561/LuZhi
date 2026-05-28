@@ -15,6 +15,7 @@ use crate::core::capture::{AudioCapture, AudioConfig, ScreenCapture};
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
+use crate::core::timeline::BeautifyConfigSnapshot;
 use crate::media::audio_mixer::SimpleAudioMixer;
 use crate::media::mic_level::MicLevelDetector;
 use crate::media::recording_metadata::RecordingMetadataWriter;
@@ -101,7 +102,12 @@ impl MacRecordingService {
     }
 
     /// Starts video + system audio capture via SCStream, and optionally microphone.
-    pub fn start(&mut self, config: CaptureConfig, audio_config: AudioConfig) -> AppResult<()> {
+    pub fn start(
+        &mut self,
+        config: CaptureConfig,
+        audio_config: AudioConfig,
+        beautify_snapshot: BeautifyConfigSnapshot,
+    ) -> AppResult<()> {
         self.state_machine.start()?;
 
         // Clear stale session state from any previous recording.
@@ -159,6 +165,7 @@ impl MacRecordingService {
             MacCursorSource::new(),
             config.fps,
             session_clock.clone(),
+            beautify_snapshot,
         ));
 
         // Spawn frame consumer thread (drain mode).

@@ -26,6 +26,7 @@ import { motion } from 'framer-motion'
 import {
   buildCursorEffectTimeline,
   exportVideo,
+  getBeautifyConfig,
   setBeautifyConfig,
   type BeautifyConfig,
   type ExportPreset,
@@ -66,28 +67,85 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   })
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingConfigRef = useRef<BeautifyConfig | null>(null)
+  const configWriteRef = useRef<Promise<void> | null>(null)
 
-  // Clean up debounce timer on unmount so a stale timer from a destroyed
-  // PreviewView doesn't fire backend calls against a new recording session.
+  // Initialize beautify state from backend on mount so the UI reflects the
+  // persistent config rather than hardcoded defaults that may have drifted
+  // from what was set in a previous preview session.
+  useEffect(() => {
+    let cancelled = false
+    getBeautifyConfig()
+      .then((cfg) => {
+        if (cancelled) return
+        setCursorMagnification(cfg.cursorMagnification)
+        setMagnificationFactor([cfg.magnificationFactor])
+        setCursorSmoothing(cfg.cursorSmoothing)
+        setAutoTrimSilences(cfg.autoTrimSilences)
+        setTrimSensitivity(cfg.trimSensitivity)
+      })
+      .catch((err) => {
+        console.error('读取美化配置失败，使用默认值', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Flush any pending beautify config on unmount so user's last changes
+  // are not silently discarded when navigating away from Preview.
   useEffect(() => {
     return () => {
       if (debounceRef.current) {
         clearTimeout(debounceRef.current)
+        debounceRef.current = null
+      }
+      if (pendingConfigRef.current) {
+        const config = pendingConfigRef.current
+        pendingConfigRef.current = null
+        void writeBeautifyConfig(config)
       }
     }
   }, [])
 
+  // Wrap setBeautifyConfig to track the in-flight promise so flushPendingConfig
+  // can wait for writes that have already been dispatched but not yet resolved.
+  const writeBeautifyConfig = (config: BeautifyConfig): Promise<void> => {
+    const promise = setBeautifyConfig(config).then(() => {})
+    configWriteRef.current = promise
+    return promise.finally(() => {
+      if (configWriteRef.current === promise) {
+        configWriteRef.current = null
+      }
+    })
+  }
+
+  // Immediately flush the latest pending beautify config to backend.
+  // Waits for both any still-pending debounced config AND any in-flight write.
+  const flushPendingConfig = (): Promise<void> => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current)
+      debounceRef.current = null
+    }
+    const pendingPromise = pendingConfigRef.current
+      ? writeBeautifyConfig(pendingConfigRef.current)
+      : Promise.resolve()
+    pendingConfigRef.current = null
+    const inFlightPromise = configWriteRef.current ?? Promise.resolve()
+    return Promise.all([pendingPromise, inFlightPromise]).then(() => {})
+  }
+
   const handleBeautifyChange = (config: Partial<BeautifyConfig>) => {
     const nextConfig = currentBeautifyConfig(config)
+    pendingConfigRef.current = nextConfig
 
     if (debounceRef.current) {
       clearTimeout(debounceRef.current)
     }
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null
-      // Await config write before building timeline so we never build with
-      // a stale configuration.
-      void setBeautifyConfig(nextConfig)
+      pendingConfigRef.current = null
+      void writeBeautifyConfig(nextConfig)
         .then(() => buildCursorEffectTimeline())
         .catch((error) => {
           console.error('光标效果处理失败', error)
@@ -96,9 +154,20 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   }
 
   const handleExport = (preset: ExportPreset) => {
-    void exportVideo(preset).catch((error) => {
-      console.error('导出失败', error)
-    })
+    void flushPendingConfig()
+      .then(() => exportVideo(preset))
+      .catch((error) => {
+        console.error('导出失败', error)
+      })
+  }
+
+  const handleBack = () => {
+    void flushPendingConfig()
+      .then(() => onBack())
+      .catch((error) => {
+        console.error('保存美化配置失败', error)
+        onBack()
+      })
   }
 
   const exportPresets: Array<{
@@ -123,7 +192,7 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <button
-            onClick={onBack}
+            onClick={handleBack}
             className="text-muted-foreground hover:text-foreground transition-colors text-sm flex items-center gap-2"
           >
             <SkipBack className="w-4 h-4" />

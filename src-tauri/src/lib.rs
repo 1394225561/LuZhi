@@ -3,6 +3,7 @@ pub mod core;
 pub mod media;
 pub mod platform;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ use app::state_machine::RecordingState;
 use core::capture::AudioConfig;
 use core::config::CaptureConfig;
 use core::processor::CursorProcessor;
+use core::timeline::{BeautifyConfigSnapshot, EffectTimeline};
 use media::cursor_engine::{ClickAnimationConfig, CursorEffectEngine};
 use media::recording_metadata::RecordingMetadataWriter;
 use media::recording_writer::RecordingResult;
@@ -60,6 +62,7 @@ struct AppState {
     tick_runtime: Arc<Mutex<Option<TickRuntime>>>,
     mic_level_runtime: Arc<Mutex<Option<MicLevelRuntime>>>,
     beautify_config: Arc<Mutex<BeautifyConfigPayload>>,
+    beautify_revision: Arc<AtomicU64>,
 }
 
 impl Default for AppState {
@@ -77,6 +80,7 @@ impl Default for AppState {
             tick_runtime: Arc::new(Mutex::new(None)),
             mic_level_runtime: Arc::new(Mutex::new(None)),
             beautify_config: Arc::new(Mutex::new(BeautifyConfigPayload::default())),
+            beautify_revision: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -131,10 +135,24 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
     let mic_enabled = audio_config.capture_microphone;
     let service = state.service.clone();
 
+    let beautify_config = state
+        .beautify_config
+        .lock()
+        .map_err(|_| "美化配置锁已损坏".to_string())?
+        .clone();
+    let beautify_snapshot = BeautifyConfigSnapshot {
+        cursor_magnification: beautify_config.cursor_magnification,
+        magnification_factor: beautify_config.magnification_factor,
+        cursor_smoothing: beautify_config.cursor_smoothing,
+        auto_trim_silences: beautify_config.auto_trim_silences,
+        trim_sensitivity: beautify_config.trim_sensitivity.clone(),
+        raw_system_cursor_visible: config.show_system_cursor,
+    };
+
     let new_state = tauri::async_runtime::spawn_blocking(move || {
         let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
         service
-            .start(config, audio_config)
+            .start(config, audio_config, beautify_snapshot)
             .map_err(|e| e.to_string())?;
         Ok::<_, String>(service.state())
     })
@@ -322,13 +340,23 @@ fn set_audio_config(
 fn set_beautify_config(
     state: tauri::State<'_, AppState>,
     config: BeautifyConfigPayload,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let mut guard = state
         .beautify_config
         .lock()
         .map_err(|_| "美化配置锁已损坏".to_string())?;
     *guard = config;
-    Ok(())
+    let rev = state.beautify_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    Ok(rev)
+}
+
+#[tauri::command]
+fn get_beautify_config(state: tauri::State<'_, AppState>) -> Result<BeautifyConfigPayload, String> {
+    state
+        .beautify_config
+        .lock()
+        .map(|g| g.clone())
+        .map_err(|_| "美化配置锁已损坏".to_string())
 }
 
 #[tauri::command]
@@ -350,10 +378,10 @@ async fn build_cursor_effect_timeline(
         }
     }
 
-    // Capture session id and metadata path atomically so we can verify after
-    // the async build that no new session has started (which would make our
-    // result stale).
-    let (session_id, metadata_path) = {
+    // Capture session id, metadata path, and beautify revision atomically so we
+    // can verify after the async build that no newer config or session has
+    // started (which would make our result stale).
+    let (session_id, metadata_path, build_revision) = {
         let service = state
             .service
             .lock()
@@ -362,7 +390,8 @@ async fn build_cursor_effect_timeline(
         let path = service
             .last_cursor_metadata_path()
             .ok_or_else(|| "没有可用的光标元数据，请先完成一次录制".to_string())?;
-        (sid, path)
+        let rev = state.beautify_revision.load(Ordering::SeqCst);
+        (sid, path, rev)
     };
 
     let _ = app.emit(
@@ -388,36 +417,61 @@ async fn build_cursor_effect_timeline(
         )
         .map_err(|error| error.to_string())?;
 
-        let engine = CursorEffectEngine::with_smoothing(
-            ClickAnimationConfig {
-                max_scale: if config.cursor_magnification {
-                    config.magnification_factor.clamp(1.0, 3.0)
-                } else {
-                    1.0
-                },
-                peak_opacity: if config.cursor_magnification {
-                    0.35
-                } else {
-                    0.0
-                },
-            },
-            config.cursor_smoothing,
-        );
+        let raw_visible = metadata.beautify_config.raw_system_cursor_visible;
+        let want_overlay = config.cursor_magnification || config.cursor_smoothing;
 
-        let clicks = if config.cursor_magnification {
-            metadata.cursor_clicks.as_slice()
+        if raw_visible && want_overlay {
+            return Err(
+                "本次素材已录入系统光标，无法叠加美化光标效果。请先关闭光标美化后重新录制。"
+                    .to_string(),
+            );
+        }
+
+        let render_cursor_overlay = !raw_visible;
+
+        let mut timeline = if want_overlay || !raw_visible {
+            let engine = CursorEffectEngine::with_smoothing(
+                ClickAnimationConfig {
+                    max_scale: if config.cursor_magnification {
+                        config.magnification_factor.clamp(1.0, 3.0)
+                    } else {
+                        1.0
+                    },
+                    peak_opacity: if config.cursor_magnification {
+                        0.35
+                    } else {
+                        0.0
+                    },
+                },
+                config.cursor_smoothing,
+            );
+
+            let clicks = if config.cursor_magnification {
+                metadata.cursor_clicks.as_slice()
+            } else {
+                &[]
+            };
+
+            engine
+                .build_timeline(
+                    &metadata.cursor_samples,
+                    clicks,
+                    metadata.fps,
+                    metadata.duration_nanos,
+                )
+                .map_err(|error| error.to_string())?
         } else {
-            &[]
+            EffectTimeline {
+                fps: metadata.fps,
+                duration_nanos: metadata.duration_nanos,
+                frames: Vec::new(),
+                click_effects: Vec::new(),
+                raw_system_cursor_visible: true,
+                render_cursor_overlay: false,
+            }
         };
-
-        let timeline = engine
-            .build_timeline(
-                &metadata.cursor_samples,
-                clicks,
-                metadata.fps,
-                metadata.duration_nanos,
-            )
-            .map_err(|error| error.to_string())?;
+        timeline.raw_system_cursor_visible = raw_visible;
+        timeline.render_cursor_overlay = render_cursor_overlay;
 
         let path = effect_timeline_path();
         RecordingMetadataWriter::write_effect_timeline(&path, &timeline)
@@ -454,20 +508,26 @@ async fn build_cursor_effect_timeline(
         }
     };
 
-    // Only write back the effect path if the session hasn't changed and the
-    // metadata path still matches. If the session changed, the build is stale
-    // and must not return success to the caller.
+    // Only write back the effect path if the session, metadata path, and
+    // beautify revision have not changed. This prevents stale builds from
+    // overwriting results belonging to a newer config or a different session.
     {
         let mut service = state
             .service
             .lock()
             .map_err(|_| "录制服务锁已损坏".to_string())?;
+        let current_revision = state.beautify_revision.load(Ordering::SeqCst);
         if service.current_session_id() == session_id
             && service.last_cursor_metadata_path().as_deref() == Some(metadata_path.as_str())
+            && current_revision == build_revision
         {
             service.set_last_effect_timeline_path(Some(path.to_string_lossy().to_string()));
         } else {
-            let msg = "录制会话已变更，光标效果构建已取消".to_string();
+            let msg = if current_revision != build_revision {
+                "光标美化配置已变更，构建已取消".to_string()
+            } else {
+                "录制会话已变更，光标效果构建已取消".to_string()
+            };
             let _ = app_for_blocking.emit(
                 "post-process-progress",
                 PostProcessProgressPayload {
@@ -537,6 +597,7 @@ pub fn run() -> tauri::Result<()> {
             set_capture_mode,
             set_audio_config,
             set_beautify_config,
+            get_beautify_config,
             build_cursor_effect_timeline,
             export_video
         ])

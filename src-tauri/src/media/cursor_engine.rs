@@ -406,6 +406,8 @@ impl CursorProcessor for CursorEffectEngine {
                 duration_nanos,
                 frames: Vec::new(),
                 click_effects: Vec::new(),
+                raw_system_cursor_visible: false,
+                render_cursor_overlay: true,
             });
         }
 
@@ -426,6 +428,8 @@ impl CursorProcessor for CursorEffectEngine {
             duration_nanos,
             frames,
             click_effects,
+            raw_system_cursor_visible: false,
+            render_cursor_overlay: true,
         })
     }
 }
@@ -704,5 +708,35 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("帧率"));
+    }
+
+    #[test]
+    fn engine_features_off_frames_have_neutral_scale_and_opacity() {
+        // When both magnification (max_scale=1.0, peak_opacity=0.0) and
+        // smoothing are disabled, the engine still generates cursor frames and
+        // click effects, but click effects produce zero visible impact on frame
+        // scale/opacity. The command layer in lib.rs short-circuits to an empty
+        // EffectTimeline when both features are off, before reaching the engine.
+        let engine = CursorEffectEngine::with_smoothing(
+            ClickAnimationConfig {
+                max_scale: 1.0,
+                peak_opacity: 0.0,
+            },
+            false,
+        );
+        let timeline = engine
+            .build_timeline(
+                &[sample(0, 100.0, 100.0), sample(16_666_667, 200.0, 200.0)],
+                &[click(8_000_000, ClickPhase::Down, 100.0, 100.0)],
+                60,
+                33_333_333,
+            )
+            .unwrap();
+
+        // All frames have neutral scale and opacity — no visible click effect.
+        for frame in &timeline.frames {
+            assert_eq!(frame.scale, 1.0);
+            assert_eq!(frame.opacity, 1.0);
+        }
     }
 }
