@@ -6,3 +6,4 @@ pub mod ffmpeg_writer;
 pub mod mic_level;
 pub mod recording_metadata;
 pub mod recording_writer;
+pub mod silence_detector;
