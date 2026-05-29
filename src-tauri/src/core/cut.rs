@@ -11,9 +11,10 @@ pub enum TrimSensitivity {
     High,
 }
 
-impl TrimSensitivity {
-    /// Parses the frontend string value used by `BeautifyConfigPayload`.
-    pub fn from_str(value: &str) -> Result<Self, String> {
+impl std::str::FromStr for TrimSensitivity {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
         match value {
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),

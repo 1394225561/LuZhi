@@ -94,9 +94,12 @@ fn emit_state_changed(app: &AppHandle, state: RecordingState) {
 }
 
 #[tauri::command]
-fn recording_status(state: tauri::State<'_, AppState>) -> RecordingStatusPayload {
-    let service = state.service.lock().unwrap();
-    RecordingStatusPayload::from(service.state())
+fn recording_status(state: tauri::State<'_, AppState>) -> Result<RecordingStatusPayload, String> {
+    let service = state
+        .service
+        .lock()
+        .map_err(|_| "录制服务锁已损坏".to_string())?;
+    Ok(RecordingStatusPayload::from(service.state()))
 }
 
 #[tauri::command]
@@ -271,7 +274,10 @@ async fn stop_recording(
 
 #[tauri::command]
 fn pause_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut service = state.service.lock().unwrap();
+    let mut service = state
+        .service
+        .lock()
+        .map_err(|_| "录制服务锁已损坏".to_string())?;
     service.pause().map_err(|e| e.to_string())?;
     let new_state = service.state();
     drop(service);
@@ -281,7 +287,10 @@ fn pause_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<
 
 #[tauri::command]
 fn resume_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut service = state.service.lock().unwrap();
+    let mut service = state
+        .service
+        .lock()
+        .map_err(|_| "录制服务锁已损坏".to_string())?;
     service.resume().map_err(|e| e.to_string())?;
     let new_state = service.state();
     drop(service);
@@ -311,7 +320,10 @@ fn set_capture_mode(
         .clone();
     let show_system_cursor =
         !(beautify_config.cursor_magnification || beautify_config.cursor_smoothing);
-    let mut config = state.capture_config.lock().unwrap();
+    let mut config = state
+        .capture_config
+        .lock()
+        .map_err(|_| "捕获配置锁已损坏".to_string())?;
     *config = CaptureConfig {
         mode,
         width: payload.width.unwrap_or(1920),
@@ -337,7 +349,10 @@ fn set_audio_config(
     state: tauri::State<'_, AppState>,
     payload: SetAudioConfigPayload,
 ) -> Result<(), String> {
-    let mut config = state.audio_config.lock().unwrap();
+    let mut config = state
+        .audio_config
+        .lock()
+        .map_err(|_| "音频配置锁已损坏".to_string())?;
     *config = AudioConfig {
         capture_system_audio: payload.capture_system_audio,
         capture_microphone: payload.capture_microphone,
@@ -597,7 +612,7 @@ async fn export_video(
     preset: String,
 ) -> Result<ExportSummaryPayload, String> {
     use media::trim_exporter::ExportPreset;
-    ExportPreset::from_str(&preset)?;
+    let _export_preset: ExportPreset = preset.parse()?;
 
     let cursor = build_cursor_effect_timeline(app.clone(), state.clone()).await?;
 
@@ -671,14 +686,20 @@ async fn build_cut_timeline(
         }
     }
 
-    let trim_metadata_path = {
+    // Capture session id, trim metadata path, and beautify revision atomically
+    // so we can verify after the async build that no newer config or session has
+    // started (which would make our result stale).
+    let (session_id, trim_metadata_path, build_revision) = {
         let service = state
             .service
             .lock()
             .map_err(|_| "录制服务锁已损坏".to_string())?;
-        service
+        let sid = service.current_session_id();
+        let path = service
             .last_trim_metadata_path()
-            .ok_or_else(|| "没有可用的裁剪元数据，请先完成一次录制".to_string())?
+            .ok_or_else(|| "没有可用的裁剪元数据，请先完成一次录制".to_string())?;
+        let rev = state.beautify_revision.load(Ordering::SeqCst);
+        (sid, path, rev)
     };
 
     let config = state
@@ -686,7 +707,7 @@ async fn build_cut_timeline(
         .lock()
         .map_err(|_| "美化配置锁已损坏".to_string())?
         .clone();
-    let sensitivity = TrimSensitivity::from_str(config.trim_sensitivity.as_str())?;
+    let sensitivity: TrimSensitivity = config.trim_sensitivity.parse()?;
     let trim_config = TrimConfig::from_sensitivity(sensitivity);
 
     let _ = app.emit(
@@ -699,10 +720,12 @@ async fn build_cut_timeline(
     );
 
     let app_for_blocking = app.clone();
+    let trim_metadata_path_for_blocking = trim_metadata_path.clone();
     let join_result = tauri::async_runtime::spawn_blocking(move || {
-        let metadata =
-            TrimMetadataWriter::read_metadata(PathBuf::from(&trim_metadata_path).as_path())
-                .map_err(|error| error.to_string())?;
+        let metadata = TrimMetadataWriter::read_metadata(
+            PathBuf::from(&trim_metadata_path_for_blocking).as_path(),
+        )
+        .map_err(|error| error.to_string())?;
         let detector = SilenceDetectorEngine::new(trim_config);
         let timeline = detector
             .analyze(
@@ -750,7 +773,30 @@ async fn build_cut_timeline(
             .service
             .lock()
             .map_err(|_| "录制服务锁已损坏".to_string())?;
-        service.set_last_cut_timeline_path(Some(path.to_string_lossy().to_string()));
+        let current_revision = state.beautify_revision.load(Ordering::SeqCst);
+        if service.current_session_id() == session_id
+            && service.last_trim_metadata_path().as_deref() == Some(trim_metadata_path.as_str())
+            && current_revision == build_revision
+        {
+            service.set_last_cut_timeline_path(Some(path.to_string_lossy().to_string()));
+        } else {
+            // Clean up the temp timeline file since this build is stale.
+            let _ = std::fs::remove_file(&path);
+            let msg = if current_revision != build_revision {
+                "裁剪配置已变更，构建已取消".to_string()
+            } else {
+                "录制会话已变更，裁剪时间线构建已取消".to_string()
+            };
+            let _ = app_for_blocking.emit(
+                "post-process-progress",
+                PostProcessProgressPayload {
+                    stage: "trim",
+                    progress: 0,
+                    error: Some(msg.clone()),
+                },
+            );
+            return Err(msg);
+        }
     }
 
     let _ = app_for_blocking.emit(

@@ -179,9 +179,22 @@ impl SilenceDetector for SilenceDetectorEngine {
             return Ok(CutTimeline::empty(duration_nanos));
         }
 
+        // Two-pointer sweep: both audio and visual are time-ordered from the
+        // consumer thread, so we can skip visual samples that end before the
+        // current audio sample starts. This reduces the candidate scan from
+        // O(N*M) to O(N + M).
         let mut candidates: Vec<(u64, u64, f32, f32)> = Vec::new();
+        let mut vi = 0;
         for audio_sample in audio {
-            for visual_sample in visual {
+            // Advance visual cursor past samples that end before audio starts.
+            while vi < visual.len() && visual[vi].end.nanos <= audio_sample.start.nanos {
+                vi += 1;
+            }
+            // Check overlapping visual samples; break when visual starts after audio ends.
+            for visual_sample in &visual[vi..] {
+                if visual_sample.start.nanos >= audio_sample.end.nanos {
+                    break;
+                }
                 if !self.is_candidate(audio_sample, visual_sample) {
                     continue;
                 }

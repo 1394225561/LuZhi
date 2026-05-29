@@ -13,8 +13,10 @@ pub enum ExportPreset {
     Xiaohongshu,
 }
 
-impl ExportPreset {
-    pub fn from_str(value: &str) -> Result<Self, String> {
+impl std::str::FromStr for ExportPreset {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
         match value {
             "bilibili" => Ok(Self::Bilibili),
             "douyin" => Ok(Self::Douyin),
@@ -124,9 +126,9 @@ mod tests {
     #[test]
     fn export_preset_rejects_unknown_value() {
         assert_eq!(
-            ExportPreset::from_str("bilibili").unwrap(),
+            "bilibili".parse::<ExportPreset>().unwrap(),
             ExportPreset::Bilibili
         );
-        assert!(ExportPreset::from_str("unknown").is_err());
+        assert!("unknown".parse::<ExportPreset>().is_err());
     }
 }

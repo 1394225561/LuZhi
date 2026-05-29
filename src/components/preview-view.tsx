@@ -41,7 +41,12 @@ interface PreviewViewProps {
 
 function messageForBeautifyError(error: unknown, fallback: string): string {
   const msg = String(error)
-  if (msg.includes('配置已变更，构建已取消') || msg.includes('录制会话已变更，光标效果构建已取消')) {
+  if (
+    msg.includes('配置已变更，构建已取消') ||
+    msg.includes('录制会话已变更，光标效果构建已取消') ||
+    msg.includes('裁剪配置已变更，构建已取消') ||
+    msg.includes('录制会话已变更，裁剪时间线构建已取消')
+  ) {
     return ''
   }
   return msg.includes('已录入系统光标') ||
