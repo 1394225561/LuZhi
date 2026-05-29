@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use app::events::{
-    CursorEffectSummaryPayload, CutTimelineSummaryPayload, MicLevelPayload, PermissionPayload,
-    PostProcessProgressPayload, RecordingStatusPayload,
+    CursorEffectSummaryPayload, CutTimelineSummaryPayload, ExportSummaryPayload, MicLevelPayload,
+    PermissionPayload, PostProcessProgressPayload, RecordingStatusPayload,
 };
 use app::mic_level_runtime::MicLevelRuntime;
 #[cfg(not(target_os = "macos"))]
@@ -595,12 +595,36 @@ async fn export_video(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     preset: String,
-) -> Result<CursorEffectSummaryPayload, String> {
-    if !matches!(preset.as_str(), "bilibili" | "douyin" | "xiaohongshu") {
-        return Err(format!("未知导出预设：{preset}"));
-    }
+) -> Result<ExportSummaryPayload, String> {
+    use media::trim_exporter::ExportPreset;
+    ExportPreset::from_str(&preset)?;
 
-    build_cursor_effect_timeline(app, state).await
+    let cursor = build_cursor_effect_timeline(app.clone(), state.clone()).await?;
+
+    let config = state
+        .beautify_config
+        .lock()
+        .map_err(|_| "美化配置锁已损坏".to_string())?
+        .clone();
+
+    let cut = if config.auto_trim_silences {
+        Some(build_cut_timeline(app, state).await?)
+    } else {
+        None
+    };
+
+    Ok(ExportSummaryPayload {
+        frame_count: cursor.frame_count,
+        click_effect_count: cursor.click_effect_count,
+        effect_timeline_path: cursor.effect_timeline_path,
+        cut_count: cut.as_ref().map(|summary| summary.cut_count).unwrap_or(0),
+        total_cut_nanos: cut
+            .as_ref()
+            .map(|summary| summary.total_cut_nanos)
+            .unwrap_or(0),
+        cut_timeline_path: cut.map(|summary| summary.cut_timeline_path),
+        output_path: None,
+    })
 }
 
 fn effect_timeline_path() -> PathBuf {
