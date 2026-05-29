@@ -52,6 +52,22 @@ export type CursorEffectSummary = {
   effectTimelinePath: string
 }
 
+export type CutTimelineSummary = {
+  cutCount: number
+  totalCutNanos: number
+  cutTimelinePath: string
+}
+
+export type ExportSummary = {
+  frameCount: number
+  clickEffectCount: number
+  effectTimelinePath: string
+  cutCount: number
+  totalCutNanos: number
+  cutTimelinePath: string | null
+  outputPath: string | null
+}
+
 export type RecordingResult = {
   durationSecs: number
   frameCount: number
@@ -110,8 +126,12 @@ export async function buildCursorEffectTimeline(): Promise<CursorEffectSummary> 
   return invoke<CursorEffectSummary>('build_cursor_effect_timeline')
 }
 
-export async function exportVideo(preset: ExportPreset): Promise<CursorEffectSummary> {
-  return invoke<CursorEffectSummary>('export_video', { preset })
+export async function buildCutTimeline(): Promise<CutTimelineSummary> {
+  return invoke<CutTimelineSummary>('build_cut_timeline')
+}
+
+export async function exportVideo(preset: ExportPreset): Promise<ExportSummary> {
+  return invoke<ExportSummary>('export_video', { preset })
 }
 
 // ─── Tauri Events ───

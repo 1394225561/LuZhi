@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils'
 import { motion } from 'framer-motion'
 import {
   buildCursorEffectTimeline,
+  buildCutTimeline,
   exportVideo,
   getBeautifyConfig,
   setBeautifyConfig,
@@ -43,7 +44,12 @@ function messageForBeautifyError(error: unknown, fallback: string): string {
   if (msg.includes('配置已变更，构建已取消') || msg.includes('录制会话已变更，光标效果构建已取消')) {
     return ''
   }
-  return msg.includes('已录入系统光标') || msg.includes('光标元数据为空') ? msg : fallback
+  return msg.includes('已录入系统光标') ||
+    msg.includes('光标元数据为空') ||
+    msg.includes('裁剪元数据') ||
+    msg.includes('裁剪时间线')
+    ? msg
+    : fallback
 }
 
 export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
@@ -162,7 +168,11 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
       void enqueueConfigWrite(nextConfig)
         .then(() => {
           setBeautifyError(null)
-          return buildCursorEffectTimeline()
+          return buildCursorEffectTimeline().then(() => {
+            if (nextConfig.autoTrimSilences) {
+              return buildCutTimeline()
+            }
+          })
         })
         .then(() => {
           if (seq === buildSeqRef.current) {

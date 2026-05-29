@@ -1605,4 +1605,79 @@ describe('App', () => {
       expect(screen.queryByText(/导出失败/)).toBeNull()
     })
   })
+
+  it('builds cut timeline when auto trim is toggled in preview', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') return Promise.resolve({ frameCount: 1, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      if (command === 'build_cut_timeline') return Promise.resolve({ cutCount: 1, totalCutNanos: 3_000_000_000, cutTimelinePath: '/tmp/cuts.json' })
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[2])
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('build_cut_timeline', undefined)
+    })
+  })
+
+  it('exports with auto trim enabled after flushing config', async () => {
+    const callOrder: string[] = []
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') {
+        callOrder.push('set_beautify_config')
+        return Promise.resolve()
+      }
+      if (command === 'export_video') {
+        callOrder.push('export_video')
+        return Promise.resolve({
+          frameCount: 1,
+          clickEffectCount: 0,
+          effectTimelinePath: '/tmp/effects.json',
+          cutCount: 1,
+          totalCutNanos: 3_000_000_000,
+          cutTimelinePath: '/tmp/cuts.json',
+          outputPath: null,
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[2])
+
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    await vi.waitFor(() => {
+      expect(callOrder).toEqual(['set_beautify_config', 'export_video'])
+    })
+  })
 })
