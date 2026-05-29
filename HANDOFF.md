@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-29 | Phase 4 Round 13 整改复审后自动化验证通过，Native Safety Gate 待人工审查。
+> 最后更新：2026-05-29 | Phase 5 空白段检测与自动裁剪实现完成（自动化验证全部通过，FFmpeg Gate 待人工审查）。
 >
 > 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,44 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-05-29：Phase 5 空白段检测与自动裁剪实现
+
+输入文件：
+
+- `docs/superpowers/plans/2026-05-29-phase-5-silence-trimming.md`
+- `tests/phase-5-w9-w10-checklist.md`
+
+本轮完成（10 Tasks）：
+
+1. `core/cut.rs` 建立 `CutTimeline` / `CutSegment` / `KeepSegment` / activity sample serde 模型。
+2. `media/silence_detector.rs` 实现音频 RMS、低分辨率帧差分、保守候选合并和裁剪缓冲策略。
+3. `media/trim_metadata.rs` 建立 trim metadata 与 cut timeline JSON sidecar。
+4. `MacRecordingService` 消费线程采集 bounded trim metadata，停止录制后写入 sidecar。
+5. Tauri 命令 `build_cut_timeline` 和 `export_video` 接入裁剪时间线边界。
+6. Preview UI 接入 auto-trim command path，前端仍不接触音视频帧或 activity stream。
+
+验证结果：
+
+- `cargo fmt --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` **149 tests** 通过（+22 相比 Phase 4）
+- `cargo clippy --all-targets` 无 error（21 pre-existing SCK FFI warnings）
+- `cargo build` 通过
+- `npm run build` 通过
+- `npm test -- --run` **44 tests** 通过（+2 相比 Phase 4）
+
+改动文件：
+
+- **新增**: `src-tauri/src/core/cut.rs`, `src-tauri/src/media/silence_detector.rs`, `src-tauri/src/media/trim_metadata.rs`, `src-tauri/src/media/trim_exporter.rs`
+- **修改**: `src-tauri/src/core/mod.rs`, `src-tauri/src/core/processor.rs`, `src-tauri/src/media/mod.rs`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/app/events.rs`, `src-tauri/src/app/error.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri.ts`, `src/components/preview-view.tsx`, `src/App.tsx`, `src/App.test.tsx`, `tests/phase-5-w9-w10-checklist.md`
+
+剩余待完成（不阻塞 Phase 5 code contract，但需关注）：
+
+- 真实可播放裁剪导出需生产 FFmpeg encoder/muxer 接入后人工验收。
+- 长录制 trim metadata / cut timeline 内存峰值压力测试。
+- 人工确认原始素材保留与重新导出路径。
+
+---
 
 ### 2026-05-27：Phase 4 光标平滑与点击放大实现
 
