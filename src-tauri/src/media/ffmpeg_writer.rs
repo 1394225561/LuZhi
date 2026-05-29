@@ -52,6 +52,10 @@ impl RecordingWriter for FfmpegRecordingWriter {
             // playable artifact exists. The path is stored for future use
             // when FFmpeg muxing is implemented.
             output_path: None,
+            cursor_metadata_path: None,
+            effect_timeline_path: None,
+            trim_metadata_path: None,
+            cut_timeline_path: None,
         })
     }
 }

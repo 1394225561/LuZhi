@@ -59,6 +59,8 @@ export type RecordingResult = {
   outputPath: string | null
   cursorMetadataPath: string | null
   effectTimelinePath: string | null
+  trimMetadataPath: string | null
+  cutTimelinePath: string | null
 }
 
 

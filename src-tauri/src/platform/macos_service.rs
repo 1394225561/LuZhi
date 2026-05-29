@@ -16,10 +16,19 @@ use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
 use crate::core::timeline::BeautifyConfigSnapshot;
+use crate::core::cut::TrimConfig;
 use crate::media::audio_mixer::SimpleAudioMixer;
 use crate::media::mic_level::MicLevelDetector;
 use crate::media::recording_metadata::RecordingMetadataWriter;
 use crate::media::recording_writer::{CountingRecordingWriter, RecordingResult, RecordingWriter};
+use crate::media::silence_detector::{AudioRmsAnalyzer, FrameDiffAnalyzer};
+use crate::media::trim_metadata::{TrimMetadata, TrimMetadataWriter};
+
+/// Internal return type that bundles the recording result with trim metadata.
+struct RecordingConsumerOutput {
+    result: RecordingResult,
+    trim_metadata: TrimMetadata,
+}
 
 /// Non-generic recording service for macOS.
 ///
@@ -36,13 +45,15 @@ pub struct MacRecordingService {
     system_audio_receiver: Option<MediaReceiver<AudioChunk>>,
     mic_receiver: Option<MediaReceiver<AudioChunk>>,
     stop_flag: Option<Arc<AtomicBool>>,
-    consumer_handle: Option<thread::JoinHandle<RecordingResult>>,
+    consumer_handle: Option<thread::JoinHandle<RecordingConsumerOutput>>,
     frame_count: Arc<std::sync::atomic::AtomicU64>,
     /// 当前麦克风 RMS 电平值 (0.0 ~ 1.0)，由消费线程周期性更新，外部通过 `mic_level()` 读取。
     mic_level: Arc<Mutex<f64>>,
     cursor_runtime: Option<CursorMetadataRuntime>,
     last_cursor_metadata_path: Option<String>,
     last_effect_timeline_path: Option<String>,
+    last_trim_metadata_path: Option<String>,
+    last_cut_timeline_path: Option<String>,
     /// Monotonically incrementing session counter. Used to guard async
     /// post-process jobs against writing stale results into a new session.
     session_id: u64,
@@ -55,6 +66,14 @@ impl MacRecordingService {
 
     pub fn set_last_effect_timeline_path(&mut self, path: Option<String>) {
         self.last_effect_timeline_path = path;
+    }
+
+    pub fn last_trim_metadata_path(&self) -> Option<String> {
+        self.last_trim_metadata_path.clone()
+    }
+
+    pub fn set_last_cut_timeline_path(&mut self, path: Option<String>) {
+        self.last_cut_timeline_path = path;
     }
 
     pub fn current_session_id(&self) -> u64 {
@@ -79,6 +98,8 @@ impl MacRecordingService {
             cursor_runtime: None,
             last_cursor_metadata_path: None,
             last_effect_timeline_path: None,
+            last_trim_metadata_path: None,
+            last_cut_timeline_path: None,
             session_id: 0,
         }
     }
@@ -113,6 +134,8 @@ impl MacRecordingService {
         // Clear stale session state from any previous recording.
         self.last_cursor_metadata_path = None;
         self.last_effect_timeline_path = None;
+        self.last_trim_metadata_path = None;
+        self.last_cut_timeline_path = None;
         self.session_id = self.session_id.wrapping_add(1);
 
         // Reset mic level from any previous session.
@@ -230,12 +253,23 @@ impl MacRecordingService {
             output_path: None,
             cursor_metadata_path: None,
             effect_timeline_path: None,
+            trim_metadata_path: None,
+            cut_timeline_path: None,
         };
-        let mut result = if let Some(handle) = self.consumer_handle.take() {
-            handle.join().unwrap_or(empty_result)
+        let empty_output = RecordingConsumerOutput {
+            result: empty_result,
+            trim_metadata: TrimMetadata {
+                duration_nanos: 0,
+                audio_activity: Vec::new(),
+                visual_activity: Vec::new(),
+            },
+        };
+        let consumer_output = if let Some(handle) = self.consumer_handle.take() {
+            handle.join().unwrap_or(empty_output)
         } else {
-            empty_result
+            empty_output
         };
+        let mut result = consumer_output.result;
 
         self.stop_flag = None;
 
@@ -257,6 +291,20 @@ impl MacRecordingService {
         result.cursor_metadata_path = cursor_metadata_path.clone();
         result.effect_timeline_path = self.last_effect_timeline_path.clone();
         self.last_cursor_metadata_path = cursor_metadata_path;
+
+        // Write trim metadata sidecar for post-recording silence detection.
+        let trim_metadata_path = {
+            let path = trim_metadata_path();
+            match TrimMetadataWriter::write_metadata(&path, &consumer_output.trim_metadata) {
+                Ok(()) => Some(path.to_string_lossy().to_string()),
+                Err(e) => {
+                    errors.push(format!("裁剪元数据写入失败: {e}"));
+                    None
+                }
+            }
+        };
+        result.trim_metadata_path = trim_metadata_path.clone();
+        self.last_trim_metadata_path = trim_metadata_path;
 
         // Reset mic level after session ends — always executed.
         if let Ok(mut guard) = self.mic_level.lock() {
@@ -307,9 +355,19 @@ impl MacRecordingService {
         frame_count: Arc<std::sync::atomic::AtomicU64>,
         mut writer: Box<dyn RecordingWriter>,
         mic_level: Arc<Mutex<f64>>,
-    ) -> RecordingResult {
+    ) -> RecordingConsumerOutput {
         let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
         let mut mic_detector = MicLevelDetector::new(4096); // ~85ms 窗口 @ 48kHz
+
+        // Trim metadata collectors — low-cost activity samples for post-recording
+        // silence detection. Computed in the consumer thread, never sent to React.
+        let rms_analyzer = AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(
+            crate::core::cut::TrimSensitivity::Medium,
+        ));
+        let frame_diff_analyzer = FrameDiffAnalyzer::new(64, 36);
+        let mut previous_frame: Option<crate::core::frame::VideoFrame> = None;
+        let mut visual_activity = Vec::new();
+        let mut audio_activity = Vec::new();
 
         loop {
             if stop_flag.load(Ordering::Relaxed) {
@@ -319,6 +377,13 @@ impl MacRecordingService {
             // Drain video frames (non-blocking).
             while let Ok(frame) = video_rx.try_recv() {
                 frame_count.fetch_add(1, Ordering::Relaxed);
+                // Collect frame-diff samples for trim metadata.
+                if let Some(ref previous) = previous_frame {
+                    if let Ok(diff) = frame_diff_analyzer.diff_pair(previous, &frame) {
+                        visual_activity.push(diff);
+                    }
+                }
+                previous_frame = Some((*frame).clone());
                 if let Err(e) = writer.push_video(frame) {
                     eprintln!("写入视频帧失败: {e}");
                 }
@@ -345,6 +410,9 @@ impl MacRecordingService {
             for mixed_result in synchronizer.drain_mixed() {
                 match mixed_result {
                     Ok(mixed) => {
+                        // Collect audio RMS samples for trim metadata.
+                        let samples = rms_analyzer.analyze_chunks(std::slice::from_ref(&mixed));
+                        audio_activity.extend(samples);
                         if let Err(e) = writer.push_audio(mixed) {
                             eprintln!("写入混音音频失败: {e}");
                         }
@@ -360,6 +428,12 @@ impl MacRecordingService {
         // before finalizing the writer.
         while let Ok(frame) = video_rx.try_recv() {
             frame_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(ref previous) = previous_frame {
+                if let Ok(diff) = frame_diff_analyzer.diff_pair(previous, &frame) {
+                    visual_activity.push(diff);
+                }
+            }
+            previous_frame = Some((*frame).clone());
             if let Err(e) = writer.push_video(frame) {
                 eprintln!("写入视频帧失败: {e}");
             }
@@ -378,6 +452,8 @@ impl MacRecordingService {
         for mixed_result in synchronizer.drain_mixed() {
             match mixed_result {
                 Ok(mixed) => {
+                    let samples = rms_analyzer.analyze_chunks(std::slice::from_ref(&mixed));
+                    audio_activity.extend(samples);
                     if let Err(e) = writer.push_audio(mixed) {
                         eprintln!("写入混音音频失败: {e}");
                     }
@@ -386,14 +462,25 @@ impl MacRecordingService {
             }
         }
 
-        writer.finish().unwrap_or(RecordingResult {
+        let result = writer.finish().unwrap_or(RecordingResult {
             duration_secs: 0,
             frame_count: 0,
             mixed_audio_chunk_count: 0,
             output_path: None,
             cursor_metadata_path: None,
             effect_timeline_path: None,
-        })
+            trim_metadata_path: None,
+            cut_timeline_path: None,
+        });
+        let duration_nanos = result.duration_secs.saturating_mul(1_000_000_000);
+        RecordingConsumerOutput {
+            result,
+            trim_metadata: TrimMetadata {
+                duration_nanos,
+                audio_activity,
+                visual_activity,
+            },
+        }
     }
 }
 
@@ -414,4 +501,17 @@ fn cursor_metadata_path() -> PathBuf {
     std::env::temp_dir()
         .join("luzhi-recordings")
         .join(format!("cursor-metadata-{millis}-{seq}.json"))
+}
+
+fn trim_metadata_path() -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    std::env::temp_dir()
+        .join("luzhi-recordings")
+        .join(format!("trim-metadata-{millis}-{seq}.json"))
 }

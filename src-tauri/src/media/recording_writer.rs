@@ -15,6 +15,8 @@ pub struct RecordingResult {
     pub output_path: Option<String>,
     pub cursor_metadata_path: Option<String>,
     pub effect_timeline_path: Option<String>,
+    pub trim_metadata_path: Option<String>,
+    pub cut_timeline_path: Option<String>,
 }
 
 /// Trait for writing recorded media to a file or other sink.
@@ -64,6 +66,8 @@ impl RecordingWriter for CountingRecordingWriter {
                 .map(|path| path.to_string_lossy().to_string()),
             cursor_metadata_path: None,
             effect_timeline_path: None,
+            trim_metadata_path: None,
+            cut_timeline_path: None,
         })
     }
 }
@@ -111,11 +115,15 @@ mod tests {
             output_path: None,
             cursor_metadata_path: Some("/tmp/cursor.json".to_string()),
             effect_timeline_path: Some("/tmp/effects.json".to_string()),
+            trim_metadata_path: Some("/tmp/trim-metadata.json".to_string()),
+            cut_timeline_path: Some("/tmp/cut-timeline.json".to_string()),
         };
 
         let json = serde_json::to_string(&result).unwrap();
 
         assert!(json.contains("\"cursorMetadataPath\":\"/tmp/cursor.json\""));
         assert!(json.contains("\"effectTimelinePath\":\"/tmp/effects.json\""));
+        assert!(json.contains("\"trimMetadataPath\":\"/tmp/trim-metadata.json\""));
+        assert!(json.contains("\"cutTimelinePath\":\"/tmp/cut-timeline.json\""));
     }
 }
