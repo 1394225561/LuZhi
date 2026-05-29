@@ -36,10 +36,9 @@ impl TrimMetadataWriter {
     }
 
     pub fn read_metadata(path: &Path) -> AppResult<TrimMetadata> {
-        let json =
-            fs::read_to_string(path).map_err(|error| AppError::RecordingWriteFailed {
-                reason: format!("读取裁剪元数据失败: {error}"),
-            })?;
+        let json = fs::read_to_string(path).map_err(|error| AppError::RecordingWriteFailed {
+            reason: format!("读取裁剪元数据失败: {error}"),
+        })?;
         serde_json::from_str(&json).map_err(|error| AppError::RecordingWriteFailed {
             reason: format!("解析裁剪元数据失败: {error}"),
         })
@@ -62,10 +61,9 @@ impl TrimMetadataWriter {
     }
 
     pub fn read_cut_timeline(path: &Path) -> AppResult<CutTimeline> {
-        let json =
-            fs::read_to_string(path).map_err(|error| AppError::RecordingWriteFailed {
-                reason: format!("读取裁剪时间线失败: {error}"),
-            })?;
+        let json = fs::read_to_string(path).map_err(|error| AppError::RecordingWriteFailed {
+            reason: format!("读取裁剪时间线失败: {error}"),
+        })?;
         serde_json::from_str(&json).map_err(|error| AppError::RecordingWriteFailed {
             reason: format!("解析裁剪时间线失败: {error}"),
         })

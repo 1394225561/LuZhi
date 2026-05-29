@@ -20,9 +20,9 @@ use app::recording_runtime::TickRuntime;
 use app::state_machine::RecordingState;
 use core::capture::AudioConfig;
 use core::config::CaptureConfig;
+use core::cut::{TrimConfig, TrimSensitivity};
 use core::processor::{CursorProcessor, SilenceDetector};
 use core::timeline::{BeautifyConfigSnapshot, EffectTimeline};
-use core::cut::{TrimConfig, TrimSensitivity};
 use media::cursor_engine::{ClickAnimationConfig, CursorEffectEngine};
 use media::recording_metadata::{RecordingMetadata, RecordingMetadataWriter};
 use media::recording_writer::RecordingResult;
@@ -700,10 +700,9 @@ async fn build_cut_timeline(
 
     let app_for_blocking = app.clone();
     let join_result = tauri::async_runtime::spawn_blocking(move || {
-        let metadata = TrimMetadataWriter::read_metadata(
-            PathBuf::from(&trim_metadata_path).as_path(),
-        )
-        .map_err(|error| error.to_string())?;
+        let metadata =
+            TrimMetadataWriter::read_metadata(PathBuf::from(&trim_metadata_path).as_path())
+                .map_err(|error| error.to_string())?;
         let detector = SilenceDetectorEngine::new(trim_config);
         let timeline = detector
             .analyze(

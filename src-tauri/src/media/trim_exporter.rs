@@ -82,9 +82,7 @@ pub struct FfmpegTrimExporter;
 #[cfg(feature = "ffmpeg")]
 impl TrimExporter for FfmpegTrimExporter {
     fn export(&mut self, request: TrimExportRequest) -> AppResult<TrimExportResult> {
-        if request.input_path.as_os_str().is_empty()
-            || request.output_path.as_os_str().is_empty()
-        {
+        if request.input_path.as_os_str().is_empty() || request.output_path.as_os_str().is_empty() {
             return Err(AppError::RecordingWriteFailed {
                 reason: "裁剪导出路径无效".to_string(),
             });

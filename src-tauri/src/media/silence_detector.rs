@@ -68,15 +68,11 @@ impl FrameDiffAnalyzer {
         previous: &VideoFrame,
         current: &VideoFrame,
     ) -> Result<FrameDiffSample, String> {
-        if previous.pixel_format != PixelFormat::Bgra8
-            || current.pixel_format != PixelFormat::Bgra8
+        if previous.pixel_format != PixelFormat::Bgra8 || current.pixel_format != PixelFormat::Bgra8
         {
             return Err("帧差分仅支持 BGRA8 像素格式".to_string());
         }
-        if previous.width == 0
-            || previous.height == 0
-            || current.width == 0
-            || current.height == 0
+        if previous.width == 0 || previous.height == 0 || current.width == 0 || current.height == 0
         {
             return Err("帧差分输入尺寸无效".to_string());
         }
@@ -109,15 +105,15 @@ impl FrameDiffAnalyzer {
         let mut output = Vec::with_capacity((self.thumb_width * self.thumb_height) as usize);
         for y in 0..self.thumb_height {
             for x in 0..self.thumb_width {
-                let src_x =
-                    (x as u64 * frame.width as u64 / self.thumb_width as u64) as usize;
-                let src_y =
-                    (y as u64 * frame.height as u64 / self.thumb_height as u64) as usize;
+                let src_x = (x as u64 * frame.width as u64 / self.thumb_width as u64) as usize;
+                let src_y = (y as u64 * frame.height as u64 / self.thumb_height as u64) as usize;
                 let offset = (src_y * frame.width as usize + src_x) * 4;
                 let b = bytes[offset] as f32;
                 let g = bytes[offset + 1] as f32;
                 let r = bytes[offset + 2] as f32;
-                let gray = (0.114 * b + 0.587 * g + 0.299 * r).round().clamp(0.0, 255.0) as u8;
+                let gray = (0.114 * b + 0.587 * g + 0.299 * r)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
                 output.push(gray);
             }
         }
@@ -192,12 +188,7 @@ impl SilenceDetector for SilenceDetectorEngine {
                 let start = audio_sample.start.nanos.max(visual_sample.start.nanos);
                 let end = audio_sample.end.nanos.min(visual_sample.end.nanos);
                 if end > start {
-                    candidates.push((
-                        start,
-                        end,
-                        audio_sample.rms,
-                        visual_sample.change_ratio,
-                    ));
+                    candidates.push((start, end, audio_sample.rms, visual_sample.change_ratio));
                 }
             }
         }
@@ -299,8 +290,7 @@ mod tests {
 
     #[test]
     fn silence_chunk_produces_low_rms_sample() {
-        let analyzer =
-            AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(TrimSensitivity::Medium));
+        let analyzer = AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(TrimSensitivity::Medium));
         let samples = analyzer.analyze_chunks(&[mixed_chunk(0, vec![0.0; 48_000])]);
 
         assert_eq!(samples.len(), 1);
@@ -309,8 +299,7 @@ mod tests {
 
     #[test]
     fn background_noise_remains_explainable() {
-        let analyzer =
-            AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(TrimSensitivity::Medium));
+        let analyzer = AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(TrimSensitivity::Medium));
         let samples = analyzer.analyze_chunks(&[mixed_chunk(0, vec![0.015; 48_000])]);
 
         assert_eq!(samples.len(), 1);
@@ -320,8 +309,7 @@ mod tests {
 
     #[test]
     fn loud_chunk_is_not_silent() {
-        let analyzer =
-            AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(TrimSensitivity::Medium));
+        let analyzer = AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(TrimSensitivity::Medium));
         let samples = analyzer.analyze_chunks(&[mixed_chunk(0, vec![0.25; 48_000])]);
 
         assert_eq!(samples.len(), 1);
@@ -426,9 +414,7 @@ mod tests {
         let audio = vec![audio_sample(1_000_000_000, 2_500_000_000, 0.001)];
         let visual = vec![visual_sample(1_000_000_000, 2_500_000_000, 0.001)];
 
-        let timeline = detector
-            .analyze(&audio, &visual, 5_000_000_000)
-            .unwrap();
+        let timeline = detector.analyze(&audio, &visual, 5_000_000_000).unwrap();
 
         assert!(timeline.cuts.is_empty());
     }
@@ -440,9 +426,7 @@ mod tests {
         let audio = vec![audio_sample(2_000_000_000, 9_000_000_000, 0.001)];
         let visual = vec![visual_sample(2_000_000_000, 9_000_000_000, 0.001)];
 
-        let timeline = detector
-            .analyze(&audio, &visual, 12_000_000_000)
-            .unwrap();
+        let timeline = detector.analyze(&audio, &visual, 12_000_000_000).unwrap();
 
         assert_eq!(timeline.cuts.len(), 1);
         assert_eq!(timeline.cuts[0].start.nanos, 2_400_000_000);
@@ -463,9 +447,7 @@ mod tests {
             visual_sample(5_800_000_000, 11_500_000_000, 0.001),
         ];
 
-        let timeline = detector
-            .analyze(&audio, &visual, 14_000_000_000)
-            .unwrap();
+        let timeline = detector.analyze(&audio, &visual, 14_000_000_000).unwrap();
 
         assert_eq!(timeline.cuts.len(), 1);
         assert!(timeline.cuts[0].start.nanos < 500_000_000);
