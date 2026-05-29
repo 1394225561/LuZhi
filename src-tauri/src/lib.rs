@@ -23,7 +23,7 @@ use core::config::CaptureConfig;
 use core::processor::CursorProcessor;
 use core::timeline::{BeautifyConfigSnapshot, EffectTimeline};
 use media::cursor_engine::{ClickAnimationConfig, CursorEffectEngine};
-use media::recording_metadata::RecordingMetadataWriter;
+use media::recording_metadata::{RecordingMetadata, RecordingMetadataWriter};
 use media::recording_writer::RecordingResult;
 #[cfg(target_os = "macos")]
 use platform::macos_service::MacRecordingService;
@@ -140,6 +140,15 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
         .lock()
         .map_err(|_| "美化配置锁已损坏".to_string())?
         .clone();
+
+    // Recompute show_system_cursor from current beautify config to ensure the
+    // raw cursor fact always matches the latest intent, regardless of whether
+    // set_capture_mode was called before or after a config change.
+    let expected_show_system_cursor =
+        !(beautify_config.cursor_magnification || beautify_config.cursor_smoothing);
+    let mut config = config;
+    config.show_system_cursor = expected_show_system_cursor;
+
     let beautify_snapshot = BeautifyConfigSnapshot {
         cursor_magnification: beautify_config.cursor_magnification,
         magnification_factor: beautify_config.magnification_factor,
@@ -359,6 +368,79 @@ fn get_beautify_config(state: tauri::State<'_, AppState>) -> Result<BeautifyConf
         .map_err(|_| "美化配置锁已损坏".to_string())
 }
 
+/// Pure helper that applies the 方案 B safety contract:
+/// - `metadata.beautify_config.raw_system_cursor_visible` is the immutable fact.
+/// - `config` is the current Preview export intent.
+fn build_effect_timeline_from_metadata(
+    metadata: &RecordingMetadata,
+    config: &BeautifyConfigPayload,
+) -> Result<EffectTimeline, String> {
+    let raw_visible = metadata.beautify_config.raw_system_cursor_visible;
+    let want_overlay = config.cursor_magnification || config.cursor_smoothing;
+
+    if raw_visible && want_overlay {
+        return Err(
+            "本次素材已录入系统光标，无法叠加美化光标效果。请先关闭光标美化后重新录制。"
+                .to_string(),
+        );
+    }
+
+    let render_cursor_overlay = !raw_visible;
+
+    if !raw_visible && metadata.cursor_samples.is_empty() {
+        return Err(
+            "本次素材未录入系统光标，且光标元数据为空，无法生成光标时间线。请关闭光标美化后重新录制，或重新录制以恢复光标元数据。"
+                .to_string(),
+        );
+    }
+
+    let mut timeline = if want_overlay || !raw_visible {
+        let engine = CursorEffectEngine::with_smoothing(
+            ClickAnimationConfig {
+                max_scale: if config.cursor_magnification {
+                    config.magnification_factor.clamp(1.0, 3.0)
+                } else {
+                    1.0
+                },
+                peak_opacity: if config.cursor_magnification {
+                    0.35
+                } else {
+                    0.0
+                },
+            },
+            config.cursor_smoothing,
+        );
+
+        let clicks = if config.cursor_magnification {
+            metadata.cursor_clicks.as_slice()
+        } else {
+            &[]
+        };
+
+        engine
+            .build_timeline(
+                &metadata.cursor_samples,
+                clicks,
+                metadata.fps,
+                metadata.duration_nanos,
+            )
+            .map_err(|error| error.to_string())?
+    } else {
+        EffectTimeline {
+            fps: metadata.fps,
+            duration_nanos: metadata.duration_nanos,
+            frames: Vec::new(),
+            click_effects: Vec::new(),
+            raw_system_cursor_visible: true,
+            render_cursor_overlay: false,
+        }
+    };
+    timeline.raw_system_cursor_visible = raw_visible;
+    timeline.render_cursor_overlay = render_cursor_overlay;
+
+    Ok(timeline)
+}
+
 #[tauri::command]
 async fn build_cursor_effect_timeline(
     app: AppHandle,
@@ -417,61 +499,7 @@ async fn build_cursor_effect_timeline(
         )
         .map_err(|error| error.to_string())?;
 
-        let raw_visible = metadata.beautify_config.raw_system_cursor_visible;
-        let want_overlay = config.cursor_magnification || config.cursor_smoothing;
-
-        if raw_visible && want_overlay {
-            return Err(
-                "本次素材已录入系统光标，无法叠加美化光标效果。请先关闭光标美化后重新录制。"
-                    .to_string(),
-            );
-        }
-
-        let render_cursor_overlay = !raw_visible;
-
-        let mut timeline = if want_overlay || !raw_visible {
-            let engine = CursorEffectEngine::with_smoothing(
-                ClickAnimationConfig {
-                    max_scale: if config.cursor_magnification {
-                        config.magnification_factor.clamp(1.0, 3.0)
-                    } else {
-                        1.0
-                    },
-                    peak_opacity: if config.cursor_magnification {
-                        0.35
-                    } else {
-                        0.0
-                    },
-                },
-                config.cursor_smoothing,
-            );
-
-            let clicks = if config.cursor_magnification {
-                metadata.cursor_clicks.as_slice()
-            } else {
-                &[]
-            };
-
-            engine
-                .build_timeline(
-                    &metadata.cursor_samples,
-                    clicks,
-                    metadata.fps,
-                    metadata.duration_nanos,
-                )
-                .map_err(|error| error.to_string())?
-        } else {
-            EffectTimeline {
-                fps: metadata.fps,
-                duration_nanos: metadata.duration_nanos,
-                frames: Vec::new(),
-                click_effects: Vec::new(),
-                raw_system_cursor_visible: true,
-                render_cursor_overlay: false,
-            }
-        };
-        timeline.raw_system_cursor_visible = raw_visible;
-        timeline.render_cursor_overlay = render_cursor_overlay;
+        let timeline = build_effect_timeline_from_metadata(&metadata, &config)?;
 
         let path = effect_timeline_path();
         RecordingMetadataWriter::write_effect_timeline(&path, &timeline)
@@ -523,6 +551,9 @@ async fn build_cursor_effect_timeline(
         {
             service.set_last_effect_timeline_path(Some(path.to_string_lossy().to_string()));
         } else {
+            // Clean up the temp timeline file since this build is stale and
+            // the file will never be referenced by any session.
+            let _ = std::fs::remove_file(&path);
             let msg = if current_revision != build_revision {
                 "光标美化配置已变更，构建已取消".to_string()
             } else {
@@ -604,4 +635,153 @@ pub fn run() -> tauri::Result<()> {
         .run(tauri::generate_context!())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::frame::MediaTimestamp;
+    use crate::core::timeline::{ClickPhase, CursorClick, CursorSample, MouseButton};
+
+    fn sample(nanos: u64, x: f32, y: f32) -> CursorSample {
+        CursorSample {
+            timestamp: MediaTimestamp::from_nanos(nanos),
+            x,
+            y,
+        }
+    }
+
+    fn click(nanos: u64, phase: ClickPhase, x: f32, y: f32) -> CursorClick {
+        CursorClick {
+            timestamp: MediaTimestamp::from_nanos(nanos),
+            button: MouseButton::Left,
+            phase,
+            x,
+            y,
+        }
+    }
+
+    fn metadata_with_raw_visible(raw_visible: bool) -> RecordingMetadata {
+        RecordingMetadata {
+            fps: 60,
+            duration_nanos: 33_333_333,
+            cursor_samples: vec![sample(0, 100.0, 100.0), sample(16_666_667, 200.0, 200.0)],
+            cursor_clicks: vec![click(8_000_000, ClickPhase::Down, 100.0, 100.0)],
+            beautify_config: BeautifyConfigSnapshot {
+                cursor_magnification: false,
+                magnification_factor: 1.0,
+                cursor_smoothing: false,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: raw_visible,
+            },
+            cursor_snapshot_success_count: 2,
+            cursor_snapshot_error_count: 0,
+        }
+    }
+
+    #[test]
+    fn raw_visible_and_overlay_requested_returns_error() {
+        let metadata = metadata_with_raw_visible(true);
+        let config = BeautifyConfigPayload {
+            cursor_magnification: false,
+            magnification_factor: 1.0,
+            cursor_smoothing: true,
+            auto_trim_silences: false,
+            trim_sensitivity: "medium".to_string(),
+        };
+        let result = build_effect_timeline_from_metadata(&metadata, &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("已录入系统光标"));
+    }
+
+    #[test]
+    fn raw_visible_no_overlay_generates_empty_timeline() {
+        let metadata = metadata_with_raw_visible(true);
+        let config = BeautifyConfigPayload {
+            cursor_magnification: false,
+            magnification_factor: 1.0,
+            cursor_smoothing: false,
+            auto_trim_silences: false,
+            trim_sensitivity: "medium".to_string(),
+        };
+        let timeline = build_effect_timeline_from_metadata(&metadata, &config).unwrap();
+        assert!(timeline.frames.is_empty());
+        assert!(timeline.click_effects.is_empty());
+        assert!(timeline.raw_system_cursor_visible);
+        assert!(!timeline.render_cursor_overlay);
+    }
+
+    #[test]
+    fn raw_hidden_no_overlay_generates_baseline_frames() {
+        let metadata = metadata_with_raw_visible(false);
+        let config = BeautifyConfigPayload {
+            cursor_magnification: false,
+            magnification_factor: 1.0,
+            cursor_smoothing: false,
+            auto_trim_silences: false,
+            trim_sensitivity: "medium".to_string(),
+        };
+        let timeline = build_effect_timeline_from_metadata(&metadata, &config).unwrap();
+        assert!(!timeline.raw_system_cursor_visible);
+        assert!(timeline.render_cursor_overlay);
+        assert!(!timeline.frames.is_empty());
+        for frame in &timeline.frames {
+            assert_eq!(frame.scale, 1.0);
+            assert_eq!(frame.opacity, 1.0);
+        }
+    }
+
+    #[test]
+    fn raw_hidden_overlay_requested_generates_overlay_with_clicks() {
+        let metadata = metadata_with_raw_visible(false);
+        let config = BeautifyConfigPayload {
+            cursor_magnification: true,
+            magnification_factor: 2.0,
+            cursor_smoothing: true,
+            auto_trim_silences: false,
+            trim_sensitivity: "medium".to_string(),
+        };
+        let timeline = build_effect_timeline_from_metadata(&metadata, &config).unwrap();
+        assert!(!timeline.raw_system_cursor_visible);
+        assert!(timeline.render_cursor_overlay);
+        assert!(!timeline.frames.is_empty());
+        assert!(!timeline.click_effects.is_empty());
+    }
+
+    #[test]
+    fn raw_hidden_empty_cursor_samples_returns_error() {
+        let mut metadata = metadata_with_raw_visible(false);
+        metadata.cursor_samples = vec![];
+        metadata.cursor_snapshot_success_count = 0;
+        metadata.cursor_snapshot_error_count = 100;
+        let config = BeautifyConfigPayload {
+            cursor_magnification: true,
+            magnification_factor: 2.0,
+            cursor_smoothing: true,
+            auto_trim_silences: false,
+            trim_sensitivity: "medium".to_string(),
+        };
+        let result = build_effect_timeline_from_metadata(&metadata, &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("光标元数据为空"));
+    }
+
+    #[test]
+    fn raw_visible_empty_cursor_samples_generates_empty_noop_timeline() {
+        let mut metadata = metadata_with_raw_visible(true);
+        metadata.cursor_samples = vec![];
+        let config = BeautifyConfigPayload {
+            cursor_magnification: false,
+            magnification_factor: 1.0,
+            cursor_smoothing: false,
+            auto_trim_silences: false,
+            trim_sensitivity: "medium".to_string(),
+        };
+        let timeline = build_effect_timeline_from_metadata(&metadata, &config).unwrap();
+        assert!(timeline.raw_system_cursor_visible);
+        assert!(!timeline.render_cursor_overlay);
+        assert!(timeline.frames.is_empty());
+        assert!(timeline.click_effects.is_empty());
+    }
 }

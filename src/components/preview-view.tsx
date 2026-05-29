@@ -38,6 +38,14 @@ interface PreviewViewProps {
   recordingResult?: RecordingResult | null
 }
 
+function messageForBeautifyError(error: unknown, fallback: string): string {
+  const msg = String(error)
+  if (msg.includes('配置已变更，构建已取消') || msg.includes('录制会话已变更，光标效果构建已取消')) {
+    return ''
+  }
+  return msg.includes('已录入系统光标') || msg.includes('光标元数据为空') ? msg : fallback
+}
+
 export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(45)
@@ -68,7 +76,9 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingConfigRef = useRef<BeautifyConfig | null>(null)
-  const configWriteRef = useRef<Promise<void> | null>(null)
+  const writeChainRef = useRef<Promise<void>>(Promise.resolve())
+  const buildSeqRef = useRef(0)
+  const [beautifyError, setBeautifyError] = useState<string | null>(null)
 
   // Initialize beautify state from backend on mount so the UI reflects the
   // persistent config rather than hardcoded defaults that may have drifted
@@ -103,36 +113,39 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
       if (pendingConfigRef.current) {
         const config = pendingConfigRef.current
         pendingConfigRef.current = null
-        void writeBeautifyConfig(config)
+        void enqueueConfigWrite(config).catch((err) => {
+          console.error('退出预览时配置保存失败', err)
+        })
       }
     }
   }, [])
 
-  // Wrap setBeautifyConfig to track the in-flight promise so flushPendingConfig
-  // can wait for writes that have already been dispatched but not yet resolved.
-  const writeBeautifyConfig = (config: BeautifyConfig): Promise<void> => {
-    const promise = setBeautifyConfig(config).then(() => {})
-    configWriteRef.current = promise
-    return promise.finally(() => {
-      if (configWriteRef.current === promise) {
-        configWriteRef.current = null
-      }
-    })
+  // Serialize all setBeautifyConfig calls through a promise chain so that
+  // writes always land in user-intention order, even when a debounce-triggered
+  // write is still in-flight when a flush/export/back occurs.
+  const enqueueConfigWrite = (config: BeautifyConfig): Promise<void> => {
+    const write = writeChainRef.current
+      .catch((err) => { if (err) console.error('配置写入链中前序写入失败', err) })
+      .then(() => setBeautifyConfig(config).then(() => {}))
+    writeChainRef.current = write
+    return write
   }
 
   // Immediately flush the latest pending beautify config to backend.
-  // Waits for both any still-pending debounced config AND any in-flight write.
+  // Enqueues the pending write onto the chain and then awaits all
+  // previously-enqueued writes to complete in order.
+  // Does NOT swallow errors: callers must handle rejection to avoid
+  // proceeding with stale backend config.
   const flushPendingConfig = (): Promise<void> => {
     if (debounceRef.current) {
       clearTimeout(debounceRef.current)
       debounceRef.current = null
     }
-    const pendingPromise = pendingConfigRef.current
-      ? writeBeautifyConfig(pendingConfigRef.current)
-      : Promise.resolve()
-    pendingConfigRef.current = null
-    const inFlightPromise = configWriteRef.current ?? Promise.resolve()
-    return Promise.all([pendingPromise, inFlightPromise]).then(() => {})
+    if (pendingConfigRef.current) {
+      enqueueConfigWrite(pendingConfigRef.current)
+      pendingConfigRef.current = null
+    }
+    return writeChainRef.current
   }
 
   const handleBeautifyChange = (config: Partial<BeautifyConfig>) => {
@@ -145,10 +158,24 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null
       pendingConfigRef.current = null
-      void writeBeautifyConfig(nextConfig)
-        .then(() => buildCursorEffectTimeline())
+      const seq = ++buildSeqRef.current
+      void enqueueConfigWrite(nextConfig)
+        .then(() => {
+          setBeautifyError(null)
+          return buildCursorEffectTimeline()
+        })
+        .then(() => {
+          if (seq === buildSeqRef.current) {
+            setBeautifyError(null)
+          }
+        })
         .catch((error) => {
+          const msg = messageForBeautifyError(error, '光标效果处理失败，请重试或重新录制。')
+          if (seq !== buildSeqRef.current || !msg) {
+            return
+          }
           console.error('光标效果处理失败', error)
+          setBeautifyError(msg)
         })
     }, 300)
   }
@@ -156,8 +183,12 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   const handleExport = (preset: ExportPreset) => {
     void flushPendingConfig()
       .then(() => exportVideo(preset))
+      .then(() => setBeautifyError(null))
       .catch((error) => {
+        const msg = messageForBeautifyError(error, '导出失败，请重试或检查录制素材。')
+        if (!msg) return
         console.error('导出失败', error)
+        setBeautifyError(msg)
       })
   }
 
@@ -165,8 +196,10 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
     void flushPendingConfig()
       .then(() => onBack())
       .catch((error) => {
+        const msg = messageForBeautifyError(error, '美化配置保存失败，请重试或恢复设置后再返回录制。')
+        if (!msg) return
         console.error('保存美化配置失败', error)
-        onBack()
+        setBeautifyError(msg)
       })
   }
 
@@ -415,6 +448,11 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
 
         {/* Export Section */}
         <div>
+          {beautifyError && (
+            <div className="mb-3 rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-xs text-destructive">
+              {beautifyError}
+            </div>
+          )}
           <div className="flex items-center gap-2 mb-4">
             <Download className="w-4 h-4 text-foreground" />
             <h2 className="text-sm font-semibold text-foreground uppercase tracking-wide">

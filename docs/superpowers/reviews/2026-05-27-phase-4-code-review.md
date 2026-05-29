@@ -3297,3 +3297,2163 @@ rg -n 'data-tauri-drag-region="false"|whileTap|motion\.div' src src-tauri
 4. **给 raw cursor conflict 做可见 UI 反馈**：不要只 `console.error`。
 5. **修正文档与注释**：checklist 的 in-flight 测试描述、`cursor_engine.rs` features-off 注释需要与现状一致。
 6. **继续保留人工 gate**：真实 macOS click/video 对齐、CoreGraphics/SCK FFI Native Safety、双光标和 baseline overlay 视觉效果仍需人工验证。
+
+## 19. Round 9 整改复审（2026-05-28）
+
+> 评审背景：用户已完成 `## 18. Round 8 整改复审（2026-05-28）` 中的整改任务，本轮复审当前工作区未提交改动，重点确认 Round 8 的 6 条整改建议是否真正闭环，并继续专项检查 Phase 4 是否完整完成、是否存在阻塞捕获主链路、内存安全、线程安全和资源释放路径异常。
+>
+> 当前工作区状态：
+>
+> - `src-tauri/src/lib.rs`
+> - `src-tauri/src/media/cursor_engine.rs`
+> - `src/App.test.tsx`
+> - `src/components/preview-view.tsx`
+> - `tests/phase-4-w7-w8-checklist.md`
+>
+> 当前结论：**With fixes / No**，暂不建议直接合并。本轮未发现 Critical，也未发现 cursor smoothing / Bezier interpolation / click magnification 进入 ScreenCaptureKit 捕获 callback；Round 8 的主要整改大多已经完成。但仍有 1 个 Important：`flushPendingConfig()` 会吞掉 `setBeautifyConfig()` 写入失败，导致导出或返回录制可以在后端仍为旧配置时继续执行，破坏“Preview 当前配置影响当前导出”的方案 B 契约。
+>
+> 交叉验证：本轮按 `$superpowers:requesting-code-review` 流程启动独立审查代理 `Mill`。独立审查与本地主审结论一致：无 Critical；核心 Important 是 `flushPendingConfig()` 的 `.catch(() => {})` 会把配置写入失败转成成功，导致 export 继续使用 stale backend config。独立审查同时指出 checklist 中 “raw cursor conflict error UI” 的测试描述偏乐观。
+
+### 19.1 本轮已确认修复或改善
+
+- `src/components/preview-view.tsx:71`：Round 8 的 `configWriteRef` 已替换为 `writeChainRef`，写入不再只追踪 latest promise。
+- `src/components/preview-view.tsx:115-120`：`enqueueConfigWrite()` 使用 promise chain 串行化 `setBeautifyConfig()`，可以保证 A 写入完成后才执行 B 写入，避免旧 in-flight write 晚到覆盖新配置。
+- `src/components/preview-view.tsx:126-135`：`flushPendingConfig()` 会清理 debounce timer，并把 pending config 入队到同一条 write chain；导出和返回录制主路径会等待该 chain。
+- `src/components/preview-view.tsx:145-159`：debounce 触发后的 config write 完成后才调用 `buildCursorEffectTimeline()`，并在 raw cursor conflict 时设置 `beautifyError`。
+- `src/components/preview-view.tsx:163-175`：导出路径会先 `flushPendingConfig()`，再调用 `exportVideo()`，并在 raw cursor conflict 时设置 `beautifyError`。
+- `src/components/preview-view.tsx:432-435`：新增可见错误提示，不再只把 raw cursor conflict 写入 console。
+- `src-tauri/src/lib.rs:144-152`：`start_recording()` 会重新根据当前 `beautify_config` 推导 `show_system_cursor`，降低调用方忘记先 `set_capture_mode()` 时 raw cursor fact 与当前意图不一致的风险。
+- `src-tauri/src/lib.rs:376-437`：抽出了 `build_effect_timeline_from_metadata()` 纯 helper，集中表达方案 B contract：metadata 中的 `raw_system_cursor_visible` 是不可变事实，当前 Preview config 是导出意图。
+- `src-tauri/src/lib.rs:676-742`：新增 4 个 Rust contract 测试，覆盖 raw visible reject、raw visible no-overlay、raw hidden baseline、raw hidden overlay。
+- `src-tauri/src/lib.rs:548-551`：stale/cancelled build 在 guard 失败时会尝试删除已经写出的临时 timeline JSON，减少未引用 temp 文件残留。
+- `src-tauri/src/media/cursor_engine.rs:715-721`：features-off 注释已更新为当前方案 B 语义：engine 支持 neutral overlay frames，command layer 根据 raw cursor visibility 决定是否调用。
+- `src/App.test.tsx:1174-1243`：新增 promise chain serialization 测试，覆盖 A in-flight、B pending、点击导出后必须按 `A -> B -> export` 顺序完成。
+- `tests/phase-4-w7-w8-checklist.md:68-73`：验证摘要已更新到 Round 8，Rust 124 tests / frontend 33 tests。
+
+### 19.2 Critical Findings
+
+本轮未发现 Critical。
+
+没有发现以下阻塞性问题：
+
+- 未发现 cursor smoothing、Bezier interpolation、click magnification 在 ScreenCaptureKit callback 内执行。
+- 未发现新增磁盘 IO、JSON 读写、timeline build、Tauri emit、export 等重操作进入 SCK capture callback。
+- 未发现新增明显 use-after-free、CVPixelBuffer unlock 后继续读 base address、CoreGraphics event 未释放等硬性内存安全问题。
+- 未发现 `CursorMetadataRuntime` samples/clicks 退化为无界增长。
+- 未发现 `MacRecordingService.stop()` 重新出现 sidecar 写入失败后跳过 cleanup / 状态机悬挂的问题。
+
+### 19.3 Important Findings
+
+#### Important 1: `flushPendingConfig()` 吞掉配置写入失败，导出可能继续使用旧后端配置
+
+位置：
+
+- `src/components/preview-view.tsx:126-135`
+- `src/components/preview-view.tsx:163-175`
+- `src/components/preview-view.tsx:178-184`
+- `src-tauri/src/lib.rs:351-361`
+- `src-tauri/src/lib.rs:483-497`
+- `src-tauri/src/lib.rs:586-596`
+
+现象：
+
+Round 8 将写入顺序改成 promise chain，这是正确方向。但 `flushPendingConfig()` 当前实现会吞掉 chain 中的错误：
+
+```ts
+const flushPendingConfig = (): Promise<void> => {
+  if (debounceRef.current) {
+    clearTimeout(debounceRef.current)
+    debounceRef.current = null
+  }
+  if (pendingConfigRef.current) {
+    enqueueConfigWrite(pendingConfigRef.current)
+    pendingConfigRef.current = null
+  }
+  return writeChainRef.current.catch(() => {})
+}
+```
+
+这会把 `setBeautifyConfig()` 的失败转成成功。导出路径随后继续执行：
+
+```ts
+void flushPendingConfig()
+  .then(() => exportVideo(preset))
+```
+
+因此只要 pending 或 in-flight config write 失败，`exportVideo()` 仍会运行，并使用 Rust 后端中尚未更新的旧 `beautify_config`。
+
+可复现场景：
+
+1. 用户在 Preview 中关闭 `cursorSmoothing` 或 `cursorMagnification`。
+2. 前端 state 已经更新，`pendingConfigRef.current` 保存了用户最新意图。
+3. 用户马上点击导出。
+4. `flushPendingConfig()` 入队并执行 `setBeautifyConfig(latestConfig)`。
+5. Tauri invoke reject，或后端 `set_beautify_config` 返回错误。
+6. `flushPendingConfig()` 的 `.catch(() => {})` 吞掉错误并 resolve。
+7. `exportVideo()` 继续调用后端。
+8. 后端 `build_cursor_effect_timeline()` 读取的是旧 `beautify_config`，不是用户看到的当前 Preview 控件状态。
+
+为什么重要：
+
+- 方案 B 的核心契约是“metadata raw cursor fact 不可变，Preview 当前 config 作为当前导出意图”。如果 flush 失败后仍导出，就不能保证导出使用的是 Preview 当前意图。
+- `build_cursor_effect_timeline()` 当前会读取全局 `beautify_config` 作为 export intent；这个值由 `set_beautify_config()` 写入。如果写入失败被吞，旧配置仍会参与 timeline/export。
+- 这会重新带来 raw cursor / overlay 策略不一致风险。例如 UI 上用户认为已经关闭 overlay，但后端旧配置仍要求 overlay；或者 UI 上用户认为已开启效果，但后端仍按旧配置导出。
+- 这不是捕获 callback 热路径问题，但属于 Phase 4 Preview/export 主链路一致性问题，建议合并前修复。
+
+建议修复：
+
+1. 保留 promise chain 的 recoverable 语义，但不要在 `flushPendingConfig()` 主路径吞错。
+2. 推荐把“队列恢复”和“本次 flush 结果”分开：
+
+```ts
+const enqueueConfigWrite = (config: BeautifyConfig): Promise<void> => {
+  const previous = writeChainRef.current
+  const write = previous
+    .catch(() => {})
+    .then(() => setBeautifyConfig(config).then(() => {}))
+  writeChainRef.current = write
+  return write
+}
+
+const flushPendingConfig = (): Promise<void> => {
+  if (debounceRef.current) {
+    clearTimeout(debounceRef.current)
+    debounceRef.current = null
+  }
+  if (pendingConfigRef.current) {
+    const pending = pendingConfigRef.current
+    pendingConfigRef.current = null
+    return enqueueConfigWrite(pending)
+  }
+  return writeChainRef.current
+}
+```
+
+3. `handleExport()`：如果 flush reject，不应调用 `exportVideo()`；应展示可见错误，例如“美化配置保存失败，请重试导出”。
+4. `handleBack()`：是否允许保存失败后仍返回录制需要产品确认。若为了避免卡死可以保留 fallback `onBack()`，但应显示或记录可见失败，并注意下一次录制可能使用旧配置。
+5. 新增前端回归测试：
+   - pending config flush 中 `set_beautify_config` reject。
+   - 点击导出。
+   - 断言 `export_video` 未被调用。
+   - 断言页面显示可见错误。
+6. 可选后端兜底：为 `set_beautify_config` 增加 frontend monotonic sequence，后端忽略过期配置写入；这能防止未来其他入口绕过前端 chain。
+
+### 19.4 Minor Findings
+
+#### Minor 1: checklist 对 raw cursor conflict error UI 的测试覆盖描述偏乐观
+
+位置：
+
+- `tests/phase-4-w7-w8-checklist.md:73`
+- `src/components/preview-view.tsx:432-435`
+- `src/App.test.tsx:1174-1243`
+
+现象：
+
+checklist 写道：
+
+```markdown
+- `npm test -- --run`: **33 tests** PASS (+promise chain serialization, raw cursor conflict error UI)
+```
+
+当前 UI 确实新增了 `beautifyError` 可见展示，但新增的第 33 个测试主要验证 promise chain serialization 和 export 等待顺序，并没有断言 raw cursor conflict 错误会显示在页面上。
+
+为什么重要：
+
+- raw cursor conflict 是方案 B 防双光标策略的关键用户可见分支。
+- 如果后续 UI 重构把错误状态删掉，当前测试不会失败。
+- checklist 会让后续整改者误以为错误 UI 已经有自动化覆盖。
+
+建议修复：
+
+1. 新增测试：mock `build_cursor_effect_timeline` reject `本次素材已录入系统光标...`，断言页面展示该错误。
+2. 新增测试：mock `export_video` reject 同类错误，断言页面展示该错误。
+3. 或在补测试前把 checklist 文案改成 `+promise chain serialization; raw cursor conflict error UI implementation`，不要写成已覆盖。
+
+#### Minor 2: raw hidden baseline contract 测试未断言 frames 非空
+
+位置：
+
+- `src-tauri/src/lib.rs:708-725`
+
+现象：
+
+测试名是：
+
+```rust
+fn raw_hidden_no_overlay_generates_baseline_frames()
+```
+
+但断言只检查：
+
+```rust
+assert!(!timeline.raw_system_cursor_visible);
+assert!(timeline.render_cursor_overlay);
+for frame in &timeline.frames {
+    assert_eq!(frame.scale, 1.0);
+    assert_eq!(frame.opacity, 1.0);
+}
+```
+
+如果未来回归导致 `timeline.frames` 为空，`for` 循环不会执行，测试仍会通过。
+
+为什么重要：
+
+- raw cursor hidden + overlay disabled 的关键目标是避免“无光标导出”。
+- 这个分支必须证明会生成 baseline overlay frames，而不只是设置 `render_cursor_overlay == true`。
+
+建议修复：
+
+在该测试中增加：
+
+```rust
+assert!(!timeline.frames.is_empty());
+```
+
+必要时还可以断言第一帧坐标来自 metadata sample，进一步锁住 baseline overlay 内容。
+
+### 19.5 Phase 4 完整性复审结论
+
+已完成或基本完成：
+
+- `CursorSample` / `CursorClick` / `CursorFrame` / `CursorClickEffect` / `EffectTimeline` serde 模型已落地。
+- `EffectTimeline` 已包含 `raw_system_cursor_visible` / `render_cursor_overlay`，为 Phase 6 compositor 提供明确渲染 contract。
+- `CursorProcessor` trait 边界已落地。
+- 移动平均平滑、Bezier 插值、点击放大状态机和 `CursorEffectEngine` 已落地并有算法测试。
+- 录制期 cursor metadata 采集运行在独立 `CursorMetadataRuntime` 线程，不进入 SCK capture callback。
+- `CursorMetadataRecorder` samples/clicks 均 bounded，避免长录制无界增长。
+- 停止录制后写入 cursor metadata sidecar，且 sidecar 写入失败不再跳过 cleanup。
+- `RecordingMetadata` 已持久化 `BeautifyConfigSnapshot`，其中 `raw_system_cursor_visible` 作为不可变 raw cursor fact。
+- `build_cursor_effect_timeline()` 已采用方案 B：metadata raw fact + 当前 Preview export intent。
+- raw cursor visible + overlay requested 会被拒绝，避免双光标。
+- raw cursor hidden + overlay disabled 会生成 baseline overlay，避免无光标。
+- `set_beautify_config`、`get_beautify_config`、`build_cursor_effect_timeline`、`export_video` command 已接入。
+- Preview 已接入 beautify config、timeline build 和 export command。
+- Preview config writes 已通过 promise chain 串行化，避免 A/B 写入乱序完成。
+- `build_cursor_effect_timeline` 使用 `spawn_blocking`，并拒绝 `Recording | Paused | Processing` 状态。
+- `session_id + metadata_path + beautify_revision` guard 仍能阻止跨 session stale build 写回。
+- stale build guard 失败后会尝试清理未引用 temp timeline JSON。
+- `CaptureConfig.show_system_cursor` 已接入 `SCStreamConfiguration::setShowsCursor`。
+- `start_recording()` 会重新根据当前 beautify config 推导 `show_system_cursor`，降低调用顺序风险。
+- PTS invalid/negative/special flag 检查已加强，PTS delta 使用 `i128`，CMTime conversion 使用 checked integer arithmetic。
+- React 未接收视频帧、音频帧或 cursor sample stream，符合架构红线。
+
+仍未完全完成或需作为下一轮整改/gate：
+
+- `flushPendingConfig()` 会吞掉 `setBeautifyConfig()` 失败，导致导出可能继续使用旧后端配置。
+- raw cursor conflict error UI 缺少前端可见性回归测试。
+- raw hidden baseline Rust 测试未断言 `frames` 非空。
+- 真实 macOS 录制中 CMSampleBuffer PTS 与 click/video 动作对齐仍需 `npm run tauri dev` 人工验证。
+- `cursor_source.rs` CoreGraphics FFI 与 `screen_capture_kit.rs` SCK/CVPixelBuffer/AudioBufferList 仍需 Native Safety Gate 人工逐行审查。
+- 双光标策略和 raw-hidden baseline overlay 仍需真实素材人工确认。
+- 真实导出视频包含光标平滑和点击放大仍依赖 Phase 6 FFmpeg compositor 接入。
+
+结论：
+
+Phase 4 主体功能已经基本完成，Round 8 的大部分整改有效，当前剩余阻塞集中在 Preview/export 配置 flush 失败路径。该问题修复并补充测试后，Phase 4 可以进入下一轮合并前复审；人工 Native Safety Gate 和真实 macOS 视觉检查仍需保留。
+
+### 19.6 捕获主链路、内存安全、线程安全、资源释放专项复审
+
+捕获主链路：
+
+- 未发现 cursor smoothing、Bezier interpolation、click magnification 在 ScreenCaptureKit callback 内执行。
+- SCK callback 当前仍只做 CMSampleBuffer PTS 提取、CVPixelBuffer 数据复制、AudioBufferList 读取/PCM 转换、bounded channel `try_send_drop_newest`。
+- `normalize_pts()` 在 callback 内使用 `Mutex<Option<(u64, u64)>>`，但只保护轻量时间戳映射；没有等待 UI、磁盘、timeline build 或 export。
+- Cursor polling 由 `CursorMetadataRuntime` 独立线程执行，不在 SCK callback 内调用 CoreGraphics cursor source。
+- Timeline build 是录后 Tauri command 路径，并使用 `spawn_blocking`。
+- `MacScreenCapture::start_stream()` / `stop()` 中等待 SCK start/stop completion 的同步等待发生在 recording service 的 blocking 调用路径，不在 SCK callback 内。
+- 本轮未发现新增阻塞捕获主链路的问题。
+
+内存安全：
+
+- `cursor_source.rs` 中 `CGEventCreate` 返回 event 后做 null 检查，并在 `CGEventGetLocation` 后 `CFRelease`；静态复审表面配对正确，仍需人工 Native Safety Gate。
+- `screen_capture_kit.rs` 的 CVPixelBuffer base address 在 lock 后读取，并复制到 `Arc<[u8]>`；unlock 后不再引用原始 base address。
+- Audio `block_buffer` 当前 return 分支均有 `cf_release`；未发现 Round 9 新增泄漏路径。
+- `CursorMetadataRecorder` samples/clicks 均 bounded。
+- Timeline 构建仍一次性读取 metadata、生成 frames、pretty serialize JSON；这是录后内存峰值风险，不影响捕获主链路。Phase 6 接入真实长素材后仍需压力测试。
+- stale/cancelled build 会尝试删除未引用 temp JSON；资源清理较 Round 8 改善。
+
+线程安全：
+
+- Rust 侧共享 service/config/tick/mic runtime 状态使用 `Arc<Mutex<...>>`，beautify revision 使用 `AtomicU64`；未发现 Rust 数据竞争。
+- `CursorMetadataRuntime` 用 `AtomicBool` 停止并 join 线程，Drop 中也会 stop。
+- `session_id + metadata_path + beautify_revision` stale guard 可以阻止旧 session / 旧 revision build 写回 service。
+- 前端 promise chain 已能保证多次 `setBeautifyConfig()` 按用户意图顺序落到后端。
+- 剩余线程/异步一致性风险不是顺序问题，而是失败传播问题：flush 失败被吞后，后续 export/back 会继续执行。
+
+资源释放路径：
+
+- `MacRecordingService.stop()` 当前会先停止 cursor runtime，再 stop native capture / mic capture、signal consumer、join consumer、写 sidecar、reset mic level、推进 state machine。
+- cursor metadata sidecar 写入失败会记录错误并继续 cleanup，不再造成状态机悬挂。
+- `MacScreenCapture::stop()` 超时时保留 native handles 并设置 `needs_reset`，避免潜在 use-after-free；这仍属于 Native Safety Gate 重点。
+- Preview unmount cleanup 会清理 debounce timer，并尝试 fire-and-forget 写入 pending config；这只能作为 best-effort cleanup，不应作为主路径一致性保证。主路径应由 `flushPendingConfig()` 正确传播失败来保证。
+
+### 19.7 BUG.md 预防规则检查
+
+执行命令：
+
+```bash
+rg -n 'data-tauri-drag-region="false"|whileTap|motion\.div' src src-tauri
+```
+
+命中要点：
+
+```text
+src/components/preview-view.tsx:198:    <motion.div
+src/components/preview-view.tsx:242:              <motion.div
+src/components/preview-view.tsx:339:                <motion.div
+src/components/preview-view.tsx:362:                </motion.div>
+src/components/preview-view.tsx:399:                <motion.div
+src/components/preview-view.tsx:424:                </motion.div>
+src/components/preview-view.tsx:471:    </motion.div>
+src/components/recording-status-bar.tsx:30:    <motion.div
+src/components/recording-status-bar.tsx:39:        <motion.div
+src/components/recording-status-bar.tsx:50:            <motion.div
+src/components/recording-status-bar.tsx:57:        </motion.div>
+src/components/recording-status-bar.tsx:74:              <motion.div
+src/components/recording-status-bar.tsx:109:    </motion.div>
+src/components/recording-panel.tsx:65:    <motion.div
+src/components/recording-panel.tsx:89:              whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:155:            whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:171:            whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:185:                  <motion.div
+src/components/recording-panel.tsx:208:    </motion.div>
+src/components/processing-view.tsx:10:    <motion.div
+src/components/processing-view.tsx:17:        <motion.div
+src/components/processing-view.tsx:22:        </motion.div>
+src/components/processing-view.tsx:25:    </motion.div>
+src/components/error-view.tsx:13:    <motion.div
+src/components/error-view.tsx:37:    </motion.div>
+src/App.test.tsx:431:    expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+src/App.test.tsx:443:    expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+```
+
+解释：
+
+- `src/App.test.tsx:431`、`src/App.test.tsx:443` 是测试断言不存在 `data-tauri-drag-region="false"`，不是源码新增 wrapper。
+- `src/components/recording-panel.tsx:89`、`src/components/recording-panel.tsx:155`、`src/components/recording-panel.tsx:171` 是 `motion.button whileTap`，`whileTap` 位于交互元素自身，不是 BUG-003 中的 `motion.div whileTap` 作为 Button 直接父容器拦截模式。
+- 多处 `motion.div` 用于页面/装饰动画，没有发现 `motion.div` 带 `whileTap` 并直接包裹交互 Button。
+
+结论：
+
+- 未发现新增 `data-tauri-drag-region="false"` 区域级 wrapper。
+- 未发现新增 `motion.div whileTap` 直接包裹交互 Button。
+- 未发现本轮 Phase 4 改动违反 BUG-001/BUG-002/BUG-003 的预防规则。
+
+### 19.8 本轮实际验证
+
+本轮实际执行：
+
+```bash
+git diff --check HEAD
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+rg -n 'data-tauri-drag-region="false"|whileTap|motion\.div' src src-tauri
+```
+
+结果：
+
+- `git diff --check HEAD`: PASS
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: PASS
+- `cargo test --manifest-path src-tauri/Cargo.toml`: PASS, **124 tests**
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS, **21 warnings**（既有 macOS FFI naming / unused unsafe / dead_code 类 warning）
+- `cargo build --manifest-path src-tauri/Cargo.toml`: PASS, **21 warnings**
+- `npm run build`: PASS
+- `npm test -- --run`: PASS, **33 tests**；输出多条 `Window.scrollTo()` 未实现提示，测试仍通过
+- BUG.md 规则扫描：未发现新增违规 pattern
+
+补充说明：
+
+- 本轮没有运行 `npm run tauri dev`，真实 macOS 录制、click/video 对齐、双光标视觉检查、Native Safety Gate 仍需人工验证。
+- 当前 Rust warnings 主要集中在 macOS FFI 命名、unused unsafe、unused FFI helper / wrapper 等既有问题；本轮未发现 clippy error。
+
+### 19.9 Round 9 Ready To Merge?
+
+**Ready to merge: With fixes / No**
+
+本轮未发现 Critical，也未发现会直接阻塞捕获主链路的新增 Phase 4 代码。Round 8 的多数整改已经有效：
+
+1. Preview config writes 已串行化，旧 in-flight write 不应再晚到覆盖新配置。
+2. 旧 build stale guard 失败时会清理 temp timeline JSON。
+3. 方案 B 的 4 条后端 contract 分支已有 Rust helper 测试。
+4. raw cursor conflict 已有可见 UI 状态。
+5. `start_recording()` 会重新推导 `show_system_cursor`，降低 command 调用顺序风险。
+6. `cursor_engine.rs` 注释已与方案 B 行为对齐。
+
+但建议在最终合并前继续完成以下整改：
+
+1. **修复 `flushPendingConfig()` 错误吞掉问题**：配置写入失败时不得继续导出当前素材；应展示可见错误并阻止 `exportVideo()`。
+2. **补前端失败路径测试**：pending config flush reject 时 `export_video` 不应被调用；raw cursor conflict reject 时错误信息应可见。
+3. **补严 raw hidden baseline Rust 测试**：`raw_hidden_no_overlay_generates_baseline_frames` 应断言 `timeline.frames` 非空。
+4. **同步 checklist 文案**：在 raw cursor conflict error UI 测试补齐前，不要写成该 UI 已由 frontend tests 覆盖。
+5. **继续保留人工 gate**：真实 macOS click/video 对齐、CoreGraphics/SCK FFI Native Safety、双光标和 baseline overlay 视觉效果仍需人工验证。
+
+## 20. Round 10 整改复审（2026-05-28）
+
+> 评审背景：用户已完成 `## 19. Round 9 整改复审（2026-05-28）` 中列出的整改任务，本轮复审当前工作区未提交改动，重点确认 Round 9 的 4 条整改建议是否真正闭环，并继续专项检查 Phase 4 是否完整完成、是否存在阻塞捕获主链路、内存安全、线程安全和资源释放路径异常。
+>
+> 当前工作区状态：
+>
+> - `docs/superpowers/reviews/2026-05-27-phase-4-code-review.md`
+> - `src-tauri/src/lib.rs`
+> - `src-tauri/src/media/cursor_engine.rs`
+> - `src/App.test.tsx`
+> - `src/components/preview-view.tsx`
+> - `tests/phase-4-w7-w8-checklist.md`
+>
+> 当前结论：**With fixes / No**，暂不建议直接合并。本轮未发现 Critical，也未发现 cursor smoothing / Bezier interpolation / click magnification 进入 ScreenCaptureKit 捕获 callback。Round 9 的 export 阻塞项已经修复并通过测试确认；剩余 1 个 Important：`handleBack()` 在配置 flush 失败后仍会继续返回录制页，可能让下一次录制沿用后端旧美化配置并造成 raw cursor visibility 与用户最后看到的 Preview 设置不一致。
+>
+> 交叉验证：本轮按 `$superpowers:requesting-code-review` 流程启动独立审查代理 `Kepler`。独立审查结论与本地主审一致：无 Critical；Round 9 的 export-specific blocker 已修复；核心剩余 Important 是 `handleBack()` 仍在 flush reject 后调用 `onBack()`；另有 Minor：`HANDOFF.md` 中 Phase 4 验证数据仍为旧值。
+
+### 20.1 本轮已确认修复或改善
+
+- `src/components/preview-view.tsx:115-120`：`enqueueConfigWrite()` 保持 promise chain 串行化写入，旧 in-flight write 失败后队列可恢复，后续写入仍按用户意图顺序落到后端。
+- `src/components/preview-view.tsx:128-138`：`flushPendingConfig()` 已移除 `.catch(() => {})` 吞错逻辑。当前函数会清理 debounce timer、把 pending config 入队到同一条 write chain，并直接返回 `writeChainRef.current`，让调用方收到真实 reject。
+- `src/components/preview-view.tsx:165-174`：导出路径 `handleExport()` 会先等待 `flushPendingConfig()`，如果 config flush reject，不会继续调用 `exportVideo()`；raw cursor conflict 错误会进入 `beautifyError` 可见状态。
+- `src/App.test.tsx:1276-1317`：新增 `blocks export when flushPendingConfig rejects and shows error` 测试，覆盖 pending config flush reject 后 `export_video` 不应被调用，并断言错误信息可见。
+- `src/App.test.tsx:1245-1274`：新增 `shows error when build_cursor_effect_timeline rejects with raw cursor conflict` 测试，覆盖 raw cursor conflict 在 timeline build 阶段的可见错误 UI。
+- `src/App.test.tsx:1174-1243`：promise chain serialization 测试仍覆盖 A in-flight、B pending、点击导出后必须按 `A -> B -> export` 顺序完成。
+- `src-tauri/src/lib.rs:376-437`：`build_effect_timeline_from_metadata()` 继续集中表达方案 B contract：metadata 中的 `raw_system_cursor_visible` 是不可变事实，当前 Preview config 是当前导出意图。
+- `src-tauri/src/lib.rs:709-725`：`raw_hidden_no_overlay_generates_baseline_frames` 已补 `assert!(!timeline.frames.is_empty())`，防止 raw cursor hidden + overlay disabled 分支退化成“标记为渲染 overlay 但没有 baseline frames”。
+- `src-tauri/src/media/cursor_engine.rs:715-721`：features-off 注释已与当前方案 B 行为一致：engine 支持 neutral overlay frames，command layer 根据 raw cursor visibility 决定是否调用。
+- `tests/phase-4-w7-w8-checklist.md:66-73`：验证摘要已更新为 Round 9，Rust 124 tests / frontend 35 tests，并明确新增覆盖 flush failure blocks export、raw cursor conflict error UI。
+
+### 20.2 Critical Findings
+
+本轮未发现 Critical。
+
+没有发现以下阻塞性问题：
+
+- 未发现 cursor smoothing、Bezier interpolation、click magnification 在 ScreenCaptureKit callback 内执行。
+- 未发现新增磁盘 IO、JSON 读写、timeline build、Tauri emit、export 等重操作进入 SCK capture callback。
+- 未发现新增明显 use-after-free、CVPixelBuffer unlock 后继续读 base address、CoreGraphics event 未释放等硬性内存安全问题。
+- 未发现 AudioBufferList retained `block_buffer` 新增泄漏路径。
+- 未发现 `CursorMetadataRuntime` samples/clicks 退化为无界增长。
+- 未发现 `MacRecordingService.stop()` 重新出现 sidecar 写入失败后跳过 cleanup / 状态机悬挂的问题。
+
+### 20.3 Important Findings
+
+#### Important 1: `handleBack()` 仍在配置 flush 失败后继续返回录制页，可能让下一次录制沿用旧后端配置
+
+位置：
+
+- `src/components/preview-view.tsx:177-184`
+- `src/components/preview-view.tsx:128-138`
+- `src-tauri/src/lib.rs:138-160`
+- `src-tauri/src/lib.rs:351-361`
+
+现象：
+
+Round 9 的 export 路径已经修复：`flushPendingConfig()` reject 后不会继续 `exportVideo()`。但返回录制路径仍然在 flush reject 后直接调用 `onBack()`：
+
+```ts
+const handleBack = () => {
+  void flushPendingConfig()
+    .then(() => onBack())
+    .catch((error) => {
+      console.error('保存美化配置失败', error)
+      onBack()
+    })
+}
+```
+
+这意味着：
+
+1. 用户在 Preview 中切换 `cursorMagnification` / `cursorSmoothing`。
+2. 前端 UI 已经显示最新状态，`pendingConfigRef.current` 保存最新意图。
+3. 用户立即点击“返回录制”。
+4. `flushPendingConfig()` 触发 `setBeautifyConfig(latestConfig)`。
+5. Tauri invoke reject，或后端 `set_beautify_config` 返回错误。
+6. `handleBack()` catch 后仍执行 `onBack()`。
+7. 用户进入录制页并再次开始录制。
+8. `start_recording()` 会根据 Rust 后端中的旧 `beautify_config` 重新推导 `show_system_cursor`，而不是根据用户最后看到的 Preview UI 状态。
+
+为什么重要：
+
+- 方案 B 的安全契约依赖“当前 Preview config 作为下一次录制/当前导出的真实意图”。导出路径已经保证 flush 失败不继续，但返回路径仍保留 stale backend config 风险。
+- `start_recording()` 当前会重新根据后端 `beautify_config` 推导 `CaptureConfig.show_system_cursor`。如果 flush 失败后仍返回，下一次录制的 raw cursor 可见性可能与用户以为保存成功的设置不一致。
+- 这不是捕获 callback 热路径问题，但属于 Preview -> Recording 主链路一致性问题。它会影响双光标策略的前置事实：raw cursor 是否录入。
+- 若用户以为已经打开光标美化，但后端仍是旧的“关闭美化”配置，下一次录制可能继续录入系统光标；反之也可能隐藏系统光标并依赖后续 overlay。
+
+建议修复：
+
+1. `handleBack()` 在 `flushPendingConfig()` reject 时不要直接 `onBack()`。
+2. 推荐行为：留在 Preview，并设置可见错误，例如：
+
+```ts
+const handleBack = () => {
+  void flushPendingConfig()
+    .then(() => onBack())
+    .catch((error) => {
+      const msg = String(error)
+      console.error('保存美化配置失败', error)
+      setBeautifyError(msg.includes('已录入系统光标')
+        ? msg
+        : '美化配置保存失败，请重试或恢复设置后再返回录制。')
+    })
+}
+```
+
+3. 若产品上必须允许返回，则需要显式提供“放弃未保存设置并返回”的二次确认，而不是失败后静默返回。
+4. 新增前端回归测试：
+   - mock `set_beautify_config` reject。
+   - 在 Preview 中切换开关后立即点击“返回录制”。
+   - 断言页面仍停留在 Preview。
+   - 断言错误信息可见。
+   - 断言不会进入 idle/recording panel。
+5. 可选加强：为 `set_beautify_config` 加 frontend monotonic sequence 或 request id，后端忽略过期配置写入。当前 promise chain 已缓解顺序问题，但 sequence 能防止未来新入口绕过 chain。
+
+### 20.4 Minor Findings
+
+#### Minor 1: `HANDOFF.md` 中 Phase 4 验证数据仍为旧值
+
+位置：
+
+- `HANDOFF.md:100-106`
+
+现象：
+
+`HANDOFF.md` 的 Phase 4 记录仍写：
+
+```markdown
+- `cargo test --manifest-path src-tauri/Cargo.toml` **103 tests** 通过
+- `cargo clippy --all-targets` 无 error（22 pre-existing SCK FFI warnings）
+- `npm test -- --run` **25 tests** 通过
+```
+
+当前实际验证为：
+
+- Rust tests：**124 tests**
+- Frontend tests：**35 tests**
+- clippy/build warnings：**21 warnings**
+
+为什么重要：
+
+- 仓库约定中 `HANDOFF.md` 是开发任务进度、开发细节记录、多轮对话交接的源文件。
+- 后续 agent 或人工接手时，会误以为 Phase 4 仍停留在早期测试数量和旧 warning 状态。
+
+建议修复：
+
+1. 更新 `HANDOFF.md` Phase 4 验证结果为当前事实。
+2. 保留剩余 gate：
+   - `npm run tauri dev` 手动验证真实 macOS 录制、光标元数据、点击采集、时间线 JSON、双光标策略。
+   - `platform/macos/cursor_source.rs` CoreGraphics FFI Native Safety Gate 人工逐行审查。
+   - `platform/macos/screen_capture_kit.rs` SCK/CVPixelBuffer/AudioBufferList Native Safety Gate 人工逐行审查。
+   - Phase 6 接入生产 FFmpeg compositor 后做真实视频光标平滑和点击放大人工验收。
+
+### 20.5 Phase 4 完整性复审结论
+
+已完成或基本完成：
+
+- `CursorSample` / `CursorClick` / `CursorFrame` / `CursorClickEffect` / `EffectTimeline` serde 模型已落地。
+- `EffectTimeline` 已包含 `raw_system_cursor_visible` / `render_cursor_overlay`，为 Phase 6 compositor 提供明确渲染 contract。
+- `BeautifyConfigSnapshot` 已持久化 recording-time raw cursor fact，其中 `raw_system_cursor_visible` 是不可变安全约束。
+- `CursorProcessor` trait 边界已落地。
+- 移动平均平滑、Bezier 插值、点击放大状态机和 `CursorEffectEngine` 已落地并有算法测试。
+- 录制期 cursor metadata 采集运行在独立 `CursorMetadataRuntime` 线程，不进入 SCK capture callback。
+- `CursorMetadataRecorder` samples/clicks 均 bounded，避免长录制无界增长。
+- 停止录制后写入 cursor metadata sidecar，且 sidecar 写入失败不再跳过 cleanup。
+- `RecordingMetadata` 已保存 fps、duration、cursor samples、cursor clicks、beautify snapshot。
+- `build_cursor_effect_timeline()` 已采用方案 B：metadata raw fact + 当前 Preview export intent。
+- raw cursor visible + overlay requested 会被拒绝，避免双光标。
+- raw cursor visible + overlay not requested 会生成 no-op/empty timeline，交给原始素材中的系统光标。
+- raw cursor hidden + overlay not requested 会生成 baseline neutral cursor overlay frames，避免无光标导出。
+- raw cursor hidden + overlay requested 会生成 overlay frames 和 click effects。
+- `set_beautify_config`、`get_beautify_config`、`build_cursor_effect_timeline`、`export_video` command 已接入。
+- Preview 已接入 beautify config、timeline build 和 export command。
+- Preview config writes 已通过 promise chain 串行化，避免 A/B 写入乱序完成。
+- 导出路径会等待 pending/in-flight config writes；flush 失败后不会继续 export。
+- raw cursor conflict 在 build/export 失败时有可见 UI 反馈，并有前端测试覆盖。
+- `build_cursor_effect_timeline` 使用 `spawn_blocking`，并拒绝 `Recording | Paused | Processing` 状态。
+- `session_id + metadata_path + beautify_revision` guard 可以阻止跨 session / 旧 revision stale build 写回 service。
+- stale build guard 失败后会尝试清理未引用 temp timeline JSON。
+- `CaptureConfig.show_system_cursor` 已接入 `SCStreamConfiguration::setShowsCursor`。
+- `start_recording()` 会重新根据当前后端 beautify config 推导 `show_system_cursor`，降低 `set_capture_mode()` 调用顺序风险。
+- PTS invalid/negative/special flag 检查已加强，PTS delta 使用 `i128`，CMTime conversion 使用 checked integer arithmetic。
+- React 未接收视频帧、音频帧或 cursor sample stream，符合架构红线。
+- 未发现本轮 Phase 4 改动违反 BUG-001/BUG-002/BUG-003 的预防规则。
+
+仍未完全完成或需作为下一轮整改/gate：
+
+- `handleBack()` flush reject 后仍会直接返回录制页，可能导致下一次录制使用旧后端美化配置。
+- `HANDOFF.md` Phase 4 验证数据仍需同步到当前结果。
+- 真实 macOS 录制中 CMSampleBuffer PTS 与 click/video 动作对齐仍需 `npm run tauri dev` 人工验证。
+- `cursor_source.rs` CoreGraphics FFI 与 `screen_capture_kit.rs` SCK/CVPixelBuffer/AudioBufferList 仍需 Native Safety Gate 人工逐行审查。
+- 双光标策略和 raw-hidden baseline overlay 仍需真实素材人工确认。
+- 真实导出视频包含光标平滑和点击放大仍依赖 Phase 6 FFmpeg compositor 接入。
+
+结论：
+
+Phase 4 作为“光标效果 foundation + metadata/timeline/export boundary”已经基本完整，且 Round 9 的 export 主路径一致性问题已经修复。当前不建议直接合并的原因不再是 export，而是返回录制路径仍存在 stale backend config 风险。修复 `handleBack()` 失败路径并同步 `HANDOFF.md` 后，可以进入下一轮合并前复审；Native Safety Gate 和真实 macOS 视觉检查仍需保留为人工 gate。
+
+### 20.6 捕获主链路、内存安全、线程安全、资源释放专项复审
+
+捕获主链路：
+
+- 未发现 cursor smoothing、Bezier interpolation、click magnification 在 ScreenCaptureKit callback 内执行。
+- SCK callback 当前仍只做 CMSampleBuffer PTS 提取、CVPixelBuffer 数据复制、AudioBufferList 读取/PCM 转换、bounded channel `try_send_drop_newest`。
+- `normalize_pts()` 在 callback 内使用 `Mutex<Option<(u64, u64)>>`，但只保护轻量时间戳映射；没有等待 UI、磁盘、timeline build 或 export。
+- Cursor polling 由 `CursorMetadataRuntime` 独立线程执行，不在 SCK callback 内调用 CoreGraphics cursor source。
+- Timeline build 是录后 Tauri command 路径，并使用 `spawn_blocking`。
+- `MacScreenCapture::start_stream()` / `stop()` 中等待 SCK start/stop completion 的同步等待发生在 recording service 的 blocking 调用路径，不在 SCK callback 内。
+- 本轮未发现新增阻塞捕获主链路的问题。
+
+内存安全：
+
+- `platform/macos/cursor_source.rs` 中 `CGEventCreate` 返回 event 后做 null 检查，并在 `CGEventGetLocation` 后 `CFRelease`；静态复审表面配对正确，仍需人工 Native Safety Gate。
+- `platform/macos/screen_capture_kit.rs` 的 CVPixelBuffer base address 在 lock 后读取，并复制到 `Arc<[u8]>`；unlock 后不再引用原始 base address。
+- Audio `block_buffer` 当前 return 分支均有 `cf_release`；未发现新增泄漏路径。
+- `CursorMetadataRecorder` samples/clicks 均 bounded。
+- Timeline 构建仍一次性读取 metadata、生成 frames、pretty serialize JSON；这是录后内存峰值风险，不影响捕获主链路。Phase 6 接入真实长素材后仍需压力测试。
+- stale/cancelled build 会尝试删除未引用 temp JSON；资源清理较 Round 8/9 改善。
+
+线程安全：
+
+- Rust 侧共享 service/config/tick/mic runtime 状态使用 `Arc<Mutex<...>>`，beautify revision 使用 `AtomicU64`；未发现 Rust 数据竞争。
+- `CursorMetadataRuntime` 用 `AtomicBool` 停止并 join 线程，Drop 中也会 stop。
+- `session_id + metadata_path + beautify_revision` stale guard 可以阻止旧 session / 旧 revision build 写回 service。
+- 前端 promise chain 已能保证多次 `setBeautifyConfig()` 按用户意图顺序落到后端。
+- export 路径已能正确传播 flush 失败，不会继续使用 stale backend config 导出。
+- 剩余线程/异步一致性风险集中在 `handleBack()`：flush 失败后仍继续导航，可能让下一次录制从旧后端 config 开始。
+
+资源释放路径：
+
+- `MacRecordingService.stop()` 当前会先停止 cursor runtime，再 stop native capture / mic capture、signal consumer、join consumer、写 sidecar、reset mic level、推进 state machine。
+- cursor metadata sidecar 写入失败会记录错误并继续 cleanup，不再造成状态机悬挂。
+- `MacScreenCapture::stop()` 超时时保留 native handles 并设置 `needs_reset`，避免潜在 use-after-free；这仍属于 Native Safety Gate 重点。
+- Preview unmount cleanup 会清理 debounce timer，并尝试 fire-and-forget 写入 pending config；这是 best-effort cleanup，不应作为主路径一致性保证。
+- 导出主路径已由 `flushPendingConfig()` 正确传播失败来保证一致性；返回录制主路径仍需同样处理。
+
+### 20.7 BUG.md 预防规则检查
+
+执行命令：
+
+```bash
+rg -n 'data-tauri-drag-region="false"|whileTap|motion\.div' src src-tauri
+```
+
+命中要点：
+
+```text
+src/App.test.tsx:431:    expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+src/App.test.tsx:443:    expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+src/components/preview-view.tsx:197:    <motion.div
+src/components/preview-view.tsx:241:              <motion.div
+src/components/preview-view.tsx:338:                <motion.div
+src/components/preview-view.tsx:361:                </motion.div>
+src/components/preview-view.tsx:398:                <motion.div
+src/components/preview-view.tsx:423:                </motion.div>
+src/components/preview-view.tsx:470:    </motion.div>
+src/components/recording-status-bar.tsx:30:    <motion.div
+src/components/recording-status-bar.tsx:39:        <motion.div
+src/components/recording-status-bar.tsx:50:            <motion.div
+src/components/recording-status-bar.tsx:57:        </motion.div>
+src/components/recording-status-bar.tsx:74:              <motion.div
+src/components/recording-status-bar.tsx:109:    </motion.div>
+src/components/recording-panel.tsx:65:    <motion.div
+src/components/recording-panel.tsx:89:              whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:155:            whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:171:            whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:185:                  <motion.div
+src/components/recording-panel.tsx:208:    </motion.div>
+src/components/processing-view.tsx:10:    <motion.div
+src/components/processing-view.tsx:17:        <motion.div
+src/components/processing-view.tsx:22:        </motion.div>
+src/components/processing-view.tsx:25:    </motion.div>
+src/components/error-view.tsx:13:    <motion.div
+src/components/error-view.tsx:37:    </motion.div>
+```
+
+解释：
+
+- `src/App.test.tsx:431`、`src/App.test.tsx:443` 是测试断言不存在 `data-tauri-drag-region="false"`，不是源码新增 wrapper。
+- `src/components/recording-panel.tsx:89`、`src/components/recording-panel.tsx:155`、`src/components/recording-panel.tsx:171` 是 `motion.button whileTap`，`whileTap` 位于交互元素自身，不是 BUG-003 中的 `motion.div whileTap` 作为 Button 直接父容器拦截模式。
+- 多处 `motion.div` 用于页面/装饰动画，没有发现 `motion.div` 带 `whileTap` 并直接包裹交互 Button。
+
+结论：
+
+- 未发现新增 `data-tauri-drag-region="false"` 区域级 wrapper。
+- 未发现新增 `motion.div whileTap` 直接包裹交互 Button。
+- 未发现本轮 Phase 4 改动违反 BUG-001/BUG-002/BUG-003 的预防规则。
+
+### 20.8 本轮实际验证
+
+本轮实际执行：
+
+```bash
+git diff --check HEAD
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+rg -n 'data-tauri-drag-region="false"|whileTap|motion\.div' src src-tauri
+```
+
+结果：
+
+- `git diff --check HEAD`: PASS
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: PASS
+- `cargo test --manifest-path src-tauri/Cargo.toml`: PASS, **124 tests**
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS, **21 warnings**（既有 macOS FFI naming / unused unsafe / dead_code 类 warning）
+- `cargo build --manifest-path src-tauri/Cargo.toml`: PASS, **21 warnings**
+- `npm run build`: PASS
+- `npm test -- --run`: PASS, **35 tests**；输出多条 `Window.scrollTo()` 未实现提示，测试仍通过
+- BUG.md 规则扫描：未发现新增违规 pattern
+
+补充说明：
+
+- 本轮没有运行 `npm run tauri dev`，真实 macOS 录制、click/video 对齐、双光标视觉检查、Native Safety Gate 仍需人工验证。
+- 当前 Rust warnings 主要集中在 macOS FFI 命名、unused unsafe、unused FFI helper / wrapper 等既有问题；本轮未发现 clippy error。
+
+### 20.9 Round 10 Ready To Merge?
+
+**Ready to merge: With fixes / No**
+
+本轮未发现 Critical，也未发现会直接阻塞捕获主链路的新增 Phase 4 代码。Round 9 的主要整改已经有效：
+
+1. `flushPendingConfig()` 不再吞掉 config write 失败。
+2. export 路径会等待 pending/in-flight config 写入。
+3. config flush reject 时不会继续 `exportVideo()`。
+4. raw cursor conflict 错误有可见 UI 和前端回归测试。
+5. raw hidden baseline contract 测试已断言 `timeline.frames` 非空。
+6. checklist 已同步到 Rust 124 tests / frontend 35 tests。
+
+但建议在最终合并前继续完成以下整改：
+
+1. **修复 `handleBack()` 失败路径**：配置写入失败时不要静默返回录制页；应展示可见错误并留在 Preview，或提供明确的“放弃未保存设置”交互。
+2. **补前端回归测试**：`set_beautify_config` reject 后点击“返回录制”不应调用 `onBack()`，页面应显示错误并留在 Preview。
+3. **同步 `HANDOFF.md`**：更新 Phase 4 验证结果为 Rust 124 tests、frontend 35 tests、clippy/build 21 warnings，并保留人工 gate。
+4. **继续保留人工 gate**：真实 macOS click/video 对齐、CoreGraphics/SCK FFI Native Safety、双光标和 baseline overlay 视觉效果仍需人工验证。
+
+## 21. Round 11 整改复审（2026-05-29）
+
+> 评审背景：用户已完成 `## 20. Round 10 整改复审（2026-05-28）` 中的整改任务，本轮复审当前工作区未提交改动，重点确认 Round 10 的 `handleBack()` 失败路径和 `HANDOFF.md` 同步是否闭环，并继续专项检查 Phase 4 是否完整完成、是否存在阻塞捕获主链路、内存安全、线程安全和资源释放路径异常。
+>
+> 本轮输入：
+>
+> - `HANDOFF.md`
+> - `BUG.md`
+> - `.codex/rules/0-global.md` ~ `.codex/rules/5-docs.md`
+> - `docs/architecture/project-architecture-and-overall-planning.md`
+> - `docs/superpowers/plans/2026-05-27-phase-4-cursor-effects.md`
+> - `docs/superpowers/reviews/2026-05-27-phase-4-code-review.md`
+> - `tests/phase-4-w7-w8-checklist.md`
+> - 当前 Phase 4 相关代码与未提交 Round 10 整改
+>
+> 当前结论：**With fixes / No**，暂不建议直接合并。本轮未发现 Critical，也未发现 cursor smoothing / Bezier interpolation / click magnification 进入 ScreenCaptureKit 捕获 callback。Round 10 的 `handleBack()` 阻塞项已经修复，`HANDOFF.md` 验证数据也已同步到 Rust 124 tests / frontend 36 tests。剩余 2 个 Important：raw cursor 已隐藏但 cursor metadata 采样完全失败时，后续可能成功生成“需要渲染 overlay 但没有 frames”的时间线；Preview/export 普通失败只写 console，用户不可见。
+>
+> 交叉验证：本轮按 `$superpowers:requesting-code-review` 流程启动独立审查代理 `Harvey`。独立审查结论与本地主审一致：无 Critical；Round 10 主问题已修复；核心剩余 Important 是 raw-hidden empty cursor metadata 会造成 cursorless export 风险，以及 generic Preview/export 错误缺少可见反馈。独立审查同时指出 checklist 对后处理内存峰值的表述偏乐观。
+
+### 21.1 本轮重点确认结果
+
+Round 10 整改已闭环项：
+
+- `src/components/preview-view.tsx:179-189`：`handleBack()` 现在会先等待 `flushPendingConfig()`；如果 flush reject，不再调用 `onBack()`，而是留在 Preview 并设置 `beautifyError`。
+- `src/App.test.tsx:1319-1355`：新增 `stays on preview when handleBack flush fails and shows error` 回归测试，覆盖“切换配置后立即返回录制、后端写入失败、页面仍停留 Preview 且错误可见”的场景。
+- `HANDOFF.md:100-107`：Phase 4 验证结果已同步为 Rust **124 tests**、frontend **36 tests**、clippy/build **21 warnings**。
+- `tests/phase-4-w7-w8-checklist.md:66-73`：Verification Summary 已同步到 Round 10，记录 frontend **36 tests**，并说明新增 handleBack 失败路径测试。
+
+本轮未发现的问题：
+
+- 未发现新的 Critical。
+- 未发现 cursor smoothing / Bezier interpolation / click magnification 进入 SCK callback。
+- 未发现新增磁盘 IO、JSON 读写、timeline build、Tauri invoke/export 等重操作进入捕获 callback。
+- 未发现新增 Rust 数据竞争、明显 use-after-free 或释放路径提前中断。
+- 未发现新增 `data-tauri-drag-region="false"` 区域级 wrapper。
+- 未发现新增 `motion.div whileTap` 直接包裹交互 Button 的 BUG-003 模式。
+
+### 21.2 Strengths
+
+1. Round 10 的返回录制一致性问题已修复
+
+   - `handleBack()` 已与 `handleExport()` 一样等待 pending / in-flight config writes。
+   - flush 失败不会静默返回 idle/recording 入口，降低下一次录制沿用 stale backend config 的风险。
+   - 前端回归测试覆盖了该路径，不再只靠人工观察。
+
+2. Phase 4 核心架构边界仍然清楚
+
+   - cursor metadata 采集在 `CursorMetadataRuntime` 独立线程，不在 ScreenCaptureKit callback 中调用 CoreGraphics cursor source。
+   - smoothing、Bezier interpolation、click magnification 均在录后 `build_cursor_effect_timeline` / `export_video` command 路径中执行。
+   - `build_cursor_effect_timeline` 使用 `spawn_blocking`，避免在 async command executor 中直接做完整 JSON 读写和 timeline 构建。
+
+3. raw cursor / overlay contract 比早期版本稳固
+
+   - `BeautifyConfigSnapshot.raw_system_cursor_visible` 作为 recording-time 不可变事实写入 metadata。
+   - `build_effect_timeline_from_metadata()` 使用 metadata raw fact + 当前 Preview export intent 的方案 B。
+   - raw cursor visible + overlay requested 会返回错误，避免双光标。
+   - raw cursor hidden + overlay disabled 会生成 baseline neutral cursor overlay frames，避免用户关闭“美化效果”后素材完全无光标。
+
+4. 线程与资源释放路径较前几轮明显改善
+
+   - `MacRecordingService.stop()` 会先停止 cursor runtime，再 stop native capture / mic capture、signal consumer、join consumer、写 sidecar、reset mic level、推进 state machine。
+   - cursor sidecar 写入失败已改成收集错误并继续 cleanup。
+   - stale timeline build guard 失败后会尝试删除未引用 temp timeline JSON。
+   - `MacScreenCapture::stop()` 超时时保留 native handles 并设置 `needs_reset`，避免 SCK 异步 stop 未回调时提前 drop stream/delegate。
+
+5. 自动化验证数据已重新同步
+
+   - Rust tests 当前为 **124 passed**。
+   - 前端 tests 当前为 **36 passed**。
+   - checklist 与 HANDOFF 已反映 Round 10 后的测试数量。
+
+### 21.3 Critical Findings
+
+本轮未发现 Critical。
+
+没有发现以下阻塞性问题：
+
+- 没有发现 Phase 4 cursor 算法直接阻塞捕获 callback。
+- 没有发现明显 use-after-free。
+- 没有发现 sidecar 写入失败跳过 capture/mic/consumer cleanup 的旧问题复发。
+- 没有发现 export/back 主路径继续吞掉 config write 失败。
+
+### 21.4 Important Findings
+
+#### Important 1: raw cursor 隐藏后若 cursor metadata 采样完全失败，可能成功生成无光标 timeline
+
+位置：
+
+- `src-tauri/src/app/cursor_metadata_runtime.rs:165-171`
+- `src-tauri/src/lib.rs:147-160`
+- `src-tauri/src/lib.rs:390-436`
+- `src-tauri/src/media/cursor_engine.rs:403-411`
+
+现象：
+
+`CursorMetadataRuntime` 的 polling loop 当前对 `source.snapshot()` 失败使用 `if let Ok(snapshot)` 静默忽略：
+
+```rust
+if let Ok(snapshot) = source.snapshot() {
+    recorder.record_snapshot(
+        MediaTimestamp::from_nanos(session_clock.elapsed_nanos()),
+        snapshot,
+    );
+}
+```
+
+如果 CoreGraphics cursor snapshot 在整段录制中持续失败，最终 metadata 仍会被 `recorder.finish()` 写出，但 `cursor_samples` 为空。
+
+同时，`start_recording()` 会根据当前 beautify config 推导 `show_system_cursor`：
+
+```rust
+let expected_show_system_cursor =
+    !(beautify_config.cursor_magnification || beautify_config.cursor_smoothing);
+```
+
+默认 beautify config 是 cursor magnification / smoothing 开启，因此默认 raw system cursor 会被隐藏。也就是说，一旦 cursor polling 完全失败，就可能出现：
+
+1. 原始 SCK 素材里没有系统光标。
+2. cursor metadata sidecar 存在，但 `cursor_samples` 为空。
+3. `build_effect_timeline_from_metadata()` 进入 raw hidden 分支。
+4. `CursorEffectEngine::build_timeline()` 对 empty samples 返回 `frames = []`、`render_cursor_overlay = true`。
+5. command 返回成功，Phase 6 compositor 看到“应渲染 overlay”但没有任何 cursor frames。
+
+为什么重要：
+
+- 这是 Phase 4 raw cursor policy 的核心正确性漏洞：默认开启美化时 raw cursor 被隐藏，overlay 就成为唯一光标来源。
+- 如果 empty metadata 被当作成功，后续导出可能既没有系统光标，也没有 overlay 光标，形成 cursorless export。
+- 用户不会看到错误；从 command 层看 timeline build 是成功的。
+- 这不是捕获 callback 热路径阻塞问题，但会直接破坏 Phase 4 的“隐藏系统光标防双光标 + 后续 overlay 补回光标”的安全契约。
+
+建议修复：
+
+1. 在 metadata 中记录 cursor polling health，例如：
+   - `cursor_sample_count`
+   - `cursor_snapshot_error_count`
+   - `cursor_polling_failed` / `cursor_capture_available`
+   - 或至少在 runtime finish 时能判断是否曾成功采样。
+2. 在 `build_effect_timeline_from_metadata()` 中增加 guard：
+   - 当 `raw_system_cursor_visible == false` 且 `metadata.cursor_samples.is_empty()` 时，返回明确错误。
+   - 错误文案建议可见给用户，例如：`本次素材未录入系统光标，且光标元数据为空，无法生成光标时间线。请重新录制或关闭光标美化。`
+3. 或者在录制开始前使用更保守策略：
+   - 只有 cursor metadata source 首次 health check 成功后才允许隐藏 system cursor。
+   - 如果 health check 失败，保持 `show_system_cursor = true` 并禁用 overlay，避免 cursorless export。
+4. 增加 Rust 回归测试：
+   - `raw_hidden_empty_cursor_samples_returns_error`
+   - `raw_visible_empty_cursor_samples_generates_empty_noop_timeline`
+   - 可选：`cursor_runtime_records_snapshot_failures`
+5. checklist 中增加 manual/auto gate：
+   - “raw cursor hidden 时 cursor metadata 为空必须 fail closed，而不是成功生成 empty overlay timeline。”
+
+建议优先级：
+
+- 合并前建议修复。该问题会影响真实素材导出的光标可见性，且默认配置下更容易触发。
+
+#### Important 2: Preview/export 普通失败只写 console，用户不可见
+
+位置：
+
+- `src/components/preview-view.tsx:157-163`
+- `src/components/preview-view.tsx:167-176`
+- `src/components/preview-view.tsx:179-188`
+
+现象：
+
+当前 `handleBeautifyChange()` 和 `handleExport()` 的 catch 分支只在错误文本包含 `已录入系统光标` 时设置 `beautifyError`：
+
+```ts
+if (msg.includes('已录入系统光标')) {
+  setBeautifyError(msg)
+}
+```
+
+因此以下错误只会进入 `console.error`，不会显示在 UI：
+
+- `没有可用的光标元数据，请先完成一次录制`
+- `光标效果时间线构建任务失败`
+- effect timeline JSON 写入失败
+- metadata JSON 读取失败 / parse 失败
+- `美化配置锁已损坏`
+- Tauri invoke 网络/桥接层失败
+- 非 raw-cursor 的 `setBeautifyConfig()` reject
+
+Round 10 的 `handleBack()` 已经显示 generic 保存失败错误，但 `handleBeautifyChange()` 与 `handleExport()` 仍没有 generic 用户反馈。
+
+为什么重要：
+
+- 用户点击导出后，如果后端失败但错误不是 raw cursor conflict，会看到界面没有变化，只能从开发者 console 里知道原因。
+- export 主路径虽然不会继续使用 stale config，但失败不可见会让用户误以为按钮无响应。
+- Phase 4 目标包含“Preview 接入 beautify/export command boundary”，命令失败路径应有最小可见反馈，否则 UI 闭环不完整。
+- 后续 Phase 6 接入真实 FFmpeg compositor 后，更多 export failure 会走普通错误路径；现在不处理会放大用户体验问题。
+
+建议修复：
+
+1. 提取统一错误展示 helper，例如：
+
+```ts
+const messageForBeautifyError = (error: unknown, fallback: string) => {
+  const msg = String(error)
+  return msg.includes('已录入系统光标') ? msg : fallback
+}
+```
+
+2. `handleBeautifyChange()` catch：
+   - raw cursor conflict 显示原文。
+   - generic timeline/config failure 显示：`光标效果处理失败，请重试或重新录制。`
+3. `handleExport()` catch：
+   - raw cursor conflict 显示原文。
+   - generic export failure 显示：`导出失败，请重试或检查录制素材。`
+4. `getBeautifyConfig()` 初始化失败可以考虑显示轻量错误或保留 console；这不是当前阻塞项。
+5. 增加前端回归测试：
+   - `build_cursor_effect_timeline` reject generic error 后，UI 显示 generic 处理失败。
+   - `export_video` reject generic error 后，UI 显示 generic 导出失败。
+   - `set_beautify_config` reject generic error 后，export 不继续且 UI 显示 generic 保存/导出失败。
+
+建议优先级：
+
+- 合并前建议修复。它不影响捕获主链路安全，但影响 Phase 4 command/UI path 的可恢复性和可诊断性。
+
+### 21.5 Minor Findings
+
+#### Minor 1: checklist 对后处理内存峰值的表述偏乐观
+
+位置：
+
+- `tests/phase-4-w7-w8-checklist.md:43-45`
+- `src-tauri/src/lib.rs:491-503`
+- `src-tauri/src/media/cursor_engine.rs:102-132`
+- `src-tauri/src/media/recording_metadata.rs:42-68`
+
+现象：
+
+checklist 当前写：
+
+```markdown
+- [x] 1080p 素材处理过程中内存无无界增长。（`CursorMetadataRecorder` 上限 120k samples）
+```
+
+这个描述只能证明“录制期 cursor metadata buffer 有上限”，不能证明“录后 timeline build 内存无无界增长”。当前 timeline build 仍会：
+
+1. `read_metadata()` 一次性读取完整 metadata JSON 到 String。
+2. 反序列化完整 `RecordingMetadata`。
+3. `CursorEffectEngine` 一次性生成完整 `Vec<CursorFrame>`。
+4. `serde_json::to_string_pretty()` 一次性生成完整 timeline JSON。
+5. `fs::write()` 一次性写出。
+
+为什么重要：
+
+- 这不是 Phase 4 当前合并的阻塞项，也不阻塞捕获主链路。
+- 但长录制素材下，post-process 内存峰值仍与 duration / fps 成正比。
+- checklist 过度乐观会误导后续 Phase 6，以为完整后处理内存已经被证明稳定。
+
+建议修复：
+
+1. 将 checklist 文案改为：
+   - `录制期 cursor metadata buffer 有上限。`
+   - `录后 timeline build 内存峰值仍需长录制压力验证。`
+2. 增加 Phase 6/后续 gate：
+   - 10 分钟 / 30fps 1080p metadata timeline build 压力测试。
+   - 60fps 长素材 JSON size / peak memory 观察。
+3. 后续可考虑 streaming writer 或按 chunk 写 timeline，避免 full JSON string 峰值。
+
+### 21.6 Phase 4 完整性复审结论
+
+已完成或基本完成：
+
+- `CursorSample` / `CursorClick` / `CursorFrame` / `CursorClickEffect` / `EffectTimeline` serde 模型已落地。
+- `EffectTimeline` 已包含 `raw_system_cursor_visible` / `render_cursor_overlay`，为 Phase 6 compositor 提供明确渲染 contract。
+- `BeautifyConfigSnapshot` 已持久化 recording-time raw cursor fact，其中 `raw_system_cursor_visible` 是不可变安全约束。
+- `CursorProcessor` trait 边界已落地。
+- 移动平均平滑、Bezier 插值、点击放大状态机和 `CursorEffectEngine` 已落地并有算法测试。
+- 录制期 cursor metadata 采集运行在独立 `CursorMetadataRuntime` 线程，不进入 SCK capture callback。
+- `CursorMetadataRecorder` samples/clicks 均 bounded，避免录制期 cursor metadata 无界增长。
+- 停止录制后写入 cursor metadata sidecar，且 sidecar 写入失败不再跳过 cleanup。
+- `RecordingMetadata` 已保存 fps、duration、cursor samples、cursor clicks、beautify snapshot。
+- `build_cursor_effect_timeline()` 已采用方案 B：metadata raw fact + 当前 Preview export intent。
+- raw cursor visible + overlay requested 会被拒绝，避免双光标。
+- raw cursor visible + overlay not requested 会生成 no-op/empty timeline，交给原始素材中的系统光标。
+- raw cursor hidden + overlay not requested 会生成 baseline neutral cursor overlay frames，避免用户关闭美化效果后素材完全无光标。
+- raw cursor hidden + overlay requested 会生成 overlay frames 和 click effects。
+- `set_beautify_config`、`get_beautify_config`、`build_cursor_effect_timeline`、`export_video` command 已接入。
+- Preview 已接入 beautify config、timeline build 和 export command。
+- Preview config writes 已通过 promise chain 串行化，避免 A/B 写入乱序完成。
+- 导出路径会等待 pending/in-flight config writes；flush 失败后不会继续 export。
+- 返回录制路径也会等待 pending/in-flight config writes；flush 失败后会留在 Preview 并显示错误。
+- raw cursor conflict 在 build/export/back 失败时有可见 UI 反馈，并有前端测试覆盖。
+- `build_cursor_effect_timeline` 使用 `spawn_blocking`，并拒绝 `Recording | Paused | Processing` 状态。
+- `session_id + metadata_path + beautify_revision` guard 可以阻止跨 session / 旧 revision stale build 写回 service。
+- stale build guard 失败后会尝试清理未引用 temp timeline JSON。
+- `CaptureConfig.show_system_cursor` 已接入 `SCStreamConfiguration::setShowsCursor`。
+- `start_recording()` 会重新根据当前后端 beautify config 推导 `show_system_cursor`，降低 `set_capture_mode()` 调用顺序风险。
+- PTS invalid/negative/special flag 检查已加强，PTS delta 使用 `i128`，CMTime conversion 使用 checked integer arithmetic。
+- React 未接收视频帧、音频帧或 cursor sample stream，符合架构红线。
+- 未发现本轮 Phase 4 改动违反 BUG-001/BUG-002/BUG-003 的预防规则。
+- `HANDOFF.md` 与 `tests/phase-4-w7-w8-checklist.md` 已同步 Round 10 后自动化验证数量。
+
+仍未完全完成或需作为下一轮整改/gate：
+
+- raw system cursor hidden 时，empty cursor metadata 应 fail closed；当前会返回 successful empty overlay timeline。
+- Preview/export generic error 需要可见 UI 反馈；当前只有 raw cursor conflict 被显示。
+- checklist 对 post-process 内存峰值的表述需收紧，避免把 metadata buffer bounded 等同于 timeline build 内存已验证。
+- 真实 macOS 录制中 CMSampleBuffer PTS 与 click/video 动作对齐仍需 `npm run tauri dev` 人工验证。
+- `cursor_source.rs` CoreGraphics FFI 与 `screen_capture_kit.rs` SCK/CVPixelBuffer/AudioBufferList 仍需 Native Safety Gate 人工逐行审查。
+- 双光标策略和 raw-hidden baseline overlay 仍需真实素材人工确认。
+- 真实导出视频包含光标平滑和点击放大仍依赖 Phase 6 FFmpeg compositor 接入。
+
+结论：
+
+Phase 4 作为“光标效果 foundation + metadata/timeline/export boundary”已经基本完整，Round 10 的返回路径一致性问题也已修复。当前不建议直接合并的原因转移到两个更深的失败路径：raw cursor hidden + empty metadata 的 cursorless export 风险，以及普通 Preview/export 失败不可见。修复这两项并补充回归测试后，可以进入下一轮合并前复审；Native Safety Gate 和真实 macOS 视觉检查仍需保留为人工 gate。
+
+### 21.7 捕获主链路、内存安全、线程安全、资源释放专项复审
+
+捕获主链路：
+
+- 未发现 cursor smoothing、Bezier interpolation、click magnification 在 ScreenCaptureKit callback 内执行。
+- SCK callback 当前仍只做 CMSampleBuffer PTS 提取、CVPixelBuffer 数据复制、AudioBufferList 读取/PCM 转换、bounded channel `try_send_drop_newest`。
+- `normalize_pts()` 在 callback 内使用 `Mutex<Option<(u64, u64)>>`，但只保护轻量时间戳映射；没有等待 UI、磁盘、timeline build 或 export。
+- Cursor polling 由 `CursorMetadataRuntime` 独立线程执行，不在 SCK callback 内调用 CoreGraphics cursor source。
+- Timeline build 是录后 Tauri command 路径，并使用 `spawn_blocking`。
+- `MacScreenCapture::start_stream()` / `stop()` 中等待 SCK start/stop completion 的同步等待发生在 recording service 的 blocking 调用路径，不在 SCK callback 内。
+- 本轮未发现新增阻塞捕获主链路的问题。
+
+内存安全：
+
+- `platform/macos/cursor_source.rs` 中 `CGEventCreate` 返回 event 后做 null 检查，并在 `CGEventGetLocation` 后 `CFRelease`；静态复审表面配对正确，仍需人工 Native Safety Gate。
+- `platform/macos/screen_capture_kit.rs` 的 CVPixelBuffer base address 在 lock 后读取，并复制到 `Arc<[u8]>`；unlock 后不再引用原始 base address。
+- Audio `block_buffer` 当前 return 分支均有 `cf_release`；未发现新增泄漏路径。
+- `CursorMetadataRecorder` samples/clicks 均 bounded。
+- `CursorMetadataRuntime` 静默忽略 snapshot failure 不属于内存安全问题，但会导致 raw-hidden empty metadata 正确性问题，见 Important 1。
+- Timeline 构建仍一次性读取 metadata、生成 frames、pretty serialize JSON；这是录后内存峰值风险，不影响捕获主链路。Phase 6 接入真实长素材后仍需压力测试。
+- stale/cancelled build 会尝试删除未引用 temp JSON；资源清理较 Round 8/9 改善。
+
+线程安全：
+
+- Rust 侧共享 service/config/tick/mic runtime 状态使用 `Arc<Mutex<...>>`，beautify revision 使用 `AtomicU64`；未发现 Rust 数据竞争。
+- `CursorMetadataRuntime` 用 `AtomicBool` 停止并 join 线程，Drop 中也会 stop。
+- `session_id + metadata_path + beautify_revision` stale guard 可以阻止旧 session / 旧 revision build 写回 service。
+- 前端 promise chain 已能保证多次 `setBeautifyConfig()` 按用户意图顺序落到后端。
+- export 和 back 路径已能正确传播 flush 失败，不会继续使用 stale backend config 导出或进入下一次录制入口。
+- `CursorMetadataRuntime::stop()` 仍是直接 join polling thread；若 `source.snapshot()` 在系统 API 层异常长时间阻塞，stop 会等待。当前 CoreGraphics 调用预计很短，风险较低，仍建议人工 Native Safety Gate 关注。
+
+资源释放路径：
+
+- `MacRecordingService.stop()` 当前会先停止 cursor runtime，再 stop native capture / mic capture、signal consumer、join consumer、写 sidecar、reset mic level、推进 state machine。
+- cursor metadata sidecar 写入失败会记录错误并继续 cleanup，不再造成状态机悬挂。
+- `MacScreenCapture::stop()` 超时时保留 native handles 并设置 `needs_reset`，避免潜在 use-after-free；这仍属于 Native Safety Gate 重点。
+- Preview unmount cleanup 会清理 debounce timer，并尝试 fire-and-forget 写入 pending config；这是 best-effort cleanup，不作为 export/back 主路径一致性保证。
+- 导出和返回录制主路径已由 `flushPendingConfig()` 正确传播失败来保证一致性。
+
+### 21.8 BUG.md 预防规则检查
+
+执行命令：
+
+```bash
+rg -n "whileTap|motion\\.div|data-tauri-drag-region=\\\"false\\\"|setIgnoreCursorEvents" src src-tauri/src src-tauri/capabilities src-tauri/tauri.conf.json
+```
+
+命中要点：
+
+```text
+src/App.test.tsx:431: expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+src/App.test.tsx:443: expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+src/components/recording-panel.tsx:89: whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:155: whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:171: whileTap={{ scale: 0.98 }}
+src/components/preview-view.tsx:202: <motion.div
+src/components/preview-view.tsx:246: <motion.div
+src/components/preview-view.tsx:343: <motion.div
+src/components/preview-view.tsx:403: <motion.div
+src/components/recording-status-bar.tsx:30: <motion.div
+src/components/processing-view.tsx:10: <motion.div
+src/components/error-view.tsx:13: <motion.div
+```
+
+解释：
+
+- `src/App.test.tsx:431`、`src/App.test.tsx:443` 是测试断言不存在 `data-tauri-drag-region="false"`，不是源码新增 wrapper。
+- `src/components/recording-panel.tsx:89`、`src/components/recording-panel.tsx:155`、`src/components/recording-panel.tsx:171` 是 `motion.button whileTap`，`whileTap` 位于交互元素自身，不是 BUG-003 中的 `motion.div whileTap` 作为 Button 直接父容器拦截模式。
+- 多处 `motion.div` 用于页面/装饰动画，没有发现 `motion.div` 带 `whileTap` 并直接包裹交互 Button。
+- 未发现新增 `setIgnoreCursorEvents(true)` 或全窗口鼠标忽略逻辑。
+
+结论：
+
+- 未发现新增 `data-tauri-drag-region="false"` 区域级 wrapper。
+- 未发现新增 `motion.div whileTap` 直接包裹交互 Button。
+- 未发现本轮 Phase 4 改动违反 BUG-001/BUG-002/BUG-003 的预防规则。
+
+### 21.9 本轮实际验证
+
+本轮实际执行：
+
+```bash
+git diff --check
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+rg -n "whileTap|motion\\.div|data-tauri-drag-region=\\\"false\\\"|setIgnoreCursorEvents" src src-tauri/src src-tauri/capabilities src-tauri/tauri.conf.json
+```
+
+结果：
+
+- `git diff --check`: PASS
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: PASS
+- `cargo test --manifest-path src-tauri/Cargo.toml`: PASS, **124 tests**
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS, **21 warnings**（既有 macOS FFI naming / unused unsafe / dead_code 类 warning）
+- `cargo build --manifest-path src-tauri/Cargo.toml`: PASS, **21 warnings**
+- `npm run build`: PASS
+- `npm test -- --run`: PASS, **36 tests**；输出多条 `Window.scrollTo()` 未实现提示，测试仍通过
+- BUG.md 规则扫描：未发现新增违规 pattern
+
+补充说明：
+
+- 本轮没有运行 `npm run tauri dev`，真实 macOS 录制、click/video 对齐、双光标视觉检查、Native Safety Gate 仍需人工验证。
+- 当前 Rust warnings 主要集中在 macOS FFI 命名、unused unsafe、unused FFI helper / wrapper 等既有问题；本轮未发现 clippy error。
+
+### 21.10 Round 11 Ready To Merge?
+
+**Ready to merge: With fixes / No**
+
+本轮未发现 Critical，也未发现会直接阻塞捕获主链路的新增 Phase 4 代码。Round 10 的主要整改已经有效：
+
+1. `handleBack()` flush reject 后不再继续返回录制页。
+2. `handleBack()` generic failure 会显示可见错误。
+3. 新增前端回归测试覆盖“返回录制失败留在 Preview”。
+4. `HANDOFF.md` 已同步 Rust 124 tests / frontend 36 tests / 21 warnings。
+5. checklist 已同步 Round 10 验证摘要。
+
+但建议在最终合并前继续完成以下整改：
+
+1. **raw-hidden empty metadata fail closed**：当 `raw_system_cursor_visible == false` 且 `cursor_samples.is_empty()` 时，`build_effect_timeline_from_metadata()` 应返回错误或录制时保守保留系统光标，避免 cursorless export。
+2. **补 Rust 回归测试**：覆盖 raw hidden + empty cursor samples 必须失败；raw visible + empty cursor samples 可以生成 no-op timeline。
+3. **补 cursor polling health 记录**：至少记录 snapshot error count / successful sample count，方便后续 UI 与日志诊断。
+4. **普通 Preview/export 错误可见化**：`handleBeautifyChange()` 和 `handleExport()` 对非 raw cursor conflict 错误也应设置 generic `beautifyError`。
+5. **补前端回归测试**：generic `build_cursor_effect_timeline` reject、generic `export_video` reject、generic `set_beautify_config` reject 均应有可见错误，且 export 不继续。
+6. **收紧 checklist 内存描述**：区分“录制期 cursor metadata bounded”和“录后 timeline build 内存峰值仍需长素材压力验证”。
+7. **继续保留人工 gate**：真实 macOS click/video 对齐、CoreGraphics/SCK FFI Native Safety、双光标和 baseline overlay 视觉效果仍需人工验证。
+
+## 22. Round 12 整改复审（2026-05-29）
+
+> 评审背景：用户已完成 `## 21. Round 11 整改复审（2026-05-29）` 中的整改任务，本轮复审当前工作区未提交改动，重点确认 Round 11 的 7 条整改建议是否真正闭环，并继续专项检查 Phase 4 是否完整完成、是否存在阻塞捕获主链路、内存安全、线程安全和资源释放路径异常。
+>
+> 输入与评审依据：
+>
+> - `docs/architecture/project-architecture-and-overall-planning.md`
+> - `docs/superpowers/plans/2026-05-27-phase-4-cursor-effects.md`
+> - `docs/superpowers/reviews/2026-05-27-phase-4-code-review.md`
+> - `tests/phase-4-w7-w8-checklist.md`
+> - `HANDOFF.md`
+> - `BUG.md`
+> - `.codex/rules/0-global.md`
+> - `.codex/rules/1-coding-style.md`
+> - `.codex/rules/2-testing.md`
+> - `.codex/rules/3-git-commit.md`
+> - `.codex/rules/4-security.md`
+> - `.codex/rules/5-docs.md`
+> - 当前 Phase 4 相关代码与未提交 Round 11 整改
+>
+> 当前结论：**With fixes / No**，暂不建议直接合并。本轮未发现 Critical，也未发现 cursor smoothing / Bezier interpolation / click magnification 进入 ScreenCaptureKit 捕获 callback。Round 11 的主要阻塞项已经基本闭环：raw-hidden empty metadata 已 fail closed，generic Preview/export/config failure 已可见，cursor polling health 已写入 metadata，checklist 内存描述也已收紧。剩余 1 个 Important：旧的 `buildCursorEffectTimeline()` stale/cancelled reject 可能在较新的成功构建后覆盖 UI，显示误导性的失败错误。
+>
+> 交叉验证：本轮按 `$superpowers:requesting-code-review` 流程启动独立审查代理 `Noether`。独立审查结论与本地主审基本一致：无 Critical、无 Important；Round 11 功能性阻塞项已闭环。独立审查额外指出两个 Minor：`HANDOFF.md` 测试数量仍为旧值，以及 cursor health counter 缺少直接 recorder 单元测试。本地主审在此基础上补充发现 stale build UI 误报风险，并将其评为 Important。
+
+### 22.1 本轮重点确认结果
+
+Round 11 建议整改项闭环情况：
+
+1. **raw-hidden empty metadata fail closed**：已完成。
+   - `src-tauri/src/lib.rs:390-395`：`build_effect_timeline_from_metadata()` 在 `raw_system_cursor_visible == false` 且 `metadata.cursor_samples.is_empty()` 时返回明确错误。
+   - `src-tauri/src/lib.rs:753-768`：新增 `raw_hidden_empty_cursor_samples_returns_error` 回归测试。
+   - `src-tauri/src/lib.rs:771-786`：新增 `raw_visible_empty_cursor_samples_generates_empty_noop_timeline` 回归测试，保留 raw-visible 空 metadata 的 no-op 合法路径。
+
+2. **补 Rust 回归测试**：已完成主要合同测试。
+   - 已覆盖 raw-hidden empty samples fail closed。
+   - 已覆盖 raw-visible empty samples noop。
+   - 仍有一个小测试缺口：`CursorMetadataRecorder` health counter increment 没有直接单元测试，见 Minor 2。
+
+3. **补 cursor polling health 记录**：已完成基础字段和 runtime 记录。
+   - `src-tauri/src/media/recording_metadata.rs:18-21`：`RecordingMetadata` 新增 `cursor_snapshot_success_count` / `cursor_snapshot_error_count`，并通过 `#[serde(default)]` 保持旧 sidecar 兼容。
+   - `src-tauri/src/app/cursor_metadata_runtime.rs:42-43`：recorder 保存成功/失败计数。
+   - `src-tauri/src/app/cursor_metadata_runtime.rs:69-70`：成功 snapshot 时递增 success count。
+   - `src-tauri/src/app/cursor_metadata_runtime.rs:137-139`：新增 `record_snapshot_failure()`。
+   - `src-tauri/src/app/cursor_metadata_runtime.rs:177-186`：runtime 对 `source.snapshot()` 的 `Err(_)` 递增 failure count。
+   - `src-tauri/src/app/cursor_metadata_runtime.rs:148-149`：finish 时写入 metadata。
+
+4. **普通 Preview/export 错误可见化**：已完成。
+   - `src/components/preview-view.tsx:41-44`：新增 `messageForBeautifyError()`。
+   - `src/components/preview-view.tsx:162-165`：beautify/timeline build generic failure 显示 `光标效果处理失败，请重试或重新录制。`。
+   - `src/components/preview-view.tsx:172-175`：export generic failure 显示 `导出失败，请重试或检查录制素材。`。
+   - `src/components/preview-view.tsx:181-184`：back/flush generic failure 显示 `美化配置保存失败，请重试或恢复设置后再返回录制。`。
+   - `src/components/preview-view.tsx:432-435`：错误信息已渲染到 UI，而不是仅写 console。
+
+5. **补前端回归测试**：已完成主要失败路径覆盖。
+   - `src/App.test.tsx:1357-1386`：`build_cursor_effect_timeline` generic reject 后 UI 显示 generic 处理失败。
+   - `src/App.test.tsx:1388-1419`：`export_video` generic reject 后 UI 显示 generic 导出失败。
+   - `src/App.test.tsx:1421-1447`：`set_beautify_config` generic reject 后 UI 显示 generic 处理失败。
+   - `src/App.test.tsx:1276-1317`：flush 失败时 export 不继续。
+   - `src/App.test.tsx:1319-1355`：back flush 失败时留在 Preview。
+
+6. **收紧 checklist 内存描述**：已完成。
+   - `tests/phase-4-w7-w8-checklist.md:45-46`：文案已区分“录制期 cursor metadata buffer 有上限”和“录后 timeline build 内存峰值仍需长录制压力验证”。
+
+7. **继续保留人工 gate**：已保留。
+   - `tests/phase-4-w7-w8-checklist.md:63-65`：Native Safety / `showsCursor` / 双光标检查仍未勾选。
+   - 本轮仍未运行 `npm run tauri dev`，真实 macOS 录制、click/video 对齐、双光标视觉检查、Native Safety Gate 继续保留为人工 gate。
+
+### 22.2 Strengths
+
+1. Round 11 的两个核心正确性问题已经实质修复
+
+   - raw cursor hidden 后，empty cursor metadata 不再成功生成“需要 overlay 但没有 frames”的 timeline。
+   - Preview/export/config 的普通失败路径不再只写 console，用户可以看到最小可恢复提示。
+
+2. raw cursor / overlay contract 更清晰
+
+   - `build_effect_timeline_from_metadata()` 继续集中表达方案 B contract：metadata 中的 `raw_system_cursor_visible` 是录制期不可变事实，当前 Preview config 是导出意图。
+   - raw visible + overlay requested 仍被拒绝，避免双光标。
+   - raw visible + no overlay 仍生成 empty/no-op timeline，交给原始素材中的系统光标。
+   - raw hidden + no overlay 仍生成 baseline neutral cursor overlay frames，避免用户关闭美化效果后素材完全无光标。
+   - raw hidden + empty samples 已 fail closed，避免 cursorless export。
+
+3. Preview 写入顺序和失败传播比早期版本稳固
+
+   - `writeChainRef` 可以串行化多次 `setBeautifyConfig()`，避免 A/B 写入乱序完成。
+   - `flushPendingConfig()` 不再吞掉失败；导出和返回录制主路径会看到 reject。
+   - export flush 失败不再继续调用后端导出。
+   - back flush 失败会留在 Preview 并显示错误。
+
+4. 捕获主链路边界仍然符合 Phase 4 架构
+
+   - cursor metadata polling 在 `CursorMetadataRuntime` 独立线程，不在 SCK callback 内调用 CoreGraphics cursor source。
+   - smoothing、Bezier interpolation、click magnification 均在录后 command 路径执行。
+   - `build_cursor_effect_timeline()` 继续使用 `spawn_blocking`。
+   - React 没有接收视频帧、音频帧或 cursor sample stream，只发送 config / command intent。
+
+5. 测试数量与覆盖面继续增加
+
+   - Rust 当前为 126 tests。
+   - 前端当前为 39 tests。
+   - 新增测试覆盖 raw-hidden empty metadata、raw-visible empty noop、generic build/export/config failure、export flush reject、back flush reject 等关键路径。
+
+### 22.3 Critical Findings
+
+本轮未发现 Critical。
+
+没有发现以下阻塞性问题：
+
+- 未发现 cursor smoothing、Bezier interpolation、click magnification 在 ScreenCaptureKit callback 内执行。
+- 未发现新增磁盘 IO、JSON 读写、timeline build、Tauri emit、export 等重操作进入 SCK capture callback。
+- 未发现新增明显 use-after-free、CVPixelBuffer unlock 后继续读 base address、CoreGraphics event 未释放等硬性内存安全问题。
+- 未发现 `CursorMetadataRuntime` samples/clicks 退化为无界增长。
+- 未发现 `MacRecordingService.stop()` 重新出现 sidecar 写入失败后跳过 cleanup / 状态机悬挂的问题。
+- 未发现 React 接收媒体帧或 cursor sample stream。
+
+### 22.4 Important Findings
+
+#### Important 1: stale/cancelled timeline build 可能在新构建成功后显示误导性失败错误
+
+位置：
+
+- `src/components/preview-view.tsx:154-165`
+- `src/components/preview-view.tsx:432-435`
+- `src-tauri/src/lib.rs:547-570`
+
+现象：
+
+`handleBeautifyChange()` 的 debounce callback 每次都会调用：
+
+```ts
+void enqueueConfigWrite(nextConfig)
+  .then(() => {
+    setBeautifyError(null)
+    return buildCursorEffectTimeline()
+  })
+  .catch((error) => {
+    console.error('光标效果处理失败', error)
+    setBeautifyError(messageForBeautifyError(error, '光标效果处理失败，请重试或重新录制。'))
+  })
+```
+
+后端为了防止旧构建污染新 session / 新 revision，已经在 `build_cursor_effect_timeline()` 中做了 stale guard：
+
+```rust
+if service.current_session_id() == session_id
+    && service.last_cursor_metadata_path().as_deref() == Some(metadata_path.as_str())
+    && current_revision == build_revision
+{
+    service.set_last_effect_timeline_path(Some(path.to_string_lossy().to_string()));
+} else {
+    let _ = std::fs::remove_file(&path);
+    let msg = if current_revision != build_revision {
+        "光标美化配置已变更，构建已取消".to_string()
+    } else {
+        "录制会话已变更，光标效果构建已取消".to_string()
+    };
+    return Err(msg);
+}
+```
+
+这个后端 reject 本身是正确的：旧 revision 的构建结果必须被取消。但前端当前把所有 reject 都视为用户可见错误，会出现以下竞态：
+
+1. 用户快速调整光标美化配置，触发 Build A。
+2. 用户继续调整配置，触发 Build B，并且 B 是最新意图。
+3. 后端因为 revision 变化取消 Build A，返回 `光标美化配置已变更，构建已取消`。
+4. Build B 随后成功，或者已经成功。
+5. Build A 的 catch 仍可能调用 `setBeautifyError('光标效果处理失败，请重试或重新录制。')`。
+6. UI 显示失败，但实际最新配置可能已经成功生成 timeline。
+
+为什么重要：
+
+- stale build cancellation 是预期控制流，不应作为用户错误显示。
+- 当前错误文案会让用户误以为最新的光标处理失败，降低 Preview 可信度。
+- Phase 4 已经把 config write 串行化，但 timeline build 本身仍可能与后续 revision 交错；后端 guard 会安全取消旧 build，前端也需要识别“旧请求返回”。
+- 这不是捕获主链路安全问题，但属于 Preview command/UI path 的异步一致性问题，建议合并前修复。
+
+建议修复：
+
+1. 在前端增加 timeline build sequence / generation guard。
+
+   示例方向：
+
+   ```ts
+   const buildSeqRef = useRef(0)
+
+   const runLatestTimelineBuild = (): Promise<void> => {
+     const seq = ++buildSeqRef.current
+     setBeautifyError(null)
+     return buildCursorEffectTimeline()
+       .then(() => {
+         if (seq === buildSeqRef.current) {
+           setBeautifyError(null)
+         }
+       })
+       .catch((error) => {
+         const msg = String(error)
+         const isStaleCancel =
+           msg.includes('配置已变更，构建已取消') ||
+           msg.includes('录制会话已变更，光标效果构建已取消')
+         if (seq !== buildSeqRef.current || isStaleCancel) {
+           return
+         }
+         setBeautifyError(messageForBeautifyError(error, '光标效果处理失败，请重试或重新录制。'))
+       })
+   }
+   ```
+
+2. 或最小修复：`messageForBeautifyError()` / catch 分支对 `构建已取消` 类错误静默处理。
+
+   - 优点：改动小。
+   - 缺点：不能覆盖所有旧请求晚到的问题；sequence guard 更稳。
+
+3. 新增前端回归测试：
+
+   - 模拟 Build A reject `光标美化配置已变更，构建已取消`。
+   - 模拟 Build B resolve 成功。
+   - 断言最终 UI 不显示 `光标效果处理失败`。
+
+4. 再补一个顺序反转测试更稳：
+
+   - Build A pending。
+   - Build B resolve 成功并清空错误。
+   - Build A 随后 reject stale cancel。
+   - 断言 A 的 late reject 不覆盖 B 的成功状态。
+
+建议优先级：
+
+- 合并前建议修复。该问题不会破坏生成文件安全性，但会给用户展示错误事实，并且容易在快速拖动 slider / toggle 时触发。
+
+### 22.5 Minor Findings
+
+#### Minor 1: `HANDOFF.md` Phase 4 验证数量仍是 Round 10 / Round 11 前的旧值
+
+位置：
+
+- `HANDOFF.md:103`
+- `HANDOFF.md:107`
+- `tests/phase-4-w7-w8-checklist.md:70`
+- `tests/phase-4-w7-w8-checklist.md:74`
+
+现象：
+
+`HANDOFF.md` 当前写：
+
+```markdown
+- `cargo test --manifest-path src-tauri/Cargo.toml` **124 tests** 通过（+48 相比 Phase 3）
+- `npm test -- --run` **36 tests** 通过（+13 相比 Phase 3）
+```
+
+但本轮实际验证与 checklist 已经是：
+
+```markdown
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **126 tests** PASS
+- `npm test -- --run`: **39 tests** PASS
+```
+
+为什么重要：
+
+- `HANDOFF.md` 是项目约定中的多轮交接核心文件。
+- 后续 agent 或人工接手时会误以为 Round 11 新增测试尚未计入，造成状态漂移。
+- 这是文档问题，不是 runtime 风险。
+
+建议修复：
+
+1. 更新 `HANDOFF.md` Phase 4 验证结果为 Rust **126 tests**、frontend **39 tests**。
+2. 保留 `cargo clippy` / `cargo build` 的 **21 warnings** 表述。
+3. 如需准确描述增量，可同步更新括号中的 “+X 相比 Phase 3”。
+
+#### Minor 2: cursor health counter 缺少直接 recorder 单元测试
+
+位置：
+
+- `src-tauri/src/app/cursor_metadata_runtime.rs:69-70`
+- `src-tauri/src/app/cursor_metadata_runtime.rs:137-149`
+- `src-tauri/src/app/cursor_metadata_runtime.rs:220-363`
+
+现象：
+
+当前代码已经实现：
+
+- `record_snapshot()` 增加 `snapshot_success_count`。
+- `record_snapshot_failure()` 增加 `snapshot_error_count`。
+- `finish()` 写入 `RecordingMetadata`。
+- `RecordingMetadata` serde round-trip 测试覆盖了字段序列化。
+
+但 `CursorMetadataRecorder` 的测试模块里没有直接断言：
+
+- 调用 `record_snapshot()` 后 `cursor_snapshot_success_count == 1`。
+- 调用 `record_snapshot_failure()` 后 `cursor_snapshot_error_count == 1`。
+
+为什么重要：
+
+- health counter 是 Round 11 新增诊断字段，最好用一个小单测锁住。
+- 这不是合并阻塞项；字段当前路径简单，且 metadata round-trip 已覆盖结构。
+- 但直接测试能防止未来重构 recorder 时漏掉计数递增。
+
+建议修复：
+
+新增一个 recorder 单元测试，例如：
+
+```rust
+#[test]
+fn recorder_counts_snapshot_successes_and_failures() {
+    let mut recorder = CursorMetadataRecorder::new(30, beautify_snapshot(false));
+    recorder.record_snapshot(MediaTimestamp::from_nanos(0), snapshot(false));
+    recorder.record_snapshot_failure();
+
+    let metadata = recorder.finish(33_333_333);
+
+    assert_eq!(metadata.cursor_snapshot_success_count, 1);
+    assert_eq!(metadata.cursor_snapshot_error_count, 1);
+}
+```
+
+可复用当前测试里的 snapshot 构造逻辑，避免引入新抽象。
+
+#### Minor 3: export 成功后不会清理旧的 `beautifyError`
+
+位置：
+
+- `src/components/preview-view.tsx:169-175`
+- `src/components/preview-view.tsx:432-435`
+
+现象：
+
+`handleExport()` 当前只在 catch 中设置错误：
+
+```ts
+const handleExport = (preset: ExportPreset) => {
+  void flushPendingConfig()
+    .then(() => exportVideo(preset))
+    .catch((error) => {
+      console.error('导出失败', error)
+      setBeautifyError(messageForBeautifyError(error, '导出失败，请重试或检查录制素材。'))
+    })
+}
+```
+
+如果用户先遇到一次 export failure，随后重试并成功，旧的 `beautifyError` 仍会留在 UI 中。
+
+为什么重要：
+
+- 用户可能看到“导出失败”但实际第二次导出已经成功。
+- 这会降低导出路径的反馈可信度。
+- 这是 UI 状态清理问题，不影响捕获主链路或 timeline 文件安全。
+
+建议修复：
+
+1. 在 export 成功后清理错误：
+
+   ```ts
+   void flushPendingConfig()
+     .then(() => exportVideo(preset))
+     .then(() => setBeautifyError(null))
+     .catch(...)
+   ```
+
+2. 如果希望点击导出时立即移除旧错误，也可以在 `handleExport()` 开始处先 `setBeautifyError(null)`；但若 flush/export 失败，需要 catch 再设置。
+3. 增加前端测试：
+   - 第一次 `export_video` reject，显示 `导出失败`。
+   - 第二次 `export_video` resolve。
+   - 断言 `导出失败` 不再显示。
+
+### 22.6 Phase 4 完整性复审结论
+
+已完成或基本完成：
+
+- `CursorSample` / `CursorClick` / `CursorFrame` / `CursorClickEffect` / `EffectTimeline` serde 模型已落地。
+- `EffectTimeline` 已包含 `raw_system_cursor_visible` / `render_cursor_overlay`，为 Phase 6 compositor 提供明确渲染 contract。
+- `BeautifyConfigSnapshot` 已持久化 recording-time raw cursor fact，其中 `raw_system_cursor_visible` 是不可变安全约束。
+- `CursorProcessor` trait 边界已落地。
+- 移动平均平滑、Bezier 插值、点击放大状态机和 `CursorEffectEngine` 已落地并有算法测试。
+- 录制期 cursor metadata 采集运行在独立 `CursorMetadataRuntime` 线程，不进入 SCK capture callback。
+- `CursorMetadataRecorder` samples/clicks 均 bounded，避免录制期 cursor metadata 无界增长。
+- `CursorMetadataRecorder` / `CursorMetadataRuntime` 已记录 cursor snapshot success/error count。
+- 停止录制后写入 cursor metadata sidecar，且 sidecar 写入失败不再跳过 cleanup。
+- `RecordingMetadata` 已保存 fps、duration、cursor samples、cursor clicks、beautify snapshot、cursor polling health counters。
+- `build_cursor_effect_timeline()` 已采用方案 B：metadata raw fact + 当前 Preview export intent。
+- raw cursor visible + overlay requested 会被拒绝，避免双光标。
+- raw cursor visible + overlay not requested 会生成 no-op/empty timeline，交给原始素材中的系统光标。
+- raw cursor hidden + overlay not requested 会生成 baseline neutral cursor overlay frames，避免用户关闭美化效果后素材完全无光标。
+- raw cursor hidden + overlay requested 会生成 overlay frames 和 click effects。
+- raw cursor hidden + empty cursor samples 已 fail closed，避免 cursorless export。
+- `set_beautify_config`、`get_beautify_config`、`build_cursor_effect_timeline`、`export_video` command 已接入。
+- Preview 已接入 beautify config、timeline build 和 export command。
+- Preview config writes 已通过 promise chain 串行化，避免 A/B 写入乱序完成。
+- 导出路径会等待 pending/in-flight config writes；flush 失败后不会继续 export。
+- 返回录制路径也会等待 pending/in-flight config writes；flush 失败后会留在 Preview 并显示错误。
+- raw cursor conflict、raw-hidden empty metadata、generic build/export/config failure 均有可见 UI 反馈。
+- `build_cursor_effect_timeline` 使用 `spawn_blocking`，并拒绝 `Recording | Paused | Processing` 状态。
+- `session_id + metadata_path + beautify_revision` guard 可以阻止跨 session / 旧 revision stale build 写回 service。
+- stale build guard 失败后会尝试清理未引用 temp timeline JSON。
+- `CaptureConfig.show_system_cursor` 已接入 `SCStreamConfiguration::setShowsCursor`。
+- `start_recording()` 会重新根据当前后端 beautify config 推导 `show_system_cursor`，降低 `set_capture_mode()` 调用顺序风险。
+- PTS invalid/negative/special flag 检查已加强，PTS delta 使用 `i128`，CMTime conversion 使用 checked integer arithmetic。
+- React 未接收视频帧、音频帧或 cursor sample stream，符合架构红线。
+- 未发现本轮 Phase 4 改动违反 BUG-001/BUG-002/BUG-003 的预防规则。
+- `tests/phase-4-w7-w8-checklist.md` 已同步 Round 11 后自动化验证数量和内存 gate 表述。
+
+仍未完全完成或需作为下一轮整改/gate：
+
+- Preview 需要识别 stale/cancelled timeline build，避免旧构建取消错误覆盖最新成功状态。
+- `HANDOFF.md` Phase 4 验证数量需同步到 Rust 126 tests / frontend 39 tests。
+- cursor health counter 建议补一个直接 recorder 单元测试。
+- export 成功后建议清理旧 `beautifyError`。
+- 真实 macOS 录制中 CMSampleBuffer PTS 与 click/video 动作对齐仍需 `npm run tauri dev` 人工验证。
+- `cursor_source.rs` CoreGraphics FFI 与 `screen_capture_kit.rs` SCK/CVPixelBuffer/AudioBufferList 仍需 Native Safety Gate 人工逐行审查。
+- 双光标策略和 raw-hidden baseline overlay 仍需真实素材人工确认。
+- 真实导出视频包含光标平滑和点击放大仍依赖 Phase 6 FFmpeg compositor 接入。
+
+结论：
+
+Phase 4 作为“光标效果 foundation + metadata/timeline/export boundary”已经基本完整，Round 11 的主要功能性整改有效。当前不建议直接合并的主要原因不是捕获主链路安全，而是 Preview 异步构建反馈仍有 stale cancel 误报风险。修复 stale/cancelled build UI guard，并同步 `HANDOFF.md` 后，可以进入下一轮合并前复审；Native Safety Gate 和真实 macOS 视觉检查仍需保留为人工 gate。
+
+### 22.7 捕获主链路、内存安全、线程安全、资源释放专项复审
+
+捕获主链路：
+
+- 未发现 cursor smoothing、Bezier interpolation、click magnification 在 ScreenCaptureKit callback 内执行。
+- SCK callback 当前仍只做 CMSampleBuffer PTS 提取、CVPixelBuffer 数据复制、AudioBufferList 读取/PCM 转换、bounded channel `try_send_drop_newest`。
+- `normalize_pts()` 在 callback 内使用 `Mutex<Option<(u64, u64)>>`，但只保护轻量时间戳映射；没有等待 UI、磁盘、timeline build 或 export。
+- Cursor polling 由 `CursorMetadataRuntime` 独立线程执行，不在 SCK callback 内调用 CoreGraphics cursor source。
+- Timeline build 是录后 Tauri command 路径，并使用 `spawn_blocking`。
+- `MacScreenCapture::start_stream()` / `stop()` 中等待 SCK start/stop completion 的同步等待发生在 recording service 的 blocking 调用路径，不在 SCK callback 内。
+- 本轮未发现新增阻塞捕获主链路的问题。
+
+内存安全：
+
+- `platform/macos/cursor_source.rs` 中 `CGEventCreate` 返回 event 后做 null 检查，并在 `CGEventGetLocation` 后 `CFRelease`；静态复审表面配对正确，仍需人工 Native Safety Gate。
+- `platform/macos/screen_capture_kit.rs` 的 CVPixelBuffer base address 在 lock 后读取，并复制到 `Arc<[u8]>`；unlock 后不再引用原始 base address。
+- Audio `block_buffer` 当前 return 分支均有 `cf_release`；未发现新增泄漏路径。
+- `CursorMetadataRecorder` samples/clicks 均 bounded。
+- `CursorMetadataRuntime` 已记录 snapshot failure count；失败不再被完全不可诊断地吞掉。
+- Timeline 构建仍一次性读取 metadata、生成 frames、pretty serialize JSON；这是录后内存峰值风险，不影响捕获主链路。Phase 6 接入真实长素材后仍需压力测试。
+- stale/cancelled build 会尝试删除未引用 temp JSON；资源清理较早期版本改善。
+
+线程安全：
+
+- Rust 侧共享 service/config/tick/mic runtime 状态使用 `Arc<Mutex<...>>`，beautify revision 使用 `AtomicU64`；未发现 Rust 数据竞争。
+- `CursorMetadataRuntime` 用 `AtomicBool` 停止并 join 线程，Drop 中也会 stop。
+- `session_id + metadata_path + beautify_revision` stale guard 可以阻止旧 session / 旧 revision build 写回 service。
+- 前端 promise chain 已能保证多次 `setBeautifyConfig()` 按用户意图顺序落到后端。
+- export 和 back 路径已能正确传播 flush 失败，不会继续使用 stale backend config 导出或进入下一次录制入口。
+- 剩余前端异步一致性风险集中在 timeline build 返回顺序：旧 build 的 stale/cancelled reject 可能覆盖最新 build 的成功状态。
+- `CursorMetadataRuntime::stop()` 仍是直接 join polling thread；若 `source.snapshot()` 在系统 API 层异常长时间阻塞，stop 会等待。当前 CoreGraphics 调用预计很短，仍建议人工 Native Safety Gate 关注。
+
+资源释放路径：
+
+- `MacRecordingService.stop()` 当前会先停止 cursor runtime，再 stop native capture / mic capture、signal consumer、join consumer、写 sidecar、reset mic level、推进 state machine。
+- cursor metadata sidecar 写入失败会记录错误并继续 cleanup，不再造成状态机悬挂。
+- `MacScreenCapture::stop()` 超时时保留 native handles 并设置 `needs_reset`，避免潜在 use-after-free；这仍属于 Native Safety Gate 重点。
+- Preview unmount cleanup 会清理 debounce timer，并尝试 fire-and-forget 写入 pending config；这是 best-effort cleanup，不作为 export/back 主路径一致性保证。
+- 导出和返回录制主路径已由 `flushPendingConfig()` 正确传播失败来保证一致性。
+
+### 22.8 BUG.md 预防规则检查
+
+执行命令：
+
+```bash
+rg -n "whileTap|motion\\.div|data-tauri-drag-region=\\\"false\\\"|setIgnoreCursorEvents" src src-tauri/src src-tauri/capabilities src-tauri/tauri.conf.json
+```
+
+命中要点：
+
+```text
+src/App.test.tsx:431: expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+src/App.test.tsx:443: expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+src/components/preview-view.tsx:198: <motion.div
+src/components/preview-view.tsx:242: <motion.div
+src/components/preview-view.tsx:339: <motion.div
+src/components/preview-view.tsx:399: <motion.div
+src/components/recording-status-bar.tsx:30: <motion.div
+src/components/recording-status-bar.tsx:39: <motion.div
+src/components/recording-status-bar.tsx:50: <motion.div
+src/components/recording-status-bar.tsx:74: <motion.div
+src/components/error-view.tsx:13: <motion.div
+src/components/recording-panel.tsx:65: <motion.div
+src/components/recording-panel.tsx:89: whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:155: whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:171: whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:185: <motion.div
+src/components/processing-view.tsx:10: <motion.div
+src/components/processing-view.tsx:17: <motion.div
+```
+
+解释：
+
+- `src/App.test.tsx:431`、`src/App.test.tsx:443` 是测试断言不存在 `data-tauri-drag-region="false"`，不是源码新增 wrapper。
+- `src/components/recording-panel.tsx:89`、`src/components/recording-panel.tsx:155`、`src/components/recording-panel.tsx:171` 是 `motion.button whileTap`，`whileTap` 位于交互元素自身，不是 BUG-003 中的 `motion.div whileTap` 作为 Button 直接父容器拦截模式。
+- 多处 `motion.div` 用于页面、装饰或布局动画，没有发现 `motion.div` 带 `whileTap` 并直接包裹交互 Button。
+- 未发现新增 `setIgnoreCursorEvents(true)` 或全窗口鼠标忽略逻辑。
+
+结论：
+
+- 未发现新增 `data-tauri-drag-region="false"` 区域级 wrapper。
+- 未发现新增 `motion.div whileTap` 直接包裹交互 Button。
+- 未发现新增 `setIgnoreCursorEvents(true)`。
+- 未发现本轮 Phase 4 改动违反 BUG-001/BUG-002/BUG-003 的预防规则。
+
+### 22.9 本轮实际验证
+
+本轮实际执行：
+
+```bash
+git diff --check
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+rg -n "whileTap|motion\\.div|data-tauri-drag-region=\\\"false\\\"|setIgnoreCursorEvents" src src-tauri/src src-tauri/capabilities src-tauri/tauri.conf.json
+```
+
+结果：
+
+- `git diff --check`: PASS
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: PASS
+- `cargo test --manifest-path src-tauri/Cargo.toml`: PASS, **126 tests**
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS, **21 warnings**（既有 macOS FFI naming / unused unsafe / dead_code 类 warning）
+- `cargo build --manifest-path src-tauri/Cargo.toml`: PASS, **21 warnings**
+- `npm run build`: PASS
+- `npm test -- --run`: PASS, **39 tests**；输出多条 `Window.scrollTo()` 未实现提示，测试仍通过
+- BUG.md 规则扫描：未发现新增违规 pattern
+
+补充说明：
+
+- 本轮没有运行 `npm run tauri dev`，真实 macOS 录制、click/video 对齐、双光标视觉检查、Native Safety Gate 仍需人工验证。
+- 当前 Rust warnings 主要集中在 macOS FFI 命名、unused unsafe、unused FFI helper / wrapper 等既有问题；本轮未发现 clippy error。
+
+### 22.10 Round 12 Ready To Merge?
+
+**Ready to merge: With fixes / No**
+
+本轮未发现 Critical，也未发现会直接阻塞捕获主链路的新增 Phase 4 代码。Round 11 的主要整改已经有效：
+
+1. raw-hidden empty metadata 已 fail closed。
+2. raw-visible empty metadata 已保留 no-op 合法路径。
+3. cursor polling health 已写入 metadata。
+4. generic build/export/config failure 已有可见 UI。
+5. export flush 失败不会继续 export。
+6. back flush 失败会留在 Preview。
+7. checklist 已区分录制期 bounded buffer 与录后 timeline build 内存峰值 gate。
+
+但建议在最终合并前继续完成以下整改：
+
+1. **stale/cancelled build UI guard**：旧的 `buildCursorEffectTimeline()` 返回 `配置已变更，构建已取消` 或 `录制会话已变更，光标效果构建已取消` 时，不应覆盖最新成功状态或显示 generic failure。
+2. **补前端回归测试**：覆盖旧 build stale cancel 晚到时不显示 `光标效果处理失败`，尤其是 “Build B 成功后 Build A reject” 的顺序反转场景。
+3. **同步 `HANDOFF.md`**：更新 Phase 4 验证结果为 Rust 126 tests、frontend 39 tests、clippy/build 21 warnings。
+4. **补 cursor health counter 直接测试**：`CursorMetadataRecorder` 调用 success/failure 后，finish metadata 中 count 正确。
+5. **export 成功后清理旧错误**：成功 retry 后应清空旧 `beautifyError`，避免 UI 继续显示过期失败。
+6. **继续保留人工 gate**：真实 macOS click/video 对齐、CoreGraphics/SCK FFI Native Safety、双光标和 baseline overlay 视觉效果仍需人工验证。
+
+## 23. Round 13 整改复审（2026-05-29）
+
+> 评审背景：用户已完成 `## 22. Round 12 整改复审（2026-05-29）` 中列出的整改任务。本轮复审当前工作区未提交改动，重点确认 Round 12 的 stale/cancelled build UI guard、前端回归测试、`HANDOFF.md` 验证数量同步、cursor health counter 测试、export 成功清理旧错误是否闭环，并继续专项检查 Phase 4 是否完整完成、是否存在阻塞捕获主链路、内存安全、线程安全和资源释放路径异常。
+>
+> 本轮输入：
+>
+> - `HANDOFF.md`
+> - `BUG.md`
+> - `docs/architecture/project-architecture-and-overall-planning.md`
+> - `docs/superpowers/plans/2026-05-27-phase-4-cursor-effects.md`
+> - `docs/superpowers/reviews/2026-05-27-phase-4-code-review.md`
+> - `tests/phase-4-w7-w8-checklist.md`
+> - 当前 Phase 4 相关代码与未提交 Round 12 整改
+>
+> 当前结论：**With fixes / No**，暂不建议直接合并。本轮未发现 Critical，也未发现新增 cursor smoothing / Bezier interpolation / click magnification 阻塞 ScreenCaptureKit callback。Round 12 的 product code 方向基本正确：stale/cancelled build UI guard 已实现，raw-hidden empty metadata 已 fail closed，generic Preview/export/config failure 已有可见 UI，export 成功 retry 会清理旧错误，`HANDOFF.md` 与 checklist 的验证数量已同步到 Rust 127 / frontend 42。但 Round 12 最核心的 stale/cancelled build 回归测试目前没有真正触发 A/B 两个 timeline build，测试可在未覆盖目标竞态时通过，因此仍需合并前修正。
+>
+> 交叉验证：本轮按 `$superpowers:requesting-code-review` 流程启动独立审查代理 `Anscombe`。独立审查结论与本地主审一致：无 Critical；product code 基本闭环；核心 Important 是 `src/App.test.tsx` 中新增 stale/cancelled build 测试没有推进 debounce timer、没有断言两个 build 真实发生，因而不能证明 Round 12 的主风险已被测试锁住。独立审查还指出 `HANDOFF.md` 与 checklist 顶部 `最后更新` 日期仍停留在 `2026-05-27`。
+
+### 23.1 本轮重点确认结果
+
+Round 12 整改已闭环项：
+
+- `src/components/preview-view.tsx:41-47`：`messageForBeautifyError()` 已把 `配置已变更，构建已取消` / `录制会话已变更，光标效果构建已取消` 映射为空字符串，避免 stale/cancelled build 被当成普通失败展示。
+- `src/components/preview-view.tsx:80`、`src/components/preview-view.tsx:161-178`：新增 `buildSeqRef`，debounced timeline build catch 中会检查当前 seq；旧请求返回时不会覆盖最新请求的 UI 状态。
+- `src/components/preview-view.tsx:183-192`：export 成功后会 `setBeautifyError(null)`，避免一次失败后成功 retry 仍显示旧错误。
+- `src-tauri/src/app/cursor_metadata_runtime.rs:137-149`、`src-tauri/src/app/cursor_metadata_runtime.rs:366-394`：cursor snapshot success/error counter 已写入 metadata，并补充 `recorder_counts_snapshot_successes_and_failures` 单测。
+- `src-tauri/src/lib.rs:390-395`、`src-tauri/src/lib.rs:752-767`：raw system cursor hidden 且 `cursor_samples` 为空时已 fail closed，不再成功生成 empty overlay timeline。
+- `HANDOFF.md:100-107`：Phase 4 验证结果已同步为 Rust **127 tests**、frontend **42 tests**、clippy/build **21 warnings**。
+- `tests/phase-4-w7-w8-checklist.md:67-74`：Verification Summary 已同步到 Round 12，记录 Rust **127 tests**、frontend **42 tests**。
+
+本轮未发现的问题：
+
+- 未发现新的 Critical。
+- 未发现 cursor smoothing、Bezier interpolation、click magnification 进入 SCK callback。
+- 未发现新增磁盘 IO、JSON 读写、timeline build、Tauri invoke/export 等重操作进入捕获 callback。
+- 未发现新增 Rust 数据竞争、明显 use-after-free 或资源释放路径提前中断。
+- 未发现新增 `data-tauri-drag-region="false"` 区域级 wrapper。
+- 未发现新增 `motion.div whileTap` 直接包裹交互 Button 的 BUG-003 模式。
+
+### 23.2 Strengths
+
+1. stale/cancelled build 的 product code 防护方向正确
+
+   - 前端不再把后端 stale guard 返回的 cancel message 映射成 generic failure。
+   - `buildSeqRef` 让旧 build 的 late reject/resolve 不能覆盖最新 build 的 UI 状态。
+   - 该策略与 Rust 侧 `session_id + metadata_path + beautify_revision` guard 是互补关系：Rust 防止旧 build 写回 service，React 防止旧请求污染用户反馈。
+
+2. raw cursor / overlay contract 更稳固
+
+   - `build_effect_timeline_from_metadata()` 已提取为纯 helper，测试覆盖 raw visible/raw hidden、overlay requested/not requested、empty cursor samples 等关键分支。
+   - raw cursor visible + overlay requested 会继续拒绝，避免双光标。
+   - raw cursor hidden + empty cursor samples 已 fail closed，避免默认隐藏系统光标后导出无光标。
+   - raw cursor hidden + overlay disabled 仍会生成 baseline neutral frames，保留“原始素材无系统光标时仍需要 overlay 光标”的安全契约。
+
+3. Preview/export 失败反馈比前几轮完整
+
+   - raw cursor conflict、raw-hidden empty metadata、generic timeline build failure、generic export failure、generic config write failure 都有可见 UI 反馈。
+   - export/back 主路径仍会等待 `flushPendingConfig()`；flush 失败不会继续 export 或离开 Preview。
+   - export retry 成功后旧错误会被清理，避免用户看到过期失败。
+
+4. 录制期 cursor metadata 健康状态更可诊断
+
+   - `CursorMetadataRuntime` 不再完全吞掉 snapshot failure，而是累计 error count。
+   - metadata sidecar 现在保存 `cursor_snapshot_success_count` 和 `cursor_snapshot_error_count`，为后续真实 macOS 排障提供信号。
+   - 字段使用 `#[serde(default)]`，旧 metadata JSON 仍可反序列化。
+
+5. Phase 4 架构红线仍然清楚
+
+   - React 未接收视频帧、音频帧或 cursor sample stream。
+   - cursor metadata 采集在独立 polling runtime；timeline build 在录后 command 路径并使用 `spawn_blocking`。
+   - 当前新增逻辑主要集中在 command contract、Preview UI feedback、metadata health counter 和测试，不改变捕获 callback 的重负载路径。
+
+### 23.3 Critical Findings
+
+本轮未发现 Critical。
+
+没有发现以下阻塞性问题：
+
+- 没有发现 Phase 4 cursor 算法直接阻塞捕获 callback。
+- 没有发现明显 use-after-free。
+- 没有发现 sidecar 写入失败跳过 capture/mic/consumer cleanup 的旧问题复发。
+- 没有发现 export/back 主路径继续吞掉 config write 失败。
+- 没有发现 raw-hidden empty metadata 继续成功生成 cursorless timeline。
+
+### 23.4 Important Findings
+
+#### Important 1: 新增 stale/cancelled build 回归测试没有真正覆盖目标竞态
+
+位置：
+
+- `src/App.test.tsx:1449-1498`
+- `src/App.test.tsx:1501-1553`
+- `src/components/preview-view.tsx:158-180`
+
+现象：
+
+Round 12 新增了两条测试：
+
+```ts
+it('does not show error when stale cancelled build rejects after a successful build', async () => {
+  // ...
+  fireEvent.click(switches[0])
+  fireEvent.click(switches[1])
+
+  buildDeferreds[1].resolve(undefined)
+  await vi.waitFor(() => {
+    expect(screen.queryByText(/光标效果处理失败/)).toBeNull()
+  })
+
+  buildDeferreds[0].reject(new Error('光标美化配置已变更，构建已取消'))
+  await act(async () => {})
+  expect(screen.queryByText(/光标效果处理失败/)).toBeNull()
+})
+```
+
+但 `PreviewView` 的 timeline build 是 300ms debounce 后才会执行：
+
+```ts
+debounceRef.current = setTimeout(() => {
+  // enqueueConfigWrite(nextConfig).then(... buildCursorEffectTimeline ...)
+}, 300)
+```
+
+这两条测试存在三个问题：
+
+1. 没有使用 fake timers 或真实等待推进 300ms debounce。
+2. 没有断言 `build_cursor_effect_timeline` 被调用过，更没有断言调用了两次。
+3. 连续第二次点击会清理第一次 debounce timer，因此 Build A 在测试中通常没有机会 dispatch。
+
+为什么重要：
+
+- Round 12 的核心风险正是 “Build B 已成功，Build A 之后 stale-cancel reject，旧请求不应覆盖最新成功状态”。
+- 当前测试可以在没有触发 Build A / Build B 的情况下通过，也就是说，即使移除 `buildSeqRef` guard 或 stale cancel message guard，测试仍可能是绿色。
+- 这会削弱后续整改信号：看起来已经补了回归测试，但实际上没有锁住这次 review 要求的主竞态。
+
+建议修复：
+
+1. 重写其中至少一条测试，确保真正发生两个 build：
+
+   ```ts
+   vi.useFakeTimers()
+
+   fireEvent.click(switches[0])
+   await act(async () => {
+     vi.advanceTimersByTime(350)
+   })
+   await vi.waitFor(() => {
+     expect(buildCallCount).toBe(1)
+   })
+
+   fireEvent.click(switches[1])
+   await act(async () => {
+     vi.advanceTimersByTime(350)
+   })
+   await vi.waitFor(() => {
+     expect(buildCallCount).toBe(2)
+   })
+   ```
+
+2. 用 deferred promise 控制顺序：
+
+   - 第一次 `build_cursor_effect_timeline` 返回 `buildA.promise`，保持 pending。
+   - 第二次返回 `Promise.resolve()` 或 `buildB.promise`。
+   - 确认 Build B 成功后，reject Build A 为 `new Error('光标美化配置已变更，构建已取消')`。
+   - 断言 UI 不显示 `光标效果处理失败`。
+
+3. 建议补充两类断言：
+
+   - `expect(buildCallCount).toBe(2)`，防止测试空转。
+   - `expect(screen.queryByText(/光标效果处理失败/)).toBeNull()` 在 late reject 后仍成立。
+
+4. 可选：同时覆盖另一个 stale message：
+
+   - `录制会话已变更，光标效果构建已取消`
+
+建议优先级：
+
+- 合并前建议修复。product code 看起来已经处理了目标问题，但当前测试不能证明该问题未来不会回归。
+
+### 23.5 Minor Findings
+
+#### Minor 1: `HANDOFF.md` 与 checklist 顶部更新时间仍是旧日期
+
+位置：
+
+- `HANDOFF.md:3`
+- `tests/phase-4-w7-w8-checklist.md:3`
+
+现象：
+
+`HANDOFF.md` 顶部仍写：
+
+```markdown
+> 最后更新：2026-05-27 | Phase 4 光标平滑与点击放大实现完成（自动化验证全部通过，Native Safety Gate 待人工审查）。
+```
+
+`tests/phase-4-w7-w8-checklist.md` 顶部仍写：
+
+```markdown
+> 最后更新：2026-05-27 | 自动化验证全部通过，Native Safety Gate 待人工审查，FFmpeg compositor 待 Phase 6 接入
+```
+
+但文件正文已经记录 Round 12 / 2026-05-29 的验证数量和状态。
+
+为什么重要：
+
+- `HANDOFF.md` 是项目约定中的多轮交接核心文件。
+- checklist 是 Phase 4 自测清单，顶部 metadata 与正文不一致会让后续接手者误判文档是否已同步。
+- 这是文档一致性问题，不是 runtime 风险。
+
+建议修复：
+
+1. 将 `HANDOFF.md` 顶部更新为 `2026-05-29`，状态可写为 `Phase 4 Round 12 整改复审后自动化验证通过，Native Safety Gate 待人工审查`。
+2. 将 `tests/phase-4-w7-w8-checklist.md` 顶部更新为 `2026-05-29`，保持 Native Safety Gate / Phase 6 compositor 待接入说明。
+
+#### Minor 2: raw-hidden empty metadata 的错误文案暗示“关闭光标美化”可恢复当前素材
+
+位置：
+
+- `src-tauri/src/lib.rs:390-393`
+
+现象：
+
+当前错误文案为：
+
+```rust
+"本次素材未录入系统光标，且光标元数据为空，无法生成光标时间线。请重新录制或关闭光标美化。"
+```
+
+但该分支的前提是 `raw_system_cursor_visible == false` 且 `cursor_samples.is_empty()`。此时原始素材里没有系统光标，metadata 又没有 overlay 输入；用户在 Preview 中“关闭光标美化”并不能让当前素材恢复光标。正确恢复方式是先关闭光标美化，再重新录制，或修复 cursor metadata 采集后重新录制。
+
+为什么重要：
+
+- 文案可能误导用户以为只要在当前 Preview 关闭光标美化就能继续导出。
+- 这不会破坏数据安全，因为 command 已经 fail closed；但会影响可诊断性。
+
+建议修复：
+
+将文案改为更精确的形式，例如：
+
+```rust
+"本次素材未录入系统光标，且光标元数据为空，无法生成光标时间线。请关闭光标美化后重新录制，或重新录制以恢复光标元数据。"
+```
+
+### 23.6 Phase 4 完整性复审结论
+
+已完成或基本完成：
+
+- `CursorSample` / `CursorClick` / `CursorFrame` / `CursorClickEffect` / `EffectTimeline` serde 模型已落地。
+- `EffectTimeline` 已包含 `raw_system_cursor_visible` / `render_cursor_overlay`，为 Phase 6 compositor 提供明确渲染 contract。
+- `BeautifyConfigSnapshot` 已持久化 recording-time raw cursor fact，其中 `raw_system_cursor_visible` 是不可变安全约束。
+- `CursorProcessor` trait 边界已落地。
+- 移动平均平滑、Bezier 插值、点击放大状态机和 `CursorEffectEngine` 已落地并有算法测试。
+- 录制期 cursor metadata 采集运行在独立 `CursorMetadataRuntime` 线程，不进入 SCK capture callback。
+- `CursorMetadataRecorder` samples/clicks 均 bounded，避免录制期 cursor metadata 无界增长。
+- `CursorMetadataRecorder` / `CursorMetadataRuntime` 已记录 cursor snapshot success/error count，并有直接单元测试。
+- 停止录制后写入 cursor metadata sidecar，且 sidecar 写入失败不再跳过 cleanup。
+- `RecordingMetadata` 已保存 fps、duration、cursor samples、cursor clicks、beautify snapshot、cursor polling health counters。
+- `build_cursor_effect_timeline()` 已采用方案 B：metadata raw fact + 当前 Preview export intent。
+- raw cursor visible + overlay requested 会被拒绝，避免双光标。
+- raw cursor visible + overlay not requested 会生成 no-op/empty timeline，交给原始素材中的系统光标。
+- raw cursor hidden + overlay not requested 会生成 baseline neutral cursor overlay frames，避免用户关闭美化效果后素材完全无光标。
+- raw cursor hidden + overlay requested 会生成 overlay frames 和 click effects。
+- raw cursor hidden + empty cursor samples 已 fail closed，避免 cursorless export。
+- `set_beautify_config`、`get_beautify_config`、`build_cursor_effect_timeline`、`export_video` command 已接入。
+- Preview 已接入 beautify config、timeline build 和 export command。
+- Preview config writes 已通过 promise chain 串行化，避免 A/B 写入乱序完成。
+- 导出路径会等待 pending/in-flight config writes；flush 失败后不会继续 export。
+- 返回录制路径也会等待 pending/in-flight config writes；flush 失败后会留在 Preview 并显示错误。
+- raw cursor conflict、raw-hidden empty metadata、generic build/export/config failure 均有可见 UI 反馈。
+- export 成功 retry 会清理旧 `beautifyError`。
+- Preview product code 已识别 stale/cancelled timeline build，避免旧构建取消错误覆盖最新成功状态。
+- `build_cursor_effect_timeline` 使用 `spawn_blocking`，并拒绝 `Recording | Paused | Processing` 状态。
+- `session_id + metadata_path + beautify_revision` guard 可以阻止跨 session / 旧 revision stale build 写回 service。
+- stale build guard 失败后会尝试清理未引用 temp timeline JSON。
+- `CaptureConfig.show_system_cursor` 已接入 `SCStreamConfiguration::setShowsCursor`。
+- `start_recording()` 会重新根据当前后端 beautify config 推导 `show_system_cursor`，降低 `set_capture_mode()` 调用顺序风险。
+- PTS invalid/negative/special flag 检查已加强，PTS delta 使用 `i128`，CMTime conversion 使用 checked integer arithmetic。
+- React 未接收视频帧、音频帧或 cursor sample stream，符合架构红线。
+- 未发现本轮 Phase 4 改动违反 BUG-001/BUG-002/BUG-003 的预防规则。
+- `HANDOFF.md` 与 `tests/phase-4-w7-w8-checklist.md` 正文验证数量已同步到 Rust 127 / frontend 42。
+
+仍未完全完成或需作为下一轮整改/gate：
+
+- stale/cancelled build 的前端回归测试需要重写，确保真的 dispatch Build A / Build B，并验证 Build A late reject 不污染 Build B 成功状态。
+- `HANDOFF.md` 与 checklist 顶部 `最后更新` 日期需同步到 2026-05-29。
+- raw-hidden empty metadata 的错误文案需避免暗示“关闭光标美化”可恢复当前素材。
+- 真实 macOS 录制中 CMSampleBuffer PTS 与 click/video 动作对齐仍需 `npm run tauri dev` 人工验证。
+- `cursor_source.rs` CoreGraphics FFI 与 `screen_capture_kit.rs` SCK/CVPixelBuffer/AudioBufferList 仍需 Native Safety Gate 人工逐行审查。
+- 双光标策略和 raw-hidden baseline overlay 仍需真实素材人工确认。
+- 真实导出视频包含光标平滑和点击放大仍依赖 Phase 6 FFmpeg compositor 接入。
+
+结论：
+
+Phase 4 作为“光标效果 foundation + metadata/timeline/export boundary”已经基本完整，Round 12 的 product code 整改方向正确，捕获主链路与资源释放路径未见新增阻塞问题。当前不建议直接合并的主要原因是测试质量：Round 12 的核心竞态虽然在代码里有防护，但回归测试没有真实触发该竞态。修复测试后，再同步两个文档 header 与错误文案，即可进入下一轮合并前复审；Native Safety Gate 和真实 macOS 视觉检查仍需保留为人工 gate。
+
+### 23.7 捕获主链路、内存安全、线程安全、资源释放专项复审
+
+捕获主链路：
+
+- 未发现 cursor smoothing、Bezier interpolation、click magnification 在 ScreenCaptureKit callback 内执行。
+- SCK callback 当前仍只做 CMSampleBuffer PTS 提取、CVPixelBuffer 数据复制、AudioBufferList 读取/PCM 转换、bounded channel `try_send_drop_newest`。
+- `normalize_pts()` 在 callback 内使用 `Mutex<Option<(u64, u64)>>`，只保护轻量时间戳映射；没有等待 UI、磁盘、timeline build 或 export。
+- Cursor polling 由 `CursorMetadataRuntime` 独立线程执行，不在 SCK callback 内调用 CoreGraphics cursor source。
+- Timeline build 是录后 Tauri command 路径，并使用 `spawn_blocking`。
+- `MacScreenCapture::start_stream()` / `stop()` 中等待 SCK start/stop completion 的同步等待发生在 recording service 的 blocking 调用路径，不在 SCK callback 内。
+- 本轮未发现新增阻塞捕获主链路的问题。
+
+内存安全：
+
+- `platform/macos/cursor_source.rs` 中 `CGEventCreate` 返回 event 后做 null 检查，并在 `CGEventGetLocation` 后 `CFRelease`；静态复审表面配对正确，仍需人工 Native Safety Gate。
+- `platform/macos/screen_capture_kit.rs` 的 CVPixelBuffer base address 在 lock 后读取，并复制到 `Arc<[u8]>`；unlock 后不再引用原始 base address。
+- Audio `block_buffer` 当前 return 分支均有 `cf_release`；未发现新增泄漏路径。
+- `CursorMetadataRecorder` samples/clicks 均 bounded。
+- `CursorMetadataRuntime` 已记录 snapshot success/error count；失败不再被完全不可诊断地吞掉。
+- Timeline 构建仍一次性读取 metadata、生成 frames、pretty serialize JSON；这是录后内存峰值风险，不影响捕获主链路。Phase 6 接入真实长素材后仍需压力测试。
+- stale/cancelled build 会尝试删除未引用 temp JSON；资源清理较早期版本改善。
+
+线程安全：
+
+- Rust 侧共享 service/config/tick/mic runtime 状态使用 `Arc<Mutex<...>>`，beautify revision 使用 `AtomicU64`；未发现 Rust 数据竞争。
+- `CursorMetadataRuntime` 用 `AtomicBool` 停止并 join 线程，Drop 中也会 stop。
+- `session_id + metadata_path + beautify_revision` stale guard 可以阻止旧 session / 旧 revision build 写回 service。
+- 前端 promise chain 已能保证多次 `setBeautifyConfig()` 按用户意图顺序落到后端。
+- export 和 back 路径已能正确传播 flush 失败，不会继续使用 stale backend config 导出或进入下一次录制入口。
+- 前端 product code 已增加 `buildSeqRef` 和 stale/cancel message guard，理论上能防止旧 build 的 late reject 污染最新 UI；但当前测试没有真正覆盖该竞态，见 Important 1。
+- `CursorMetadataRuntime::stop()` 仍是直接 join polling thread；若 `source.snapshot()` 在系统 API 层异常长时间阻塞，stop 会等待。当前 CoreGraphics 调用预计很短，仍建议人工 Native Safety Gate 关注。
+
+资源释放路径：
+
+- `MacRecordingService.stop()` 当前会先停止 cursor runtime，再 stop native capture / mic capture、signal consumer、join consumer、写 sidecar、reset mic level、推进 state machine。
+- cursor metadata sidecar 写入失败会记录错误并继续 cleanup，不再造成状态机悬挂。
+- `MacScreenCapture::stop()` 超时时保留 native handles 并设置 `needs_reset`，避免潜在 use-after-free；这仍属于 Native Safety Gate 重点。
+- Preview unmount cleanup 会清理 debounce timer，并尝试 fire-and-forget 写入 pending config；这是 best-effort cleanup，不作为 export/back 主路径一致性保证。
+- 导出和返回录制主路径已由 `flushPendingConfig()` 正确传播失败来保证一致性。
+
+### 23.8 BUG.md 预防规则检查
+
+执行命令：
+
+```bash
+rg -n "whileTap|motion\\.div|data-tauri-drag-region=\\\"false\\\"|setIgnoreCursorEvents" src src-tauri/src src-tauri/capabilities src-tauri/tauri.conf.json
+```
+
+命中要点：
+
+```text
+src/App.test.tsx:431: expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+src/App.test.tsx:443: expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+src/components/preview-view.tsx:217: <motion.div
+src/components/preview-view.tsx:261: <motion.div
+src/components/preview-view.tsx:358: <motion.div
+src/components/preview-view.tsx:418: <motion.div
+src/components/recording-status-bar.tsx:30: <motion.div
+src/components/recording-status-bar.tsx:39: <motion.div
+src/components/recording-status-bar.tsx:50: <motion.div
+src/components/recording-status-bar.tsx:74: <motion.div
+src/components/error-view.tsx:13: <motion.div
+src/components/recording-panel.tsx:65: <motion.div
+src/components/recording-panel.tsx:89: whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:155: whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:171: whileTap={{ scale: 0.98 }}
+src/components/recording-panel.tsx:185: <motion.div
+src/components/processing-view.tsx:10: <motion.div
+src/components/processing-view.tsx:17: <motion.div
+```
+
+解释：
+
+- `src/App.test.tsx:431`、`src/App.test.tsx:443` 是测试断言不存在 `data-tauri-drag-region="false"`，不是源码新增 wrapper。
+- `src/components/recording-panel.tsx:89`、`src/components/recording-panel.tsx:155`、`src/components/recording-panel.tsx:171` 是 `motion.button whileTap`，`whileTap` 位于交互元素自身，不是 BUG-003 中的 `motion.div whileTap` 作为 Button 直接父容器拦截模式。
+- 多处 `motion.div` 用于页面、装饰或布局动画，没有发现 `motion.div` 带 `whileTap` 并直接包裹交互 Button。
+- 未发现新增 `setIgnoreCursorEvents(true)` 或全窗口鼠标忽略逻辑。
+
+结论：
+
+- 未发现新增 `data-tauri-drag-region="false"` 区域级 wrapper。
+- 未发现新增 `motion.div whileTap` 直接包裹交互 Button。
+- 未发现新增 `setIgnoreCursorEvents(true)`。
+- 未发现本轮 Phase 4 改动违反 BUG-001/BUG-002/BUG-003 的预防规则。
+
+### 23.9 本轮实际验证
+
+本轮实际执行：
+
+```bash
+git diff --check
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+cargo build --manifest-path src-tauri/Cargo.toml
+npm run build
+npm test -- --run
+rg -n "whileTap|motion\\.div|data-tauri-drag-region=\\\"false\\\"|setIgnoreCursorEvents" src src-tauri/src src-tauri/capabilities src-tauri/tauri.conf.json
+```
+
+结果：
+
+- `git diff --check`: PASS
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: PASS
+- `cargo test --manifest-path src-tauri/Cargo.toml`: PASS, **127 tests**
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS, **21 warnings**（既有 macOS FFI naming / unused unsafe / dead_code 类 warning；命令曾短暂等待 build directory lock，随后正常完成）
+- `cargo build --manifest-path src-tauri/Cargo.toml`: PASS, **21 warnings**
+- `npm run build`: PASS
+- `npm test -- --run`: PASS, **42 tests**；输出多条 `Window.scrollTo()` 未实现提示，测试仍通过
+- BUG.md 规则扫描：未发现新增违规 pattern
+
+补充说明：
+
+- 本轮没有运行 `npm run tauri dev`，真实 macOS 录制、click/video 对齐、双光标视觉检查、Native Safety Gate 仍需人工验证。
+- 当前 Rust warnings 主要集中在 macOS FFI 命名、unused unsafe、unused FFI helper / wrapper 等既有问题；本轮未发现 clippy error。
+
+### 23.10 Round 13 Ready To Merge?
+
+**Ready to merge: With fixes / No**
+
+本轮未发现 Critical，也未发现会直接阻塞捕获主链路的新增 Phase 4 代码。Round 12 的主要 product code 整改已经有效：
+
+1. stale/cancelled build 的 UI guard 已实现。
+2. raw-hidden empty metadata 已 fail closed。
+3. raw-visible empty metadata 已保留 no-op 合法路径。
+4. cursor polling health 已写入 metadata，并补充直接 recorder 单测。
+5. generic build/export/config failure 已有可见 UI。
+6. export flush 失败不会继续 export。
+7. back flush 失败会留在 Preview。
+8. export 成功 retry 会清理旧 `beautifyError`。
+9. `HANDOFF.md` 与 checklist 正文验证数量已同步到 Rust 127 / frontend 42。
+
+但建议在最终合并前继续完成以下整改：
+
+1. **重写 stale/cancelled build 前端回归测试**：使用 fake timers 或明确等待推进 debounce，确保 Build A 和 Build B 都真实 dispatch；断言 `build_cursor_effect_timeline` 调用两次；验证 Build B 成功后 Build A stale reject 不显示 `光标效果处理失败`。
+2. **同步文档顶部 metadata**：更新 `HANDOFF.md` 和 `tests/phase-4-w7-w8-checklist.md` 的 `最后更新` 日期为 `2026-05-29`，避免 header 与正文状态漂移。
+3. **收紧 raw-hidden empty metadata 错误文案**：避免暗示用户只需关闭当前 Preview 的光标美化即可恢复当前素材；建议写成“关闭光标美化后重新录制”。
+4. **继续保留人工 gate**：真实 macOS click/video 对齐、CoreGraphics/SCK FFI Native Safety、双光标和 baseline overlay 视觉效果仍需人工验证。

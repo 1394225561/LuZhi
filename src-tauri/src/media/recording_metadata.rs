@@ -15,6 +15,10 @@ pub struct RecordingMetadata {
     pub cursor_samples: Vec<CursorSample>,
     pub cursor_clicks: Vec<CursorClick>,
     pub beautify_config: BeautifyConfigSnapshot,
+    #[serde(default)]
+    pub cursor_snapshot_success_count: u64,
+    #[serde(default)]
+    pub cursor_snapshot_error_count: u64,
 }
 
 /// JSON sidecar reader/writer for cursor metadata and effect timelines.
@@ -99,6 +103,8 @@ mod tests {
                 trim_sensitivity: "medium".to_string(),
                 raw_system_cursor_visible: false,
             },
+            cursor_snapshot_success_count: 1,
+            cursor_snapshot_error_count: 0,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -123,6 +129,8 @@ mod tests {
                 trim_sensitivity: "medium".to_string(),
                 raw_system_cursor_visible: false,
             },
+            cursor_snapshot_success_count: 0,
+            cursor_snapshot_error_count: 5,
         };
 
         RecordingMetadataWriter::write_metadata(&path, &metadata).unwrap();

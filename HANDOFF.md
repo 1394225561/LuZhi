@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-27 | Phase 4 光标平滑与点击放大实现完成（自动化验证全部通过，Native Safety Gate 待人工审查）。
+> 最后更新：2026-05-29 | Phase 4 Round 13 整改复审后自动化验证通过，Native Safety Gate 待人工审查。
 >
 > 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -100,11 +100,11 @@ W1-W12 Phase：
 验证结果：
 
 - `cargo fmt --check` 通过
-- `cargo test --manifest-path src-tauri/Cargo.toml` **103 tests** 通过（+27 相比 Phase 3）
-- `cargo clippy --all-targets` 无 error（22 pre-existing SCK FFI warnings）
+- `cargo test --manifest-path src-tauri/Cargo.toml` **127 tests** 通过（+51 相比 Phase 3）
+- `cargo clippy --all-targets` 无 error（21 pre-existing SCK FFI warnings）
 - `cargo build` 通过
 - `npm run build` 通过
-- `npm test -- --run` **25 tests** 通过（+2 相比 Phase 3）
+- `npm test -- --run` **42 tests** 通过（+19 相比 Phase 3）
 
 改动文件：
 

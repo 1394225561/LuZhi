@@ -39,6 +39,8 @@ pub struct CursorMetadataRecorder {
     clicks: VecDeque<CursorClick>,
     previous_snapshot: Option<CursorSnapshot>,
     beautify_snapshot: BeautifyConfigSnapshot,
+    snapshot_success_count: u64,
+    snapshot_error_count: u64,
 }
 
 impl CursorMetadataRecorder {
@@ -59,10 +61,13 @@ impl CursorMetadataRecorder {
             clicks: VecDeque::new(),
             previous_snapshot: None,
             beautify_snapshot,
+            snapshot_success_count: 0,
+            snapshot_error_count: 0,
         }
     }
 
     pub fn record_snapshot(&mut self, timestamp: MediaTimestamp, snapshot: CursorSnapshot) {
+        self.snapshot_success_count += 1;
         if self.samples.len() >= self.max_samples {
             self.samples.pop_front();
         }
@@ -129,6 +134,10 @@ impl CursorMetadataRecorder {
         });
     }
 
+    pub fn record_snapshot_failure(&mut self) {
+        self.snapshot_error_count += 1;
+    }
+
     pub fn finish(self, duration_nanos: u64) -> RecordingMetadata {
         RecordingMetadata {
             fps: self.fps,
@@ -136,6 +145,8 @@ impl CursorMetadataRecorder {
             cursor_samples: self.samples.into(),
             cursor_clicks: self.clicks.into(),
             beautify_config: self.beautify_snapshot,
+            cursor_snapshot_success_count: self.snapshot_success_count,
+            cursor_snapshot_error_count: self.snapshot_error_count,
         }
     }
 }
@@ -163,11 +174,16 @@ impl CursorMetadataRuntime {
         let handle = thread::spawn(move || {
             let mut recorder = CursorMetadataRecorder::new(fps.max(1), beautify_snapshot);
             while !thread_stop.load(Ordering::Relaxed) {
-                if let Ok(snapshot) = source.snapshot() {
-                    recorder.record_snapshot(
-                        MediaTimestamp::from_nanos(session_clock.elapsed_nanos()),
-                        snapshot,
-                    );
+                match source.snapshot() {
+                    Ok(snapshot) => {
+                        recorder.record_snapshot(
+                            MediaTimestamp::from_nanos(session_clock.elapsed_nanos()),
+                            snapshot,
+                        );
+                    }
+                    Err(_) => {
+                        recorder.record_snapshot_failure();
+                    }
                 }
                 thread::sleep(interval);
             }
@@ -344,5 +360,36 @@ mod tests {
         let metadata = recorder.finish(1_000_000_000);
 
         assert_eq!(metadata.beautify_config, snapshot);
+    }
+
+    #[test]
+    fn recorder_counts_snapshot_successes_and_failures() {
+        let mut recorder = CursorMetadataRecorder::new(
+            30,
+            BeautifyConfigSnapshot {
+                cursor_magnification: true,
+                magnification_factor: 2.0,
+                cursor_smoothing: true,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+        );
+        recorder.record_snapshot(
+            MediaTimestamp::from_nanos(0),
+            CursorSnapshot {
+                x: 1.0,
+                y: 2.0,
+                left_down: false,
+                right_down: false,
+                middle_down: false,
+            },
+        );
+        recorder.record_snapshot_failure();
+
+        let metadata = recorder.finish(33_333_333);
+
+        assert_eq!(metadata.cursor_snapshot_success_count, 1);
+        assert_eq!(metadata.cursor_snapshot_error_count, 1);
     }
 }

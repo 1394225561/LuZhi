@@ -1,6 +1,6 @@
 # Phase 4 / W7-W8 自测清单：光标平滑与点击放大
 
-> 最后更新：2026-05-27 | 自动化验证全部通过，Native Safety Gate 待人工审查，FFmpeg compositor 待 Phase 6 接入
+> 最后更新：2026-05-29 | 自动化验证全部通过，Native Safety Gate 待人工审查，FFmpeg compositor 待 Phase 6 接入
 
 ## 目标
 
@@ -42,7 +42,8 @@
 
 - [x] 光标算法不会阻塞捕获线程。（CursorMetadataRuntime 独立线程 + 录后 CursorEffectEngine）
 - [x] 录后处理进度可上报。（`post-process-progress` 事件，stage/progress 字段）
-- [x] 1080p 素材处理过程中内存无无界增长。（`CursorMetadataRecorder` 上限 120k samples）
+- [x] 录制期 cursor metadata buffer 有上限。（`CursorMetadataRecorder` 上限 120k samples）
+- [ ] 录后 timeline build 内存峰值仍需长录制压力验证。（10 分钟 30fps 1080p metadata timeline build 待 Phase 6 压力测试）
 
 ## 测试要求
 
@@ -63,11 +64,18 @@
 - [ ] `platform/macos/screen_capture_kit.rs` `showsCursor` 通过 `CaptureConfig.show_system_cursor` 受控
 - [ ] 确认光标美化开启时无系统光标（双光标检查）
 
-## Verification Summary (2026-05-28, Round 7)
+## Verification Summary (2026-05-29, Round 13)
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: PASS
-- `cargo test --manifest-path src-tauri/Cargo.toml`: **120 tests** PASS (incremental: EffectTimeline render contract fields, i128 PTS normalization, cmtime integer conversion, beautify snapshot, engine tests)
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **127 tests** PASS
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS (21 pre-existing SCK FFI warnings)
 - `cargo build --manifest-path src-tauri/Cargo.toml`: PASS
 - `npm run build`: PASS
-- `npm test -- --run`: **32 tests** PASS (+in-flight config write tracking, flush ordering)
+- `npm test -- --run`: **42 tests** PASS (stale build tests rewritten: real debounce + buildCallCount assertion)
+
+## Remaining Gates
+
+- 代码层面可进入合并判断，但这些人工 gate 仍应保持打开：
+  - [ ] Native Safety Gate 仍需人工逐行审查：tests/phase-4-w7-w8-checklist.md (line 61)
+  - [ ] 录后 timeline build 长录制内存峰值仍待压力验证：tests/phase-4-w7-w8-checklist.md (line 46)
+  - [ ] 真实导出视频里的光标平滑/点击放大仍待 Phase 6 compositor 后验收：tests/phase-4-w7-w8-checklist.md (line 37)

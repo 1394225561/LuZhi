@@ -715,8 +715,10 @@ mod tests {
         // When both magnification (max_scale=1.0, peak_opacity=0.0) and
         // smoothing are disabled, the engine still generates cursor frames and
         // click effects, but click effects produce zero visible impact on frame
-        // scale/opacity. The command layer in lib.rs short-circuits to an empty
-        // EffectTimeline when both features are off, before reaching the engine.
+        // scale/opacity. The command layer in lib.rs decides whether to invoke
+        // the engine based on raw cursor visibility: when raw cursor is hidden
+        // and features are off, the engine is still called to produce baseline
+        // neutral frames for the overlay timeline.
         let engine = CursorEffectEngine::with_smoothing(
             ClickAnimationConfig {
                 max_scale: 1.0,

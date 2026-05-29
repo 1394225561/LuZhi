@@ -1170,4 +1170,439 @@ describe('App', () => {
       }))
     })
   })
+
+  it('serializes config writes through promise chain so export waits for all in-flight writes', async () => {
+    const callOrder: string[] = []
+    let resolveA: (value: void) => void = () => {}
+    let resolveB: (value: void) => void = () => {}
+    let setBeautifyCallCount = 0
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') {
+        setBeautifyCallCount++
+        if (setBeautifyCallCount === 1) {
+          callOrder.push('A')
+          return new Promise<void>((resolve) => { resolveA = resolve })
+        }
+        callOrder.push('B')
+        return new Promise<void>((resolve) => { resolveB = resolve })
+      }
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      if (command === 'export_video') {
+        callOrder.push('export')
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('get_beautify_config', undefined)
+    })
+    invokeMock.mockClear()
+
+    // First toggle → debounce fires write A after 300ms.
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[0])
+
+    // Wait for debounce to fire → A dispatched but held pending.
+    await vi.waitFor(() => {
+      expect(setBeautifyCallCount).toBe(1)
+    })
+
+    // Second toggle → sets pending config B.
+    fireEvent.click(switches[0])
+
+    // Click export. flushPendingConfig enqueues B onto chain, then awaits.
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    // Resolve A → chain proceeds to B.
+    await act(async () => { resolveA() })
+
+    // Resolve B → chain proceeds to export.
+    await act(async () => { resolveB() })
+
+    // Both writes must complete before export, in order.
+    await vi.waitFor(() => {
+      expect(callOrder).toEqual(['A', 'B', 'export'])
+    })
+  })
+
+  it('shows error when build_cursor_effect_timeline rejects with raw cursor conflict', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.reject(new Error('本次素材已录入系统光标，无法叠加美化光标效果。请先关闭光标美化后重新录制。'))
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    // Toggle cursor smoothing to trigger config write + timeline build.
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[1])
+
+    // Error message should appear in the UI.
+    await vi.waitFor(() => {
+      expect(screen.getByText(/已录入系统光标/)).toBeTruthy()
+    })
+  })
+
+  it('blocks export when flushPendingConfig rejects and shows error', async () => {
+    const exportCalls: string[] = []
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') {
+        return Promise.reject(new Error('本次素材已录入系统光标，无法叠加美化光标效果。请先关闭光标美化后重新录制。'))
+      }
+      if (command === 'export_video') {
+        exportCalls.push('export')
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    // Toggle smoothing to set pending config that will fail on flush.
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[1])
+
+    // Immediately click export before debounce fires.
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    // Export should NOT be called because config flush failed.
+    await vi.waitFor(() => {
+      expect(screen.getByText(/已录入系统光标/)).toBeTruthy()
+    })
+    expect(exportCalls).toEqual([])
+  })
+
+  it('stays on preview when handleBack flush fails and shows error', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') {
+        return Promise.reject(new Error('本次素材已录入系统光标，无法叠加美化光标效果。请先关闭光标美化后重新录制。'))
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    // Toggle cursor smoothing to set pending config that will fail on flush.
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[1])
+
+    // Immediately click "返回录制".
+    const backButton = screen.getByText('返回录制')
+    await act(async () => {
+      fireEvent.click(backButton)
+    })
+
+    // Should stay on preview and show error.
+    await vi.waitFor(() => {
+      expect(screen.getByText(/已录入系统光标/)).toBeTruthy()
+    })
+    // Still on preview page.
+    expect(screen.getByText('预览与美化')).toBeTruthy()
+  })
+
+  it('shows generic error when build_cursor_effect_timeline rejects with non-cursor-conflict error', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.reject(new Error('timeline build failed'))
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    // Toggle cursor smoothing to trigger config write + timeline build.
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[1])
+
+    // Generic error message should appear in the UI.
+    await vi.waitFor(() => {
+      expect(screen.getByText(/光标效果处理失败/)).toBeTruthy()
+    })
+  })
+
+  it('shows generic error when export_video rejects with non-cursor-conflict error', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'export_video') {
+        return Promise.reject(new Error('export encoding failed'))
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    // Click export.
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    // Generic export error should appear in the UI.
+    await vi.waitFor(() => {
+      expect(screen.getByText(/导出失败/)).toBeTruthy()
+    })
+  })
+
+  it('shows generic error when set_beautify_config rejects with non-cursor-conflict error during beautify change', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.reject(new Error('config write failed'))
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    // Toggle cursor smoothing to trigger config write.
+    const switches = screen.getAllByRole('switch')
+    fireEvent.click(switches[1])
+
+    // Generic error message should appear in the UI.
+    await vi.waitFor(() => {
+      expect(screen.getByText(/光标效果处理失败/)).toBeTruthy()
+    })
+  })
+
+  it('does not show error when stale cancelled build rejects after a successful build', async () => {
+    // Use deferred promises to control build resolution order.
+    // Each deferred promise is used once; staleBuildTests reuse the pattern.
+    const buildDeferreds = [
+      { resolve: null as unknown as (v: unknown) => void, reject: null as unknown as (r: unknown) => void, promise: null as unknown as Promise<unknown> },
+      { resolve: null as unknown as (v: unknown) => void, reject: null as unknown as (r: unknown) => void, promise: null as unknown as Promise<unknown> },
+    ]
+    for (const d of buildDeferreds) {
+      d.promise = new Promise((resolve, reject) => { d.resolve = resolve; d.reject = reject })
+      // Prevent unhandled rejection warnings in test runner.
+      d.promise.catch(() => {})
+    }
+    let buildCallCount = 0
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        return buildDeferreds[buildCallCount++].promise
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    const switches = screen.getAllByRole('switch')
+
+    // Trigger build A: click first switch, wait for 300ms debounce to fire.
+    fireEvent.click(switches[0])
+    await act(async () => { await new Promise(r => setTimeout(r, 350)) })
+    expect(buildCallCount).toBe(1)
+
+    // Trigger build B: click second switch, wait for its 300ms debounce to fire.
+    fireEvent.click(switches[1])
+    await act(async () => { await new Promise(r => setTimeout(r, 350)) })
+    expect(buildCallCount).toBe(2)
+
+    // Build B resolves first → clears error.
+    buildDeferreds[1].resolve(undefined)
+    await vi.waitFor(() => {
+      expect(screen.queryByText(/光标效果处理失败/)).toBeNull()
+    })
+
+    // Build A stale-cancels late → should not show error.
+    buildDeferreds[0].reject(new Error('光标美化配置已变更，构建已取消'))
+    await act(async () => {})
+    expect(screen.queryByText(/光标效果处理失败/)).toBeNull()
+  })
+
+  it('does not show error when stale build reject arrives after successful build (out-of-order)', async () => {
+    const buildADeferred = {
+      resolve: null as unknown as (v: unknown) => void,
+      reject: null as unknown as (r: unknown) => void,
+      promise: null as unknown as Promise<unknown>,
+    }
+    buildADeferred.promise = new Promise((resolve, reject) => {
+      buildADeferred.resolve = resolve
+      buildADeferred.reject = reject
+    })
+    // Prevent unhandled rejection warning in test runner.
+    buildADeferred.promise.catch(() => {})
+
+    let buildCallCount = 0
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        buildCallCount++
+        if (buildCallCount === 1) return buildADeferred.promise
+        return Promise.resolve()
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    const switches = screen.getAllByRole('switch')
+
+    // Trigger build A: click first switch, wait for 300ms debounce to fire.
+    fireEvent.click(switches[0])
+    await act(async () => { await new Promise(r => setTimeout(r, 350)) })
+    expect(buildCallCount).toBe(1)
+
+    // Trigger build B: click second switch, wait for its 300ms debounce to fire.
+    fireEvent.click(switches[1])
+    await act(async () => { await new Promise(r => setTimeout(r, 350)) })
+    expect(buildCallCount).toBe(2)
+
+    // Build B (Promise.resolve()) resolves first → clears error.
+    await vi.waitFor(() => {
+      expect(screen.queryByText(/光标效果处理失败/)).toBeNull()
+    })
+
+    // Build A's stale reject arrives late → should not overwrite success.
+    buildADeferred.reject(new Error('光标美化配置已变更，构建已取消'))
+    await act(async () => {})
+    expect(screen.queryByText(/光标效果处理失败/)).toBeNull()
+  })
+
+  it('clears beautifyError on successful export retry', async () => {
+    let exportCallCount = 0
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') return Promise.resolve()
+      if (command === 'export_video') {
+        exportCallCount++
+        if (exportCallCount === 1) return Promise.reject(new Error('export encoding failed'))
+        return Promise.resolve()
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    // First export fails.
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+    await vi.waitFor(() => {
+      expect(screen.getByText(/导出失败/)).toBeTruthy()
+    })
+
+    // Second export succeeds — error should be cleared.
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+    await vi.waitFor(() => {
+      expect(screen.queryByText(/导出失败/)).toBeNull()
+    })
+  })
 })
