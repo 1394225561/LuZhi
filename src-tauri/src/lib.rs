@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use app::events::{
-    CursorEffectSummaryPayload, MicLevelPayload, PermissionPayload, PostProcessProgressPayload,
-    RecordingStatusPayload,
+    CursorEffectSummaryPayload, CutTimelineSummaryPayload, MicLevelPayload, PermissionPayload,
+    PostProcessProgressPayload, RecordingStatusPayload,
 };
 use app::mic_level_runtime::MicLevelRuntime;
 #[cfg(not(target_os = "macos"))]
@@ -20,11 +20,14 @@ use app::recording_runtime::TickRuntime;
 use app::state_machine::RecordingState;
 use core::capture::AudioConfig;
 use core::config::CaptureConfig;
-use core::processor::CursorProcessor;
+use core::processor::{CursorProcessor, SilenceDetector};
 use core::timeline::{BeautifyConfigSnapshot, EffectTimeline};
+use core::cut::{TrimConfig, TrimSensitivity};
 use media::cursor_engine::{ClickAnimationConfig, CursorEffectEngine};
 use media::recording_metadata::{RecordingMetadata, RecordingMetadataWriter};
 use media::recording_writer::RecordingResult;
+use media::silence_detector::SilenceDetectorEngine;
+use media::trim_metadata::TrimMetadataWriter;
 #[cfg(target_os = "macos")]
 use platform::macos_service::MacRecordingService;
 #[cfg(not(target_os = "macos"))]
@@ -613,6 +616,136 @@ fn effect_timeline_path() -> PathBuf {
         .join(format!("cursor-effects-{millis}-{seq}.json"))
 }
 
+fn cut_timeline_path() -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    std::env::temp_dir()
+        .join("luzhi-recordings")
+        .join(format!("cut-timeline-{millis}-{seq}.json"))
+}
+
+#[tauri::command]
+async fn build_cut_timeline(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<CutTimelineSummaryPayload, String> {
+    {
+        let service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        if matches!(
+            service.state(),
+            RecordingState::Recording | RecordingState::Paused | RecordingState::Processing
+        ) {
+            return Err("录制进行中，无法构建裁剪时间线。请先停止录制。".to_string());
+        }
+    }
+
+    let trim_metadata_path = {
+        let service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        service
+            .last_trim_metadata_path()
+            .ok_or_else(|| "没有可用的裁剪元数据，请先完成一次录制".to_string())?
+    };
+
+    let config = state
+        .beautify_config
+        .lock()
+        .map_err(|_| "美化配置锁已损坏".to_string())?
+        .clone();
+    let sensitivity = TrimSensitivity::from_str(config.trim_sensitivity.as_str())?;
+    let trim_config = TrimConfig::from_sensitivity(sensitivity);
+
+    let _ = app.emit(
+        "post-process-progress",
+        PostProcessProgressPayload {
+            stage: "trim",
+            progress: 0,
+            error: None,
+        },
+    );
+
+    let app_for_blocking = app.clone();
+    let join_result = tauri::async_runtime::spawn_blocking(move || {
+        let metadata = TrimMetadataWriter::read_metadata(
+            PathBuf::from(&trim_metadata_path).as_path(),
+        )
+        .map_err(|error| error.to_string())?;
+        let detector = SilenceDetectorEngine::new(trim_config);
+        let timeline = detector
+            .analyze(
+                &metadata.audio_activity,
+                &metadata.visual_activity,
+                metadata.duration_nanos,
+            )
+            .map_err(|error| error.to_string())?;
+        let path = cut_timeline_path();
+        TrimMetadataWriter::write_cut_timeline(&path, &timeline)
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((path, timeline))
+    })
+    .await;
+
+    let (path, timeline) = match join_result {
+        Ok(Ok(inner)) => inner,
+        Ok(Err(error)) => {
+            let _ = app_for_blocking.emit(
+                "post-process-progress",
+                PostProcessProgressPayload {
+                    stage: "trim",
+                    progress: 0,
+                    error: Some(format!("裁剪时间线构建失败: {error}")),
+                },
+            );
+            return Err(error);
+        }
+        Err(join_error) => {
+            let msg = format!("裁剪时间线构建任务失败: {join_error}");
+            let _ = app_for_blocking.emit(
+                "post-process-progress",
+                PostProcessProgressPayload {
+                    stage: "trim",
+                    progress: 0,
+                    error: Some(msg.clone()),
+                },
+            );
+            return Err(msg);
+        }
+    };
+
+    {
+        let mut service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        service.set_last_cut_timeline_path(Some(path.to_string_lossy().to_string()));
+    }
+
+    let _ = app_for_blocking.emit(
+        "post-process-progress",
+        PostProcessProgressPayload {
+            stage: "trim",
+            progress: 100,
+            error: None,
+        },
+    );
+
+    Ok(CutTimelineSummaryPayload {
+        cut_count: timeline.cuts.len(),
+        total_cut_nanos: timeline.total_cut_nanos,
+        cut_timeline_path: path.to_string_lossy().to_string(),
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
@@ -630,6 +763,7 @@ pub fn run() -> tauri::Result<()> {
             set_beautify_config,
             get_beautify_config,
             build_cursor_effect_timeline,
+            build_cut_timeline,
             export_video
         ])
         .run(tauri::generate_context!())?;

@@ -40,6 +40,9 @@ pub enum AppError {
     CursorProcessingFailed {
         reason: String,
     },
+    TrimProcessingFailed {
+        reason: String,
+    },
 }
 
 impl Display for AppError {
@@ -78,6 +81,9 @@ impl Display for AppError {
             AppError::CursorProcessingFailed { reason } => {
                 write!(formatter, "光标效果处理失败：{reason}")
             }
+            AppError::TrimProcessingFailed { reason } => {
+                write!(formatter, "空白裁剪处理失败：{reason}")
+            }
         }
     }
 }
@@ -95,5 +101,14 @@ mod tests {
         };
 
         assert_eq!(error.to_string(), "缺少系统权限：屏幕录制");
+    }
+
+    #[test]
+    fn trim_processing_error_uses_chinese_message() {
+        let error = AppError::TrimProcessingFailed {
+            reason: "没有裁剪元数据".to_string(),
+        };
+
+        assert_eq!(error.to_string(), "空白裁剪处理失败：没有裁剪元数据");
     }
 }

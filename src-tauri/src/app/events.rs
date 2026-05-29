@@ -76,6 +76,28 @@ pub struct CursorEffectSummaryPayload {
     pub effect_timeline_path: String,
 }
 
+/// Summary returned after building a cut timeline.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CutTimelineSummaryPayload {
+    pub cut_count: usize,
+    pub total_cut_nanos: u64,
+    pub cut_timeline_path: String,
+}
+
+/// Summary returned after export command prepares all Phase 4/5 timelines.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSummaryPayload {
+    pub frame_count: usize,
+    pub click_effect_count: usize,
+    pub effect_timeline_path: String,
+    pub cut_count: usize,
+    pub total_cut_nanos: u64,
+    pub cut_timeline_path: Option<String>,
+    pub output_path: Option<String>,
+}
+
 /// Lightweight post-processing progress payload.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,5 +179,42 @@ mod tests {
         let json = serde_json::to_string(&payload).unwrap();
 
         assert!(json.contains("\"error\":\"构建失败\""));
+    }
+
+    #[test]
+    fn cut_timeline_summary_serializes_camel_case() {
+        let payload = CutTimelineSummaryPayload {
+            cut_count: 2,
+            total_cut_nanos: 3_000_000_000,
+            cut_timeline_path: "/tmp/cuts.json".to_string(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+
+        assert!(json.contains("\"cutCount\":2"));
+        assert!(json.contains("\"totalCutNanos\":3000000000"));
+        assert!(json.contains("\"cutTimelinePath\":\"/tmp/cuts.json\""));
+    }
+
+    #[test]
+    fn export_summary_serializes_camel_case() {
+        let payload = ExportSummaryPayload {
+            frame_count: 10,
+            click_effect_count: 1,
+            effect_timeline_path: "/tmp/effects.json".to_string(),
+            cut_count: 2,
+            total_cut_nanos: 3_000_000_000,
+            cut_timeline_path: Some("/tmp/cuts.json".to_string()),
+            output_path: None,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+
+        assert!(json.contains("\"frameCount\":10"));
+        assert!(json.contains("\"clickEffectCount\":1"));
+        assert!(json.contains("\"cutCount\":2"));
+        assert!(json.contains("\"totalCutNanos\":3000000000"));
+        assert!(json.contains("\"cutTimelinePath\":\"/tmp/cuts.json\""));
+        assert!(json.contains("\"outputPath\":null"));
     }
 }
