@@ -13,6 +13,16 @@ pub struct TrimMetadata {
     pub duration_nanos: u64,
     pub audio_activity: Vec<AudioActivitySample>,
     pub visual_activity: Vec<FrameDiffSample>,
+    /// Number of audio activity samples dropped due to cap overflow.
+    #[serde(default)]
+    pub audio_activity_dropped_count: u64,
+    /// Number of visual activity samples dropped due to cap overflow.
+    #[serde(default)]
+    pub visual_activity_dropped_count: u64,
+    /// Whether activity sampling was truncated due to cap overflow.
+    /// When true, cut timeline analysis may not cover the full recording.
+    #[serde(default)]
+    pub activity_truncated: bool,
 }
 
 /// JSON sidecar reader/writer for trim metadata and cut timelines.
@@ -36,10 +46,10 @@ impl TrimMetadataWriter {
     }
 
     pub fn read_metadata(path: &Path) -> AppResult<TrimMetadata> {
-        let json = fs::read_to_string(path).map_err(|error| AppError::RecordingWriteFailed {
+        let json = fs::read_to_string(path).map_err(|error| AppError::TrimProcessingFailed {
             reason: format!("读取裁剪元数据失败: {error}"),
         })?;
-        serde_json::from_str(&json).map_err(|error| AppError::RecordingWriteFailed {
+        serde_json::from_str(&json).map_err(|error| AppError::TrimProcessingFailed {
             reason: format!("解析裁剪元数据失败: {error}"),
         })
     }
@@ -61,10 +71,10 @@ impl TrimMetadataWriter {
     }
 
     pub fn read_cut_timeline(path: &Path) -> AppResult<CutTimeline> {
-        let json = fs::read_to_string(path).map_err(|error| AppError::RecordingWriteFailed {
+        let json = fs::read_to_string(path).map_err(|error| AppError::TrimProcessingFailed {
             reason: format!("读取裁剪时间线失败: {error}"),
         })?;
-        serde_json::from_str(&json).map_err(|error| AppError::RecordingWriteFailed {
+        serde_json::from_str(&json).map_err(|error| AppError::TrimProcessingFailed {
             reason: format!("解析裁剪时间线失败: {error}"),
         })
     }
@@ -90,12 +100,43 @@ mod tests {
                 end: MediaTimestamp::from_nanos(33_333_333),
                 change_ratio: 0.002,
             }],
+            audio_activity_dropped_count: 0,
+            visual_activity_dropped_count: 0,
+            activity_truncated: false,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
         let parsed: TrimMetadata = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed, metadata);
+    }
+
+    #[test]
+    fn trim_metadata_truncation_fields_serialize() {
+        let metadata = TrimMetadata {
+            duration_nanos: 10_000_000_000,
+            audio_activity: Vec::new(),
+            visual_activity: Vec::new(),
+            audio_activity_dropped_count: 42,
+            visual_activity_dropped_count: 7,
+            activity_truncated: true,
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(json.contains("\"audioActivityDroppedCount\":42"));
+        assert!(json.contains("\"visualActivityDroppedCount\":7"));
+        assert!(json.contains("\"activityTruncated\":true"));
+    }
+
+    #[test]
+    fn trim_metadata_truncation_fields_default_when_missing() {
+        // Simulates reading a legacy sidecar without truncation fields.
+        let json = r#"{"durationNanos":1000,"audioActivity":[],"visualActivity":[]}"#;
+        let parsed: TrimMetadata = serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed.audio_activity_dropped_count, 0);
+        assert_eq!(parsed.visual_activity_dropped_count, 0);
+        assert!(!parsed.activity_truncated);
     }
 
     #[test]

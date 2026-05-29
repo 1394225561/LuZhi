@@ -7,11 +7,11 @@
 ## Verification Summary (2026-05-29, Phase 5)
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: PASS
-- `cargo test --manifest-path src-tauri/Cargo.toml`: PASS, 149 tests
-- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS, 21 pre-existing SCK FFI warnings
+- `cargo test --manifest-path src-tauri/Cargo.toml`: PASS, 179 tests
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets`: PASS
 - `cargo build --manifest-path src-tauri/Cargo.toml`: PASS
 - `npm run build`: PASS
-- `npm test -- --run`: PASS, 44 tests
+- `npm test -- --run`: PASS, 46 tests
 
 ## 音频 RMS 验证
 

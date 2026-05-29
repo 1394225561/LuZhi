@@ -218,6 +218,7 @@ unsafe fn handle_video_frame(delegate: &StreamOutput, sample_buffer: &CMSampleBu
         timestamp,
         width: width as u32,
         height: height as u32,
+        stride_bytes: bytes_per_row,
         pixel_format: PixelFormat::Bgra8,
         buffer: FrameBuffer::Owned(buffer),
     };

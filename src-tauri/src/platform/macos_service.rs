@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -28,6 +29,8 @@ use crate::media::trim_metadata::{TrimMetadata, TrimMetadataWriter};
 struct RecordingConsumerOutput {
     result: RecordingResult,
     trim_metadata: TrimMetadata,
+    /// Errors collected during consumer thread execution (writer push/finish failures).
+    errors: Vec<String>,
 }
 
 /// Non-generic recording service for macOS.
@@ -183,6 +186,9 @@ impl MacRecordingService {
             self.mic_receiver = Some(mic_receiver);
         }
 
+        // Extract trim sensitivity before moving beautify_snapshot into cursor runtime.
+        let trim_sensitivity = beautify_snapshot.trim_sensitivity.clone();
+
         // Start cursor metadata runtime for cursor effects.
         self.cursor_runtime = Some(CursorMetadataRuntime::spawn(
             MacCursorSource::new(),
@@ -212,6 +218,7 @@ impl MacRecordingService {
                 frame_count,
                 writer,
                 mic_level,
+                &trim_sensitivity,
             )
         }));
 
@@ -262,14 +269,28 @@ impl MacRecordingService {
                 duration_nanos: 0,
                 audio_activity: Vec::new(),
                 visual_activity: Vec::new(),
+                audio_activity_dropped_count: 0,
+                visual_activity_dropped_count: 0,
+                activity_truncated: false,
             },
+            errors: Vec::new(),
         };
-        let consumer_output = if let Some(handle) = self.consumer_handle.take() {
-            handle.join().unwrap_or(empty_output)
+        let (consumer_output, consumer_panicked) = if let Some(handle) = self.consumer_handle.take()
+        {
+            match handle.join() {
+                Ok(output) => (output, false),
+                Err(panic) => {
+                    let msg = extract_panic_message(panic);
+                    eprintln!("录制消费线程异常终止: {msg}");
+                    errors.push(format!("录制消费线程异常终止: {msg}"));
+                    (empty_output, true)
+                }
+            }
         } else {
-            empty_output
+            (empty_output, false)
         };
         let mut result = consumer_output.result;
+        errors.extend(consumer_output.errors);
 
         self.stop_flag = None;
 
@@ -293,7 +314,10 @@ impl MacRecordingService {
         self.last_cursor_metadata_path = cursor_metadata_path;
 
         // Write trim metadata sidecar for post-recording silence detection.
-        let trim_metadata_path = {
+        // Skip when consumer panicked — the metadata would be empty/misleading.
+        let trim_metadata_path = if consumer_panicked {
+            None
+        } else {
             let path = trim_metadata_path();
             match TrimMetadataWriter::write_metadata(&path, &consumer_output.trim_metadata) {
                 Ok(()) => Some(path.to_string_lossy().to_string()),
@@ -347,7 +371,8 @@ impl MacRecordingService {
     }
 
     /// Background thread that drains video and audio channels to prevent blocking.
-    fn consume_frames(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn consume_frames(
         stop_flag: Arc<AtomicBool>,
         video_rx: MediaReceiver<VideoFrameRef>,
         system_audio_rx: MediaReceiver<AudioChunk>,
@@ -355,19 +380,34 @@ impl MacRecordingService {
         frame_count: Arc<std::sync::atomic::AtomicU64>,
         mut writer: Box<dyn RecordingWriter>,
         mic_level: Arc<Mutex<f64>>,
+        trim_sensitivity_str: &str,
     ) -> RecordingConsumerOutput {
         let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
         let mut mic_detector = MicLevelDetector::new(4096); // ~85ms 窗口 @ 48kHz
 
         // Trim metadata collectors — low-cost activity samples for post-recording
         // silence detection. Computed in the consumer thread, never sent to React.
-        let rms_analyzer = AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(
-            crate::core::cut::TrimSensitivity::Medium,
-        ));
+        // Use the user-configured sensitivity so the RMS window matches what
+        // Preview shows (500ms for High, 750ms for Medium, 1000ms for Low).
+        let sensitivity = crate::core::cut::TrimSensitivity::from_str(trim_sensitivity_str)
+            .unwrap_or(crate::core::cut::TrimSensitivity::Medium);
+        let mut rms_analyzer = AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(sensitivity));
         let frame_diff_analyzer = FrameDiffAnalyzer::new(64, 36);
-        let mut previous_frame: Option<crate::core::frame::VideoFrame> = None;
+        // Low-frequency visual sampling: ~4fps to avoid per-frame diff cost.
+        const VISUAL_SAMPLE_INTERVAL_NANOS: u64 = 250_000_000;
+        // Safety caps to prevent unbounded memory growth during very long recordings.
+        const MAX_VISUAL_SAMPLES: usize = 144_000; // ~10h @ 4fps
+        const MAX_AUDIO_SAMPLES: usize = 72_000; // ~10h @ 2/sec (750ms window)
+        let mut previous_sampled_frame: Option<crate::core::frame::VideoFrame> = None;
+        let mut last_visual_sample_nanos: u64 = 0;
         let mut visual_activity = Vec::new();
         let mut audio_activity = Vec::new();
+        let mut visual_dropped: u64 = 0;
+        let mut audio_dropped: u64 = 0;
+        // Tracks the latest observed media timestamp independent of sample caps,
+        // so duration_nanos remains accurate even after MAX_*_SAMPLES is reached.
+        let mut latest_observed_media_nanos: u64 = 0;
+        let mut errors: Vec<String> = Vec::new();
 
         loop {
             if stop_flag.load(Ordering::Relaxed) {
@@ -377,15 +417,34 @@ impl MacRecordingService {
             // Drain video frames (non-blocking).
             while let Ok(frame) = video_rx.try_recv() {
                 frame_count.fetch_add(1, Ordering::Relaxed);
-                // Collect frame-diff samples for trim metadata.
-                if let Some(ref previous) = previous_frame {
-                    if let Ok(diff) = frame_diff_analyzer.diff_pair(previous, &frame) {
-                        visual_activity.push(diff);
+
+                // Low-frequency frame-diff sampling: only diff when enough
+                // time has elapsed since the last visual sample. This avoids
+                // running expensive thumbnail+diff on every 30fps frame.
+                let frame_nanos = frame.timestamp.nanos;
+                latest_observed_media_nanos = latest_observed_media_nanos.max(frame_nanos);
+                if frame_nanos.saturating_sub(last_visual_sample_nanos)
+                    >= VISUAL_SAMPLE_INTERVAL_NANOS
+                {
+                    if let Some(ref previous) = previous_sampled_frame {
+                        if let Ok(diff) = frame_diff_analyzer.diff_pair(previous, &frame) {
+                            if !push_bounded_visual_sample(
+                                &mut visual_activity,
+                                diff,
+                                MAX_VISUAL_SAMPLES,
+                            ) {
+                                visual_dropped += 1;
+                            }
+                        }
                     }
+                    previous_sampled_frame = Some((*frame).clone());
+                    last_visual_sample_nanos = frame_nanos;
                 }
-                previous_frame = Some((*frame).clone());
+
                 if let Err(e) = writer.push_video(frame) {
-                    eprintln!("写入视频帧失败: {e}");
+                    let msg = format!("写入视频帧失败: {e}");
+                    eprintln!("{msg}");
+                    errors.push(msg);
                 }
             }
 
@@ -410,9 +469,23 @@ impl MacRecordingService {
             for mixed_result in synchronizer.drain_mixed() {
                 match mixed_result {
                     Ok(mixed) => {
-                        // Collect audio RMS samples for trim metadata.
-                        let samples = rms_analyzer.analyze_chunks(std::slice::from_ref(&mixed));
-                        audio_activity.extend(samples);
+                        // Track audio duration independent of sample caps.
+                        let chunk_frames =
+                            mixed.samples.len() as u64 / mixed.channels.max(1) as u64;
+                        let chunk_nanos = chunk_frames.saturating_mul(1_000_000_000)
+                            / mixed.sample_rate.max(1) as u64;
+                        latest_observed_media_nanos = latest_observed_media_nanos
+                            .max(mixed.timestamp.nanos.saturating_add(chunk_nanos));
+                        // Collect windowed audio RMS samples for trim metadata.
+                        for sample in rms_analyzer.push_chunk(&mixed) {
+                            if !push_bounded_audio_sample(
+                                &mut audio_activity,
+                                sample,
+                                MAX_AUDIO_SAMPLES,
+                            ) {
+                                audio_dropped += 1;
+                            }
+                        }
                         if let Err(e) = writer.push_audio(mixed) {
                             eprintln!("写入混音音频失败: {e}");
                         }
@@ -428,14 +501,28 @@ impl MacRecordingService {
         // before finalizing the writer.
         while let Ok(frame) = video_rx.try_recv() {
             frame_count.fetch_add(1, Ordering::Relaxed);
-            if let Some(ref previous) = previous_frame {
-                if let Ok(diff) = frame_diff_analyzer.diff_pair(previous, &frame) {
-                    visual_activity.push(diff);
+            let frame_nanos = frame.timestamp.nanos;
+            latest_observed_media_nanos = latest_observed_media_nanos.max(frame_nanos);
+            if frame_nanos.saturating_sub(last_visual_sample_nanos) >= VISUAL_SAMPLE_INTERVAL_NANOS
+            {
+                if let Some(ref previous) = previous_sampled_frame {
+                    if let Ok(diff) = frame_diff_analyzer.diff_pair(previous, &frame) {
+                        if !push_bounded_visual_sample(
+                            &mut visual_activity,
+                            diff,
+                            MAX_VISUAL_SAMPLES,
+                        ) {
+                            visual_dropped += 1;
+                        }
+                    }
                 }
+                previous_sampled_frame = Some((*frame).clone());
+                last_visual_sample_nanos = frame_nanos;
             }
-            previous_frame = Some((*frame).clone());
             if let Err(e) = writer.push_video(frame) {
-                eprintln!("写入视频帧失败: {e}");
+                let msg = format!("写入视频帧失败: {e}");
+                eprintln!("{msg}");
+                errors.push(msg);
             }
         }
 
@@ -452,34 +539,78 @@ impl MacRecordingService {
         for mixed_result in synchronizer.drain_mixed() {
             match mixed_result {
                 Ok(mixed) => {
-                    let samples = rms_analyzer.analyze_chunks(std::slice::from_ref(&mixed));
-                    audio_activity.extend(samples);
+                    let chunk_frames = mixed.samples.len() as u64 / mixed.channels.max(1) as u64;
+                    let chunk_nanos = chunk_frames.saturating_mul(1_000_000_000)
+                        / mixed.sample_rate.max(1) as u64;
+                    latest_observed_media_nanos = latest_observed_media_nanos
+                        .max(mixed.timestamp.nanos.saturating_add(chunk_nanos));
+                    for sample in rms_analyzer.push_chunk(&mixed) {
+                        if !push_bounded_audio_sample(
+                            &mut audio_activity,
+                            sample,
+                            MAX_AUDIO_SAMPLES,
+                        ) {
+                            audio_dropped += 1;
+                        }
+                    }
                     if let Err(e) = writer.push_audio(mixed) {
-                        eprintln!("写入混音音频失败: {e}");
+                        let msg = format!("写入混音音频失败: {e}");
+                        eprintln!("{msg}");
+                        errors.push(msg);
                     }
                 }
                 Err(e) => eprintln!("音频混合失败: {e}"),
             }
         }
 
-        let result = writer.finish().unwrap_or(RecordingResult {
-            duration_secs: 0,
-            frame_count: 0,
-            mixed_audio_chunk_count: 0,
-            output_path: None,
-            cursor_metadata_path: None,
-            effect_timeline_path: None,
-            trim_metadata_path: None,
-            cut_timeline_path: None,
-        });
-        let duration_nanos = result.duration_secs.saturating_mul(1_000_000_000);
+        // Flush remaining audio samples from the windowed RMS aggregator.
+        if let Some(sample) = rms_analyzer.flush() {
+            if !push_bounded_audio_sample(&mut audio_activity, sample, MAX_AUDIO_SAMPLES) {
+                audio_dropped += 1;
+            }
+        }
+
+        let result = match writer.finish() {
+            Ok(result) => result,
+            Err(e) => {
+                let msg = format!("录制写入器完成失败: {e}");
+                eprintln!("{msg}");
+                errors.push(msg);
+                RecordingResult {
+                    duration_secs: 0,
+                    frame_count: 0,
+                    mixed_audio_chunk_count: 0,
+                    output_path: None,
+                    cursor_metadata_path: None,
+                    effect_timeline_path: None,
+                    trim_metadata_path: None,
+                    cut_timeline_path: None,
+                }
+            }
+        };
+
+        // Writer duration may be 0 when using CountingRecordingWriter (no
+        // production encoder yet). Fall back to the latest observed media
+        // timestamp so the trim metadata always carries a usable duration.
+        // This is tracked independently of the capped activity Vecs, so
+        // duration remains accurate even after MAX_*_SAMPLES is reached.
+        let writer_duration_nanos = result.duration_secs.saturating_mul(1_000_000_000);
+        let duration_nanos =
+            choose_duration_nanos(writer_duration_nanos, latest_observed_media_nanos);
+
+        let activity_truncated = audio_dropped > 0 || visual_dropped > 0;
+
         RecordingConsumerOutput {
             result,
             trim_metadata: TrimMetadata {
                 duration_nanos,
                 audio_activity,
                 visual_activity,
+                audio_activity_dropped_count: audio_dropped,
+                visual_activity_dropped_count: visual_dropped,
+                activity_truncated,
             },
+            errors,
         }
     }
 }
@@ -487,6 +618,57 @@ impl MacRecordingService {
 impl Default for MacRecordingService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Pushes an audio sample into the bounded Vec, dropping it if at capacity.
+/// Returns `true` if the sample was pushed, `false` if dropped.
+fn push_bounded_audio_sample(
+    samples: &mut Vec<crate::core::cut::AudioActivitySample>,
+    sample: crate::core::cut::AudioActivitySample,
+    max: usize,
+) -> bool {
+    if samples.len() < max {
+        samples.push(sample);
+        true
+    } else {
+        false
+    }
+}
+
+/// Pushes a visual sample into the bounded Vec, dropping it if at capacity.
+/// Returns `true` if the sample was pushed, `false` if dropped.
+fn push_bounded_visual_sample(
+    samples: &mut Vec<crate::core::cut::FrameDiffSample>,
+    sample: crate::core::cut::FrameDiffSample,
+    max: usize,
+) -> bool {
+    if samples.len() < max {
+        samples.push(sample);
+        true
+    } else {
+        false
+    }
+}
+
+/// Chooses the effective trim metadata duration: prefer writer duration when
+/// available, otherwise fall back to the latest observed media timestamp.
+fn choose_duration_nanos(writer_duration_nanos: u64, latest_observed_media_nanos: u64) -> u64 {
+    if writer_duration_nanos > 0 {
+        writer_duration_nanos
+    } else {
+        latest_observed_media_nanos
+    }
+}
+
+/// Extracts a human-readable message from a panic payload.
+fn extract_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
@@ -514,4 +696,342 @@ fn trim_metadata_path() -> PathBuf {
     std::env::temp_dir()
         .join("luzhi-recordings")
         .join(format!("trim-metadata-{millis}-{seq}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+    use crate::core::cut::{AudioActivitySample, FrameDiffSample};
+    use crate::core::frame::MediaTimestamp;
+
+    #[test]
+    fn duration_fallback_uses_latest_media_timestamp() {
+        assert_eq!(choose_duration_nanos(0, 90_000_000_000), 90_000_000_000);
+    }
+
+    #[test]
+    fn duration_prefers_writer_when_nonzero() {
+        assert_eq!(
+            choose_duration_nanos(120_000_000_000, 90_000_000_000),
+            120_000_000_000
+        );
+    }
+
+    #[test]
+    fn duration_uses_latest_media_after_sample_cap() {
+        // Simulates: cap reached at 60s, but recording continued to 120s.
+        // latest_observed_media_nanos tracks independently of capped Vec.
+        let capped_activity_last_end = 60_000_000_000u64;
+        let latest_observed_media_nanos = 120_000_000_000u64;
+        let writer_duration_nanos = 0u64;
+
+        // Duration must be the latest observed, not the capped Vec's last end.
+        let duration = choose_duration_nanos(writer_duration_nanos, latest_observed_media_nanos);
+        assert_eq!(duration, 120_000_000_000);
+        assert!(duration > capped_activity_last_end);
+    }
+
+    #[test]
+    fn bounded_audio_push_accepts_until_cap() {
+        let mut samples = Vec::new();
+        let max = 3;
+
+        let sample = AudioActivitySample {
+            start: MediaTimestamp::from_nanos(0),
+            end: MediaTimestamp::from_nanos(100_000_000),
+            rms: 0.01,
+        };
+
+        assert!(push_bounded_audio_sample(&mut samples, sample, max));
+        assert!(push_bounded_audio_sample(&mut samples, sample, max));
+        assert!(push_bounded_audio_sample(&mut samples, sample, max));
+        assert_eq!(samples.len(), 3);
+
+        // Fourth push should be dropped.
+        assert!(!push_bounded_audio_sample(&mut samples, sample, max));
+        assert_eq!(samples.len(), 3);
+    }
+
+    #[test]
+    fn bounded_visual_push_accepts_until_cap() {
+        let mut samples = Vec::new();
+        let max = 2;
+
+        let sample = FrameDiffSample {
+            start: MediaTimestamp::from_nanos(0),
+            end: MediaTimestamp::from_nanos(100_000_000),
+            change_ratio: 0.001,
+        };
+
+        assert!(push_bounded_visual_sample(&mut samples, sample, max));
+        assert!(push_bounded_visual_sample(&mut samples, sample, max));
+        assert_eq!(samples.len(), 2);
+
+        // Third push should be dropped.
+        assert!(!push_bounded_visual_sample(&mut samples, sample, max));
+        assert_eq!(samples.len(), 2);
+    }
+
+    #[test]
+    fn final_audio_drain_respects_metadata_cap() {
+        // Simulates: activity Vec already at cap, final drain produces a sample.
+        let mut audio_activity = Vec::new();
+        let max = 2;
+
+        // Fill to cap.
+        for i in 0..max {
+            let sample = AudioActivitySample {
+                start: MediaTimestamp::from_nanos(i as u64 * 100_000_000),
+                end: MediaTimestamp::from_nanos((i as u64 + 1) * 100_000_000),
+                rms: 0.01,
+            };
+            push_bounded_audio_sample(&mut audio_activity, sample, max);
+        }
+        assert_eq!(audio_activity.len(), max);
+
+        // Final drain sample should be dropped.
+        let final_sample = AudioActivitySample {
+            start: MediaTimestamp::from_nanos(max as u64 * 100_000_000),
+            end: MediaTimestamp::from_nanos((max as u64 + 1) * 100_000_000),
+            rms: 0.005,
+        };
+        let pushed = push_bounded_audio_sample(&mut audio_activity, final_sample, max);
+        assert!(!pushed);
+        assert_eq!(audio_activity.len(), max);
+    }
+
+    /// Validates that the trim sensitivity string from BeautifyConfigSnapshot
+    /// is correctly parsed into TrimSensitivity and used for RMS window config.
+    #[test]
+    fn recording_trim_config_uses_beautify_snapshot_sensitivity() {
+        use crate::core::cut::{TrimConfig, TrimSensitivity};
+
+        let high = TrimSensitivity::from_str("high").unwrap();
+        let low = TrimSensitivity::from_str("low").unwrap();
+
+        assert_eq!(
+            TrimConfig::from_sensitivity(high).rms_window_nanos,
+            500_000_000
+        );
+        assert_eq!(
+            TrimConfig::from_sensitivity(low).rms_window_nanos,
+            1_000_000_000
+        );
+
+        // Invalid string falls back to Medium.
+        let fallback = TrimSensitivity::from_str("invalid").unwrap_or(TrimSensitivity::Medium);
+        assert_eq!(
+            TrimConfig::from_sensitivity(fallback).rms_window_nanos,
+            750_000_000
+        );
+    }
+
+    #[test]
+    fn extract_panic_message_handles_str_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("test panic");
+        assert_eq!(extract_panic_message(payload), "test panic");
+    }
+
+    #[test]
+    fn extract_panic_message_handles_string_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("owned panic msg".to_string());
+        assert_eq!(extract_panic_message(payload), "owned panic msg");
+    }
+
+    #[test]
+    fn extract_panic_message_handles_unknown_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42u32);
+        assert_eq!(extract_panic_message(payload), "unknown panic");
+    }
+
+    /// Verifies that consumer errors propagate into the error aggregation
+    /// used by `stop()` to determine success vs failure.
+    #[test]
+    fn consumer_errors_merge_into_stop_errors() {
+        use crate::media::recording_writer::RecordingResult;
+        use crate::media::trim_metadata::TrimMetadata;
+
+        let consumer_output = RecordingConsumerOutput {
+            result: RecordingResult {
+                duration_secs: 0,
+                frame_count: 0,
+                mixed_audio_chunk_count: 0,
+                output_path: None,
+                cursor_metadata_path: None,
+                effect_timeline_path: None,
+                trim_metadata_path: None,
+                cut_timeline_path: None,
+            },
+            trim_metadata: TrimMetadata {
+                duration_nanos: 0,
+                audio_activity: Vec::new(),
+                visual_activity: Vec::new(),
+                audio_activity_dropped_count: 0,
+                visual_activity_dropped_count: 0,
+                activity_truncated: false,
+            },
+            errors: vec![
+                "写入视频帧失败: fake".to_string(),
+                "录制写入器完成失败: fake".to_string(),
+            ],
+        };
+
+        let mut errors: Vec<String> = Vec::new();
+        errors.extend(consumer_output.errors);
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("写入视频帧失败"));
+        assert!(errors[1].contains("录制写入器完成失败"));
+    }
+
+    /// Verifies that a failing writer's errors propagate through
+    /// `consume_frames()` into the returned `RecordingConsumerOutput`.
+    #[test]
+    fn consume_frames_writer_finish_failure_records_error() {
+        use crate::core::cut::TrimConfig;
+        use crate::media::recording_writer::FailingRecordingWriter;
+
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1);
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(1);
+        let stop_flag = Arc::new(AtomicBool::new(true)); // immediate stop
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        // Writer that only fails on finish.
+        let writer: Box<dyn RecordingWriter> =
+            Box::new(FailingRecordingWriter::new(false, false, true));
+
+        // Drop senders so the channel drains immediately.
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+        );
+
+        assert!(
+            output
+                .errors
+                .iter()
+                .any(|e| e.contains("录制写入器完成失败")),
+            "expected finish error in consumer output, got: {:?}",
+            output.errors
+        );
+    }
+
+    /// Verifies that writer push errors are collected even when the
+    /// consumer processes frames before stopping.
+    #[test]
+    fn consume_frames_writer_push_video_failure_records_error() {
+        use crate::core::frame::{FrameBuffer, PixelFormat, VideoFrame};
+        use crate::media::recording_writer::FailingRecordingWriter;
+
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(2);
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(1);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        // Send one video frame before stopping.
+        let frame = Arc::new(VideoFrame {
+            timestamp: MediaTimestamp::from_nanos(0),
+            width: 2,
+            height: 2,
+            stride_bytes: 8,
+            pixel_format: PixelFormat::Bgra8,
+            buffer: FrameBuffer::Owned(Arc::from(vec![0u8; 16].into_boxed_slice())),
+        });
+        assert!(video_tx.try_send_drop_newest(frame));
+
+        // Writer that fails on push_video.
+        let writer: Box<dyn RecordingWriter> =
+            Box::new(FailingRecordingWriter::new(true, false, false));
+
+        // Drop senders so the channel drains.
+        drop(video_tx);
+        drop(audio_tx);
+
+        // Use a separate thread to set stop_flag after a brief delay,
+        // giving the consumer time to process the queued frame.
+        let flag_clone = stop_flag.clone();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            flag_clone.store(true, Ordering::Relaxed);
+        });
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+        );
+
+        stopper.join().unwrap();
+
+        assert!(
+            output.errors.iter().any(|e| e.contains("写入视频帧失败")),
+            "expected push_video error in consumer output, got: {:?}",
+            output.errors
+        );
+    }
+
+    /// Verifies that bounded push helpers track drop counts correctly.
+    #[test]
+    fn bounded_push_tracks_dropped_samples() {
+        let mut audio = Vec::new();
+        let mut visual = Vec::new();
+        let mut audio_dropped: u64 = 0;
+        let mut visual_dropped: u64 = 0;
+        let max = 2;
+
+        // Fill to cap.
+        for i in 0..max {
+            let a = AudioActivitySample {
+                start: MediaTimestamp::from_nanos(i as u64 * 100_000_000),
+                end: MediaTimestamp::from_nanos((i as u64 + 1) * 100_000_000),
+                rms: 0.01,
+            };
+            let v = FrameDiffSample {
+                start: MediaTimestamp::from_nanos(i as u64 * 100_000_000),
+                end: MediaTimestamp::from_nanos((i as u64 + 1) * 100_000_000),
+                change_ratio: 0.001,
+            };
+            assert!(push_bounded_audio_sample(&mut audio, a, max));
+            assert!(push_bounded_visual_sample(&mut visual, v, max));
+        }
+
+        // These should be dropped.
+        let a_overflow = AudioActivitySample {
+            start: MediaTimestamp::from_nanos(200_000_000),
+            end: MediaTimestamp::from_nanos(300_000_000),
+            rms: 0.02,
+        };
+        let v_overflow = FrameDiffSample {
+            start: MediaTimestamp::from_nanos(200_000_000),
+            end: MediaTimestamp::from_nanos(300_000_000),
+            change_ratio: 0.005,
+        };
+        if !push_bounded_audio_sample(&mut audio, a_overflow, max) {
+            audio_dropped += 1;
+        }
+        if !push_bounded_visual_sample(&mut visual, v_overflow, max) {
+            visual_dropped += 1;
+        }
+
+        assert_eq!(audio_dropped, 1);
+        assert_eq!(visual_dropped, 1);
+        assert!(audio_dropped > 0 || visual_dropped > 0);
+    }
 }

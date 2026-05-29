@@ -31,6 +31,7 @@ import {
   setBeautifyConfig,
   type BeautifyConfig,
   type ExportPreset,
+  type ExportSummary,
   type RecordingResult,
 } from '@/lib/tauri'
 
@@ -69,6 +70,7 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   const [cursorSmoothing, setCursorSmoothing] = useState(true)
   const [autoTrimSilences, setAutoTrimSilences] = useState(false)
   const [trimSensitivity, setTrimSensitivity] = useState<'low' | 'medium' | 'high'>('medium')
+  const [exportSummary, setExportSummary] = useState<ExportSummary | null>(null)
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -89,6 +91,7 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   const pendingConfigRef = useRef<BeautifyConfig | null>(null)
   const writeChainRef = useRef<Promise<void>>(Promise.resolve())
   const buildSeqRef = useRef(0)
+  const exportRevisionRef = useRef(0)
   const [beautifyError, setBeautifyError] = useState<string | null>(null)
 
   // Initialize beautify state from backend on mount so the UI reflects the
@@ -160,6 +163,8 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   }
 
   const handleBeautifyChange = (config: Partial<BeautifyConfig>) => {
+    exportRevisionRef.current += 1
+    setExportSummary(null)
     const nextConfig = currentBeautifyConfig(config)
     pendingConfigRef.current = nextConfig
 
@@ -196,9 +201,14 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   }
 
   const handleExport = (preset: ExportPreset) => {
+    const revision = exportRevisionRef.current
     void flushPendingConfig()
       .then(() => exportVideo(preset))
-      .then(() => setBeautifyError(null))
+      .then((summary) => {
+        if (revision !== exportRevisionRef.current) return
+        setBeautifyError(null)
+        setExportSummary(summary)
+      })
       .catch((error) => {
         const msg = messageForBeautifyError(error, '导出失败，请重试或检查录制素材。')
         if (!msg) return
@@ -466,6 +476,21 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
           {beautifyError && (
             <div className="mb-3 rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-xs text-destructive">
               {beautifyError}
+            </div>
+          )}
+          {exportSummary && (
+            <div className="mb-3 rounded-lg border border-border/50 bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
+              {exportSummary.cutCount > 0 ? (
+                <p>
+                  已生成裁剪时间线：{exportSummary.cutCount} 段，预计剪除{' '}
+                  {Math.round(exportSummary.totalCutNanos / 1_000_000_000)} 秒
+                </p>
+              ) : (
+                <p>未检测到可裁剪空白段</p>
+              )}
+              {!exportSummary.outputPath && (
+                <p className="opacity-60">FFmpeg 编码器接入后将生成可播放文件</p>
+              )}
             </div>
           )}
           <div className="flex items-center gap-2 mb-4">

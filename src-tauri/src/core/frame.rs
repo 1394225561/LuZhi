@@ -32,6 +32,7 @@ pub struct VideoFrame {
     pub timestamp: MediaTimestamp,
     pub width: u32,
     pub height: u32,
+    pub stride_bytes: usize,
     pub pixel_format: PixelFormat,
     pub buffer: FrameBuffer,
 }

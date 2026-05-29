@@ -1680,4 +1680,105 @@ describe('App', () => {
       expect(callOrder).toEqual(['set_beautify_config', 'export_video'])
     })
   })
+
+  it('clears export summary when beautify config changes', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      if (command === 'export_video') {
+        return Promise.resolve({
+          frameCount: 1,
+          clickEffectCount: 0,
+          effectTimelinePath: '/tmp/effects.json',
+          cutCount: 2,
+          totalCutNanos: 5_000_000_000,
+          cutTimelinePath: '/tmp/cuts.json',
+          outputPath: null,
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    // Export successfully — summary should appear.
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+    await vi.waitFor(() => {
+      expect(screen.getByText(/已生成裁剪时间线/)).toBeTruthy()
+    })
+
+    // Change a beautify config — summary should be cleared.
+    const switches = screen.getAllByRole('switch')
+    await act(async () => {
+      fireEvent.click(switches[1])
+    })
+
+    expect(screen.queryByText(/已生成裁剪时间线/)).toBeNull()
+  })
+
+  it('ignores export summary when config changes before export resolves', async () => {
+    let resolveExport: (value: unknown) => void = () => {}
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true, magnificationFactor: 2,
+          cursorSmoothing: true, autoTrimSilences: false, trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      if (command === 'export_video') {
+        return new Promise((resolve) => { resolveExport = resolve })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+    invokeMock.mockClear()
+
+    // Click export — does not resolve yet.
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    // Change beautify config while export is in-flight.
+    const switches = screen.getAllByRole('switch')
+    await act(async () => {
+      fireEvent.click(switches[1])
+    })
+
+    // Now resolve the old export.
+    await act(async () => {
+      resolveExport({
+        frameCount: 1,
+        clickEffectCount: 0,
+        effectTimelinePath: '/tmp/effects.json',
+        cutCount: 2,
+        totalCutNanos: 5_000_000_000,
+        cutTimelinePath: '/tmp/cuts.json',
+        outputPath: null,
+      })
+    })
+
+    // Old summary should NOT appear because config changed.
+    expect(screen.queryByText(/已生成裁剪时间线/)).toBeNull()
+  })
 })
