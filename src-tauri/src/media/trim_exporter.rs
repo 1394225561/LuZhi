@@ -116,13 +116,25 @@ pub struct FfmpegTrimExporter;
 #[cfg(feature = "ffmpeg")]
 impl TrimExporter for FfmpegTrimExporter {
     fn export(&mut self, request: TrimExportRequest) -> AppResult<TrimExportResult> {
-        if request.input_path.as_os_str().is_empty() || request.output_path.as_os_str().is_empty() {
-            return Err(AppError::RecordingWriteFailed {
-                reason: "裁剪导出路径无效".to_string(),
+        if request.cancel_token.load(Ordering::Relaxed) {
+            return Err(AppError::ExportCancelled);
+        }
+        if !request.input_path.exists() {
+            return Err(AppError::ExportFailed {
+                reason: format!("源文件不存在: {}", request.input_path.to_string_lossy()),
             });
         }
-        Err(AppError::RecordingWriteFailed {
-            reason: "FFmpeg 裁剪导出需要生产编码器接入后启用".to_string(),
+        if request.input_path == request.output_path {
+            return Err(AppError::ExportFailed {
+                reason: "导出文件不能覆盖原始录制文件".to_string(),
+            });
+        }
+
+        // Human Native Safety Gate must review the concrete FFmpeg context,
+        // stream, packet, encoder, decoder, scaler, resampler, timestamp, and
+        // resource-release code before this path is enabled by default.
+        Err(AppError::ExportFailed {
+            reason: "FFmpeg 导出实现需在本步骤补齐并完成人工 Native Safety 审查后启用".to_string(),
         })
     }
 }
