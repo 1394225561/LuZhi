@@ -4,27 +4,7 @@ use std::path::PathBuf;
 use crate::app::error::AppError;
 use crate::app::error::AppResult;
 use crate::core::cut::CutTimeline;
-
-/// Export preset selected by the frontend.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExportPreset {
-    Bilibili,
-    Douyin,
-    Xiaohongshu,
-}
-
-impl std::str::FromStr for ExportPreset {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, String> {
-        match value {
-            "bilibili" => Ok(Self::Bilibili),
-            "douyin" => Ok(Self::Douyin),
-            "xiaohongshu" => Ok(Self::Xiaohongshu),
-            other => Err(format!("未知导出预设：{other}")),
-        }
-    }
-}
+use crate::media::export_presets::ExportPreset;
 
 /// Structured request for a future FFmpeg binding implementation.
 #[derive(Clone, Debug, PartialEq)]
@@ -101,6 +81,7 @@ mod tests {
 
     use super::*;
     use crate::core::cut::CutTimeline;
+    use crate::media::export_presets::ExportPreset;
 
     #[test]
     fn mock_exporter_consumes_cut_timeline_without_deleting_original() {

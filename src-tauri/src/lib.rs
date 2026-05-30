@@ -611,7 +611,7 @@ async fn export_video(
     state: tauri::State<'_, AppState>,
     preset: String,
 ) -> Result<ExportSummaryPayload, String> {
-    use media::trim_exporter::ExportPreset;
+    use media::export_presets::ExportPreset;
     let _export_preset: ExportPreset = preset.parse()?;
 
     let cursor = build_cursor_effect_timeline(app.clone(), state.clone()).await?;
