@@ -1,4 +1,8 @@
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 #[cfg(feature = "ffmpeg")]
 use crate::app::error::AppError;
@@ -6,13 +10,55 @@ use crate::app::error::AppResult;
 use crate::core::cut::CutTimeline;
 use crate::media::export_presets::ExportPreset;
 
+#[derive(Clone)]
+pub struct ExportProgressReporter {
+    callback: Arc<dyn Fn(u8) + Send + Sync>,
+}
+
+impl std::fmt::Debug for ExportProgressReporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportProgressReporter")
+            .field("callback", &"<closure>")
+            .finish()
+    }
+}
+
+impl ExportProgressReporter {
+    pub fn new(callback: Arc<dyn Fn(u8) + Send + Sync>) -> Self {
+        Self { callback }
+    }
+
+    pub fn report(&self, progress: u8) {
+        (self.callback)(progress.min(100));
+    }
+}
+
+impl PartialEq for ExportProgressReporter {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// Structured request for a future FFmpeg binding implementation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TrimExportRequest {
     pub input_path: PathBuf,
     pub output_path: PathBuf,
     pub preset: ExportPreset,
     pub cut_timeline: CutTimeline,
+    pub effect_timeline_path: Option<PathBuf>,
+    pub cancel_token: Arc<AtomicBool>,
+    pub progress: Option<ExportProgressReporter>,
+}
+
+impl PartialEq for TrimExportRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.input_path == other.input_path
+            && self.output_path == other.output_path
+            && self.preset == other.preset
+            && self.cut_timeline == other.cut_timeline
+            && self.effect_timeline_path == other.effect_timeline_path
+    }
 }
 
 /// Result of a structured trim export.
@@ -47,10 +93,16 @@ impl MockTrimExporter {
 
 impl TrimExporter for MockTrimExporter {
     fn export(&mut self, request: TrimExportRequest) -> AppResult<TrimExportResult> {
+        if request.cancel_token.load(Ordering::Relaxed) {
+            return Err(crate::app::error::AppError::ExportCancelled);
+        }
         let result = TrimExportResult {
             output_path: request.output_path.clone(),
             cut_count: request.cut_timeline.cuts.len(),
         };
+        if let Some(progress) = &request.progress {
+            progress.report(100);
+        }
         self.requests.push(request);
         Ok(result)
     }
@@ -82,6 +134,7 @@ mod tests {
     use super::*;
     use crate::core::cut::CutTimeline;
     use crate::media::export_presets::ExportPreset;
+    use std::sync::{atomic::AtomicBool, Arc};
 
     #[test]
     fn mock_exporter_consumes_cut_timeline_without_deleting_original() {
@@ -91,6 +144,9 @@ mod tests {
             output_path: PathBuf::from("/tmp/export.mp4"),
             preset: ExportPreset::Bilibili,
             cut_timeline: CutTimeline::empty(10_000_000_000),
+            effect_timeline_path: None,
+            cancel_token: Arc::new(AtomicBool::new(false)),
+            progress: None,
         };
 
         let result = exporter.export(request).unwrap();

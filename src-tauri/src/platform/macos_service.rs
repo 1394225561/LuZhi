@@ -56,6 +56,7 @@ pub struct MacRecordingService {
     last_effect_timeline_path: Option<String>,
     last_trim_metadata_path: Option<String>,
     last_cut_timeline_path: Option<String>,
+    last_recording_output_path: Option<String>,
     /// Monotonically incrementing session counter. Used to guard async
     /// post-process jobs against writing stale results into a new session.
     session_id: u64,
@@ -81,6 +82,14 @@ impl MacRecordingService {
     pub fn current_session_id(&self) -> u64 {
         self.session_id
     }
+
+    pub fn last_recording_output_path(&self) -> Option<String> {
+        self.last_recording_output_path.clone()
+    }
+
+    pub fn last_effect_timeline_path(&self) -> Option<String> {
+        self.last_effect_timeline_path.clone()
+    }
 }
 
 impl MacRecordingService {
@@ -102,6 +111,7 @@ impl MacRecordingService {
             last_effect_timeline_path: None,
             last_trim_metadata_path: None,
             last_cut_timeline_path: None,
+            last_recording_output_path: None,
             session_id: 0,
         }
     }
@@ -138,6 +148,7 @@ impl MacRecordingService {
         self.last_effect_timeline_path = None;
         self.last_trim_metadata_path = None;
         self.last_cut_timeline_path = None;
+        self.last_recording_output_path = None;
         self.session_id = self.session_id.wrapping_add(1);
 
         // Reset mic level from any previous session.
@@ -313,6 +324,7 @@ impl MacRecordingService {
         result.cursor_metadata_path = cursor_metadata_path.clone();
         result.effect_timeline_path = self.last_effect_timeline_path.clone();
         self.last_cursor_metadata_path = cursor_metadata_path;
+        self.last_recording_output_path = result.output_path.clone();
 
         // Write trim metadata sidecar for post-recording silence detection.
         // Skip when consumer panicked — the metadata would be empty/misleading.

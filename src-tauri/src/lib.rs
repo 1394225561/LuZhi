@@ -612,7 +612,7 @@ async fn export_video(
     preset: String,
 ) -> Result<ExportSummaryPayload, String> {
     use media::export_presets::ExportPreset;
-    let _export_preset: ExportPreset = preset.parse()?;
+    let export_preset: ExportPreset = preset.parse()?;
 
     let cursor = build_cursor_effect_timeline(app.clone(), state.clone()).await?;
 
@@ -623,10 +623,60 @@ async fn export_video(
         .clone();
 
     let cut = if config.auto_trim_silences {
-        Some(build_cut_timeline(app, state).await?)
+        Some(build_cut_timeline(app.clone(), state.clone()).await?)
     } else {
         None
     };
+
+    // Build cut timeline for the export request.
+    let cut_timeline = if let Some(ref summary) = cut {
+        let path = PathBuf::from(&summary.cut_timeline_path);
+        TrimMetadataWriter::read_cut_timeline(&path).map_err(|error| error.to_string())?
+    } else {
+        // Auto-trim off: use full duration from trim metadata if available.
+        let trim_metadata_path = {
+            let service = state
+                .service
+                .lock()
+                .map_err(|_| "录制服务锁已损坏".to_string())?;
+            service.last_trim_metadata_path()
+        };
+        let duration_nanos = if let Some(path) = trim_metadata_path {
+            TrimMetadataWriter::read_metadata(PathBuf::from(path).as_path())
+                .map_err(|error| error.to_string())?
+                .duration_nanos
+        } else {
+            0
+        };
+        core::cut::CutTimeline::empty(duration_nanos)
+    };
+
+    // Get source artifact path.
+    let source_path = {
+        let service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        service
+            .last_recording_output_path()
+            .ok_or_else(|| "没有可用的原始录制文件，请先完成一次可播放录制".to_string())?
+    };
+
+    // Effect timeline path for the export request.
+    let effect_timeline_path = {
+        let service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        service.last_effect_timeline_path().map(PathBuf::from)
+    };
+
+    // Until production FFmpeg exporter is enabled, return output_path: None.
+    // The structured export request is validated here but the actual FFmpeg
+    // transcoding is gated behind Task 6.
+    let _source = PathBuf::from(&source_path);
+    let _cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _sequence = 1u64;
 
     Ok(ExportSummaryPayload {
         frame_count: cursor.frame_count,

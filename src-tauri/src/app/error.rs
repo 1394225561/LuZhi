@@ -43,6 +43,13 @@ pub enum AppError {
     TrimProcessingFailed {
         reason: String,
     },
+    ExportFailed {
+        reason: String,
+    },
+    ExportCancelled,
+    LicenseFailed {
+        reason: String,
+    },
 }
 
 impl Display for AppError {
@@ -84,6 +91,15 @@ impl Display for AppError {
             AppError::TrimProcessingFailed { reason } => {
                 write!(formatter, "空白裁剪处理失败：{reason}")
             }
+            AppError::ExportFailed { reason } => {
+                write!(formatter, "导出失败：{reason}")
+            }
+            AppError::ExportCancelled => {
+                write!(formatter, "导出已取消")
+            }
+            AppError::LicenseFailed { reason } => {
+                write!(formatter, "授权状态处理失败：{reason}")
+            }
         }
     }
 }
@@ -110,5 +126,18 @@ mod tests {
         };
 
         assert_eq!(error.to_string(), "空白裁剪处理失败：没有裁剪元数据");
+    }
+
+    #[test]
+    fn export_error_uses_chinese_message() {
+        let error = AppError::ExportFailed {
+            reason: "源文件不存在".to_string(),
+        };
+        assert_eq!(error.to_string(), "导出失败：源文件不存在");
+    }
+
+    #[test]
+    fn export_cancelled_uses_chinese_message() {
+        assert_eq!(AppError::ExportCancelled.to_string(), "导出已取消");
     }
 }
