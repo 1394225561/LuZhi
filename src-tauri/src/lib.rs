@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use app::events::{
     CursorEffectSummaryPayload, CutTimelineSummaryPayload, ExportProgressPayload,
-    ExportSummaryPayload, MicLevelPayload, PermissionPayload, PostProcessProgressPayload,
-    RecordingStatusPayload,
+    ExportSummaryPayload, LicenseStatusPayload, MicLevelPayload, PermissionPayload,
+    PostProcessProgressPayload, RecordingStatusPayload,
 };
 use app::mic_level_runtime::MicLevelRuntime;
 #[cfg(not(target_os = "macos"))]
@@ -34,7 +34,7 @@ use platform::macos_service::MacRecordingService;
 #[cfg(not(target_os = "macos"))]
 compile_error!("LuZhi recording service currently supports macOS builds only; Windows app wiring requires a WindowsRecordingService.");
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Shared recording state managed by Tauri.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -610,6 +610,36 @@ async fn build_cursor_effect_timeline(
     })
 }
 
+fn license_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|error| format!("读取应用数据目录失败: {error}"))
+        .map(|dir| dir.join("license-state.json"))
+}
+
+#[tauri::command]
+fn license_status(app: AppHandle) -> Result<LicenseStatusPayload, String> {
+    use app::license_service::{FileTrialStore, LicenseService, NoopActivationCredentialStore, SystemLicenseClock};
+    let path = license_state_path(&app)?;
+    let mut trial_store = FileTrialStore::new(path);
+    let mut activation_store = NoopActivationCredentialStore;
+    let service = LicenseService::new(&mut trial_store, &mut activation_store, SystemLicenseClock);
+    service.status().map(LicenseStatusPayload::from).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn activation_status(app: AppHandle) -> Result<LicenseStatusPayload, String> {
+    license_status(app)
+}
+
+#[tauri::command]
+fn activate_license(_app: AppHandle, code: String) -> Result<(), String> {
+    if code.trim().is_empty() {
+        return Err("激活码不能为空".to_string());
+    }
+    Err("服务端激活协议未接入，当前版本仅提供本地试用与激活状态接口".to_string())
+}
+
 #[tauri::command]
 fn cancel_export(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let guard = state
@@ -946,7 +976,10 @@ pub fn run() -> tauri::Result<()> {
             build_cursor_effect_timeline,
             build_cut_timeline,
             export_video,
-            cancel_export
+            cancel_export,
+            license_status,
+            activation_status,
+            activate_license
         ])
         .run(tauri::generate_context!())?;
 

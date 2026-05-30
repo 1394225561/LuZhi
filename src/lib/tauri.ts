@@ -76,6 +76,13 @@ export type ExportProgressPayload = {
   error?: string
 }
 
+export type LicenseStatus = {
+  kind: 'trial' | 'expired' | 'activated'
+  trialDaysRemaining: number
+  isExpired: boolean
+  activated: boolean
+}
+
 export type RecordingResult = {
   durationSecs: number
   frameCount: number
@@ -144,6 +151,18 @@ export async function exportVideo(preset: ExportPreset): Promise<ExportSummary> 
 
 export async function cancelExport(): Promise<void> {
   return invoke('cancel_export')
+}
+
+export async function fetchLicenseStatus(): Promise<LicenseStatus> {
+  return invoke<LicenseStatus>('license_status')
+}
+
+export async function fetchActivationStatus(): Promise<LicenseStatus> {
+  return invoke<LicenseStatus>('activation_status')
+}
+
+export async function activateLicense(code: string): Promise<void> {
+  return invoke('activate_license', { code })
 }
 
 // ─── Tauri Events ───

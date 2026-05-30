@@ -121,6 +121,32 @@ pub struct ExportProgressPayload {
     pub error: Option<String>,
 }
 
+/// License status payload sent to the frontend.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenseStatusPayload {
+    pub kind: &'static str,
+    pub trial_days_remaining: u8,
+    pub is_expired: bool,
+    pub activated: bool,
+}
+
+impl From<crate::app::license_service::LicenseStatus> for LicenseStatusPayload {
+    fn from(status: crate::app::license_service::LicenseStatus) -> Self {
+        let kind = match status.kind {
+            crate::app::license_service::LicenseStatusKind::Trial => "trial",
+            crate::app::license_service::LicenseStatusKind::Expired => "expired",
+            crate::app::license_service::LicenseStatusKind::Activated => "activated",
+        };
+        Self {
+            kind,
+            trial_days_remaining: status.trial_days_remaining,
+            is_expired: status.is_expired,
+            activated: status.activated,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
