@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-29 | Phase 5 空白段检测与自动裁剪实现完成（自动化验证全部通过，FFmpeg Gate 待人工审查）。
+> 最后更新：2026-05-30 | Phase 6 导出预设与本地授权实现完成（自动化验证全部通过，FFmpeg 生产编码待人工审查）。
 >
 > 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,47 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-05-30：Phase 6 导出预设与本地授权实现
+
+输入文件：
+
+- `docs/superpowers/plans/2026-05-29-phase-6-export-presets-local-license.md`
+- `tests/phase-6-w11-w12-checklist.md`
+
+本轮完成（8 Tasks）：
+
+1. `media/export_presets.rs` 建立固定三种导出预设（Bilibili 16:9、抖音 9:16、小红书 1:1）。
+2. `media/export_paths.rs` 生成独立输出路径并验证非空输出。
+3. `media/trim_audio_activity.rs` 实现灵敏度无关的 100ms 基础 RMS 桶，支持录后灵敏度重聚合。
+4. `app/export_service.rs` 建立结构化导出服务边界，验证源文件、生成请求、调用导出器。
+5. `ExportProgressPayload` 事件和 `cancel_export` 命令接入 UI 进度条与取消按钮。
+6. `media/original_recording_artifact.rs` 源文件验证器和 `ffmpeg_test_support.rs` 测试辅助。
+7. `FfmpegTrimExporter` 更新为使用新错误类型和验证逻辑（实际转码需 Native Safety 审查）。
+8. `app/license_service.rs` 实现本地 14 天试用与激活状态接口，前端展示试用状态。
+
+验证结果：
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` **198 tests** 通过（+5 相比 Phase 5）
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` 通过（warnings only）
+- `cargo build --manifest-path src-tauri/Cargo.toml` 通过
+- `npm run build` 通过
+- `npm test -- --run` **51 tests** 通过（+5 相比 Phase 5）
+
+改动文件：
+
+- **新增**: `src-tauri/src/media/export_presets.rs`, `src-tauri/src/media/export_paths.rs`, `src-tauri/src/media/trim_audio_activity.rs`, `src-tauri/src/media/original_recording_artifact.rs`, `src-tauri/src/media/ffmpeg_test_support.rs`, `src-tauri/src/app/export_service.rs`, `src-tauri/src/app/license_service.rs`, `src/components/license-status.tsx`
+- **修改**: `src-tauri/src/media/mod.rs`, `src-tauri/src/media/trim_exporter.rs`, `src-tauri/src/media/trim_metadata.rs`, `src-tauri/src/app/mod.rs`, `src-tauri/src/app/error.rs`, `src-tauri/src/app/events.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri.ts`, `src/components/preview-view.tsx`, `src/App.tsx`, `src/App.test.tsx`, `tests/phase-6-w11-w12-checklist.md`
+
+剩余待完成（不阻塞 Phase 6 contract，但需关注）：
+
+- FFmpeg 生产编码器/解码器接入需 Native Safety 人工逐行审查。
+- macOS Keychain / Windows Credential Manager 用于激活持久化。
+- 真实可播放导出需 FFmpeg 绑定实现后人工验收。
+- 长录制导出压力测试和 A/V 同步验证。
+
+---
 
 ### 2026-05-29：Phase 5 空白段检测与自动裁剪实现
 
