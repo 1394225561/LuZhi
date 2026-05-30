@@ -3,8 +3,6 @@ pub mod audio_synchronizer;
 pub mod cursor_engine;
 pub mod export_paths;
 pub mod export_presets;
-#[cfg(any(test, feature = "ffmpeg"))]
-pub mod ffmpeg_test_support;
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg_writer;
 pub mod mic_level;

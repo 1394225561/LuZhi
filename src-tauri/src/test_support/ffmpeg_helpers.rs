@@ -1,6 +1,5 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::app::error::{AppError, AppResult};
 use crate::core::frame::{
     FrameBuffer, MediaTimestamp, MixedAudioChunk, PixelFormat, VideoFrame, VideoFrameRef,
 };
@@ -51,11 +50,12 @@ pub fn test_audio_chunk_at(timestamp_nanos: u64) -> MixedAudioChunk {
 
 #[cfg(feature = "ffmpeg")]
 pub fn create_synthetic_source_artifact(
-    path: &Path,
+    path: &std::path::Path,
     width: u32,
     height: u32,
     duration_nanos: u64,
-) -> AppResult<()> {
+) -> crate::app::error::AppResult<()> {
+    use crate::app::error::AppError;
     use crate::media::recording_writer::RecordingWriter;
 
     if let Some(parent) = path.parent() {
@@ -118,7 +118,9 @@ fn synthetic_audio_chunk_at(timestamp_nanos: u64) -> MixedAudioChunk {
 }
 
 #[cfg(feature = "ffmpeg")]
-pub fn inspect_media_artifact(path: &Path) -> AppResult<MediaArtifactInspection> {
+pub fn inspect_media_artifact(path: &std::path::Path) -> crate::app::error::AppResult<MediaArtifactInspection> {
+    use crate::app::error::{AppError, AppResult};
+
     let metadata = std::fs::metadata(path).map_err(|e| AppError::RecordingWriteFailed {
         reason: format!("检查导出文件失败: {e}"),
     })?;

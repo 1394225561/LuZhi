@@ -2,6 +2,7 @@ pub mod app;
 pub mod core;
 pub mod media;
 pub mod platform;
+pub mod test_support;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -703,19 +704,27 @@ async fn export_video(
         None
     };
 
+    // Read trim metadata path, source artifact path, and effect timeline path
+    // in a single lock acquisition to reduce lock contention.
+    let (trim_metadata_path, source_path, effect_timeline_path) = {
+        let service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        let trim = service.last_trim_metadata_path();
+        let source = service
+            .last_recording_output_path()
+            .ok_or_else(|| "没有可用的原始录制文件，请先完成一次可播放录制".to_string())?;
+        let effect = service.last_effect_timeline_path().map(PathBuf::from);
+        (trim, source, effect)
+    };
+
     // Build cut timeline for the export request.
     let cut_timeline = if let Some(ref summary) = cut {
         let path = PathBuf::from(&summary.cut_timeline_path);
         TrimMetadataWriter::read_cut_timeline(&path).map_err(|error| error.to_string())?
     } else {
         // Auto-trim off: use full duration from trim metadata if available.
-        let trim_metadata_path = {
-            let service = state
-                .service
-                .lock()
-                .map_err(|_| "录制服务锁已损坏".to_string())?;
-            service.last_trim_metadata_path()
-        };
         let duration_nanos = if let Some(path) = trim_metadata_path {
             TrimMetadataWriter::read_metadata(PathBuf::from(path).as_path())
                 .map_err(|error| error.to_string())?
@@ -724,19 +733,6 @@ async fn export_video(
             0
         };
         core::cut::CutTimeline::empty(duration_nanos)
-    };
-
-    // Get source artifact path and effect timeline path in a single lock acquisition.
-    let (source_path, effect_timeline_path) = {
-        let service = state
-            .service
-            .lock()
-            .map_err(|_| "录制服务锁已损坏".to_string())?;
-        let source = service
-            .last_recording_output_path()
-            .ok_or_else(|| "没有可用的原始录制文件，请先完成一次可播放录制".to_string())?;
-        let effect = service.last_effect_timeline_path().map(PathBuf::from);
-        (source, effect)
     };
 
     // Until production FFmpeg exporter is enabled, return output_path: None.
