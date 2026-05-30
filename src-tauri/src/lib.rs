@@ -839,6 +839,39 @@ async fn export_video(
     // Handle export result.
     match export_result {
         Ok(result) => {
+            // Validate artifact is playable (streams, dimensions).
+            #[cfg(feature = "ffmpeg")]
+            {
+                let spec = export_preset.spec();
+                if let Err(error) = media::ffmpeg_common::validate_export_artifact(
+                    &result.output_path,
+                    spec.width,
+                    spec.height,
+                ) {
+                    let _ = std::fs::remove_file(&result.output_path);
+                    // Emit error progress.
+                    let _ = app.emit(
+                        "export-progress",
+                        ExportProgressPayload {
+                            preset: preset_id,
+                            progress: 100,
+                            cancellable: false,
+                            output_path: None,
+                            error: Some(error.to_string()),
+                        },
+                    );
+                    // Clear cancel token.
+                    {
+                        let mut guard = state
+                            .export_cancel_token
+                            .lock()
+                            .map_err(|_| "导出取消状态锁已损坏".to_string())?;
+                        *guard = None;
+                    }
+                    return Err(error.to_string());
+                }
+            }
+
             // Emit final progress with output path.
             let _ = app.emit(
                 "export-progress",

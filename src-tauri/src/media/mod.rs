@@ -4,6 +4,8 @@ pub mod cursor_engine;
 pub mod export_paths;
 pub mod export_presets;
 #[cfg(feature = "ffmpeg")]
+pub mod ffmpeg_common;
+#[cfg(feature = "ffmpeg")]
 pub mod ffmpeg_writer;
 pub mod mic_level;
 pub mod original_recording_artifact;

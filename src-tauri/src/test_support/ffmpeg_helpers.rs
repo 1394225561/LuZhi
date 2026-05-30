@@ -5,14 +5,9 @@ use crate::core::frame::{
 };
 use std::sync::Arc;
 
-pub struct MediaArtifactInspection {
-    pub file_size_bytes: u64,
-    pub width: u32,
-    pub height: u32,
-    pub duration_nanos: u64,
-    pub has_video_stream: bool,
-    pub has_audio_stream: bool,
-}
+// Re-export from production module for backward compatibility.
+#[cfg(feature = "ffmpeg")]
+pub use crate::media::ffmpeg_common::{inspect_media_artifact, MediaArtifactInspection};
 
 pub fn unique_media_path(prefix: &str, extension: &str) -> PathBuf {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -115,56 +110,4 @@ fn synthetic_audio_chunk_at(timestamp_nanos: u64) -> MixedAudioChunk {
         channels: 1,
         samples: Arc::from(vec![0.25f32; 1024].into_boxed_slice()),
     }
-}
-
-#[cfg(feature = "ffmpeg")]
-pub fn inspect_media_artifact(
-    path: &std::path::Path,
-) -> crate::app::error::AppResult<MediaArtifactInspection> {
-    use crate::app::error::{AppError, AppResult};
-
-    let metadata = std::fs::metadata(path).map_err(|e| AppError::RecordingWriteFailed {
-        reason: format!("检查导出文件失败: {e}"),
-    })?;
-
-    let ictx = ffmpeg_next::format::input(path).map_err(|e| AppError::ExportFailed {
-        reason: format!("打开导出文件进行检查失败: {e}"),
-    })?;
-
-    let mut has_video_stream = false;
-    let mut has_audio_stream = false;
-    let mut width = 0u32;
-    let mut height = 0u32;
-    let mut duration_nanos = 0u64;
-
-    for stream in ictx.streams() {
-        let params = stream.parameters();
-        match params.medium() {
-            ffmpeg_next::media::Type::Video => {
-                has_video_stream = true;
-                // Parameters does not expose width/height helpers; access raw fields.
-                let par = unsafe { &*params.as_ptr() };
-                width = par.width as u32;
-                height = par.height as u32;
-            }
-            ffmpeg_next::media::Type::Audio => {
-                has_audio_stream = true;
-            }
-            _ => {}
-        }
-    }
-
-    // Duration from container metadata
-    if ictx.duration() > 0 {
-        duration_nanos = ictx.duration() as u64;
-    }
-
-    Ok(MediaArtifactInspection {
-        file_size_bytes: metadata.len(),
-        width,
-        height,
-        duration_nanos,
-        has_video_stream,
-        has_audio_stream,
-    })
 }

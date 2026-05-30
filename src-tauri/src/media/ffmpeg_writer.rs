@@ -275,7 +275,15 @@ impl RecordingWriter for FfmpegRecordingWriter {
             ChannelLayout::STEREO,
         );
         frame.set_pts(Some(self.audio_pts));
-        self.audio_pts += num_frames as i64;
+        // Convert sample count to encoder time_base (1/48000).
+        // If input sample_rate differs from 48kHz, scale accordingly to
+        // prevent A/V drift.
+        let pts_increment = if chunk.sample_rate > 0 && chunk.sample_rate != 48000 {
+            (num_frames as i64 * 48000) / chunk.sample_rate as i64
+        } else {
+            num_frames as i64
+        };
+        self.audio_pts += pts_increment;
 
         // Convert interleaved f32 → planar f32.
         let channels = chunk.channels.max(1) as usize;

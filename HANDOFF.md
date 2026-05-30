@@ -110,7 +110,30 @@ W1-W12 Phase：
 改动文件：
 
 - **修改**: `src-tauri/src/media/ffmpeg_writer.rs`（完整实现）, `src-tauri/src/media/trim_exporter.rs`（完整实现）, `src-tauri/src/test_support/ffmpeg_helpers.rs`（API 兼容修复）
-- **新增**: `src-tauri/tests/ffmpeg_export.rs`, `tests/phase-6-manual-ffmpeg-gates.md`
+- **新增**: `src-tauri/src/media/ffmpeg_common.rs`, `src-tauri/tests/ffmpeg_export.rs`, `tests/phase-6-manual-ffmpeg-gates.md`
+
+Code Review 整改（2026-05-30）：
+
+**整改背景**：Code Review 于 commit `555b7f2` 后执行，发现 3 Critical + 7 Important 问题。以下整改在 review 之后进行：
+
+1. **C1 修复**：exporter 视频帧复制改为逐行复制，正确处理 linesize（stride）padding，避免 padded 格式下产生乱码。
+2. **C3 修复**：`export_video()` 在导出成功后调用 `validate_export_artifact()` 校验输出文件（流存在、分辨率匹配），不通过则清理并报错。
+3. **I1 修复**：新增 `media/ffmpeg_common.rs` 生产模块，将 `inspect_media_artifact` 和 `validate_export_artifact` 从 test_support 移入生产代码。
+4. **I2 修复**：writer 音频 PTS 按实际采样率换算到 48kHz 时间基，防止 A/V 漂移。
+5. **I3 修复**：exporter 多段裁剪时 PTS 连续映射——跟踪累计裁剪时长，减去间隙，输出时间戳连续。
+6. **I4 修复**：非 EOF 数据包读取错误不再静默吞掉，改为 `eprintln!` 警告后跳过。
+7. **I7 修复**：exporter flush 阶段补上 `rescale_ts` 调用。
+
+**未修复（需人工评估）**：
+- **C2**：exporter 音频未做格式重采样（当前仅兼容 writer 产出的 F32P@48kHz，外部 MP4 需加 SwrContext）。
+- **I5**：无音频录制时未生成静音 AAC 轨道（需 finish() 中补充静音帧逻辑）。
+- **I6**：集成测试未覆盖裁剪时间线导出（CutTimeline 非空场景）。
+- **M1-M5**：Minor 代码质量改进。
+
+**Native Safety 审查待办**：
+- `trim_exporter.rs` 中的 `unsafe { frame::Frame::empty() }` 和逐行 plane 复制
+- `ffmpeg_writer.rs` 中的 `SendScaler` unsafe impl Send
+- `ffmpeg_common.rs` 中的 `unsafe { &*params.as_ptr() }` 访问 AVCodecParameters
 
 ---
 

@@ -332,9 +332,13 @@ impl TrimExporter for FfmpegTrimExporter {
         })?;
 
         // --- Segment-based decode/encode loop ---
+        // Track cumulative cut duration so output timestamps are continuous
+        // across keep segments. E.g., keeps [0..2s, 6..8s] → output [0..2s, 2..4s].
         let total_keeps = request.cut_timeline.keeps.len();
         let mut video_pts_offset: Option<i64> = None;
         let mut audio_pts_offset: Option<i64> = None;
+        let mut cumulative_cut_nanos: i64 = 0;
+        let mut prev_seg_end_nanos: i64 = 0;
 
         for (seg_idx, segment) in request.cut_timeline.keeps.iter().enumerate() {
             if request.cancel_token.load(Ordering::Relaxed) {
@@ -344,6 +348,12 @@ impl TrimExporter for FfmpegTrimExporter {
 
             let seg_start_nanos = segment.start.nanos as i64;
             let seg_end_nanos = segment.end.nanos as i64;
+
+            // Accumulate cut duration between consecutive keep segments.
+            if seg_idx > 0 {
+                cumulative_cut_nanos += seg_start_nanos - prev_seg_end_nanos;
+            }
+            prev_seg_end_nanos = seg_end_nanos;
 
             // Seek input to segment start (in stream time_base).
             input
@@ -390,27 +400,48 @@ impl TrimExporter for FfmpegTrimExporter {
                                 if video_pts_offset.is_none() {
                                     video_pts_offset = Some(decoded.pts().unwrap_or(0));
                                 }
+                                // Remap PTS: subtract first segment start and cumulative
+                                // cut duration to produce continuous output timestamps.
+                                let raw_pts = decoded.pts().unwrap_or(0);
+                                let cut_offset_in_tb = cumulative_cut_nanos
+                                    * video_time_base.1 as i64
+                                    / video_time_base.0 as i64;
                                 let out_pts =
-                                    decoded.pts().unwrap_or(0) - video_pts_offset.unwrap();
+                                    raw_pts - video_pts_offset.unwrap() - cut_offset_in_tb;
 
-                                // Create a properly-allocated video frame from decoded data.
+                                // Copy decoded frame data row-by-row, respecting source
+                                // linesize (stride) padding that differs from destination.
                                 let mut input_frame =
                                     frame::Video::new(video_dec.format(), src_width, src_height);
                                 input_frame.set_pts(decoded.pts());
+                                // Pre-compute plane heights before mutable borrow of data_mut.
+                                let num_planes = input_frame.planes().min(4);
+                                let plane_heights: Vec<u32> = (0..num_planes)
+                                    .map(|i| input_frame.plane_height(i))
+                                    .collect();
                                 unsafe {
                                     let src_ptr = decoded.as_ptr();
-                                    for plane_idx in 0..input_frame.planes().min(4) {
+                                    for plane_idx in 0..num_planes {
                                         let dst = input_frame.data_mut(plane_idx);
                                         let src_data = (*src_ptr).data[plane_idx];
-                                        if !src_data.is_null() && !dst.is_empty() {
-                                            let len = dst
-                                                .len()
-                                                .min((*src_ptr).linesize[plane_idx].unsigned_abs()
-                                                    as usize);
+                                        let src_linesize = (*src_ptr).linesize[plane_idx] as usize;
+                                        if src_data.is_null() || dst.is_empty() {
+                                            continue;
+                                        }
+                                        let plane_h = plane_heights[plane_idx] as usize;
+                                        let dst_linesize = if plane_h > 0 {
+                                            dst.len() / plane_h
+                                        } else {
+                                            continue;
+                                        };
+                                        let copy_per_row = dst_linesize.min(src_linesize);
+                                        for row in 0..plane_h {
+                                            let src_row = src_data.add(row * src_linesize);
+                                            let dst_row = dst.as_mut_ptr().add(row * dst_linesize);
                                             std::ptr::copy_nonoverlapping(
-                                                src_data,
-                                                dst.as_mut_ptr(),
-                                                len,
+                                                src_row,
+                                                dst_row,
+                                                copy_per_row,
                                             );
                                         }
                                     }
@@ -457,8 +488,12 @@ impl TrimExporter for FfmpegTrimExporter {
                                     if audio_pts_offset.is_none() {
                                         audio_pts_offset = Some(decoded.pts().unwrap_or(0));
                                     }
-                                    let out_pts =
-                                        decoded.pts().unwrap_or(0) - audio_pts_offset.unwrap();
+                                    let raw_audio_pts = decoded.pts().unwrap_or(0);
+                                    let audio_cut_offset = cumulative_cut_nanos * audio_tb.1 as i64
+                                        / audio_tb.0 as i64;
+                                    let out_pts = raw_audio_pts
+                                        - audio_pts_offset.unwrap()
+                                        - audio_cut_offset;
                                     decoded.set_pts(Some(out_pts));
 
                                     if let Some(ref mut enc) = audio_encoder {
@@ -486,7 +521,12 @@ impl TrimExporter for FfmpegTrimExporter {
                         }
                     }
                     Err(ff::Error::Eof) => break,
-                    Err(_) => continue,
+                    Err(e) => {
+                        // Log non-EOF read errors but continue — a single corrupt
+                        // packet should not abort the entire export.
+                        eprintln!("警告：读取数据包时出错（跳过）: {e}");
+                        continue;
+                    }
                 }
             }
 
@@ -506,6 +546,7 @@ impl TrimExporter for FfmpegTrimExporter {
         let mut enc_pkt = ff::Packet::empty();
         while video_encoder.receive_packet(&mut enc_pkt).is_ok() {
             enc_pkt.set_stream(video_out_idx);
+            enc_pkt.rescale_ts(video_time_base, video_time_base);
             enc_pkt
                 .write_interleaved(&mut output)
                 .map_err(|e| AppError::ExportFailed {

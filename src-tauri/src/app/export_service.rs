@@ -60,7 +60,7 @@ pub fn export_recording_with_timeline(
     // Clean up partial output on error.
     match result {
         Ok(result) => {
-            // Validate the output file.
+            // Validate the output file exists and is non-empty.
             if let Err(error) = validate_non_empty_output(&result.output_path) {
                 // Clean up empty/invalid output file.
                 let _ = std::fs::remove_file(&result.output_path);
@@ -84,6 +84,10 @@ mod tests {
     use crate::media::trim_exporter::{TrimExportRequest, TrimExportResult, TrimExporter};
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    /// Exporter that writes minimal valid content for validation.
+    /// The file is small but non-empty, so `validate_non_empty_output` passes.
+    /// Artifact validation (FFmpeg stream check) is skipped for this mock
+    /// because it writes bytes, not a real MP4.
     struct FileCreatingExporter;
 
     impl TrimExporter for FileCreatingExporter {
