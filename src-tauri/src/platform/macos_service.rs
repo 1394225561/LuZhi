@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,7 +13,6 @@ use crate::app::error::AppResult;
 use crate::app::state_machine::{RecordingState, RecordingStateMachine};
 use crate::core::capture::{AudioCapture, AudioConfig, ScreenCapture};
 use crate::core::config::CaptureConfig;
-use crate::core::cut::TrimConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
 use crate::core::timeline::BeautifyConfigSnapshot;
@@ -22,8 +20,9 @@ use crate::media::audio_mixer::SimpleAudioMixer;
 use crate::media::mic_level::MicLevelDetector;
 use crate::media::recording_metadata::RecordingMetadataWriter;
 use crate::media::recording_writer::{CountingRecordingWriter, RecordingResult, RecordingWriter};
-use crate::media::silence_detector::{AudioRmsAnalyzer, FrameDiffAnalyzer};
-use crate::media::trim_metadata::{TrimMetadata, TrimMetadataWriter};
+use crate::media::silence_detector::FrameDiffAnalyzer;
+use crate::media::trim_audio_activity::BaseAudioActivityAnalyzer;
+use crate::media::trim_metadata::{TrimMetadata, TrimMetadataWriter, TRIM_METADATA_SCHEMA_VERSION};
 
 /// Internal return type that bundles the recording result with trim metadata.
 struct RecordingConsumerOutput {
@@ -266,7 +265,9 @@ impl MacRecordingService {
         let empty_output = RecordingConsumerOutput {
             result: empty_result,
             trim_metadata: TrimMetadata {
+                schema_version: TRIM_METADATA_SCHEMA_VERSION,
                 duration_nanos: 0,
+                base_audio_activity: Vec::new(),
                 audio_activity: Vec::new(),
                 visual_activity: Vec::new(),
                 audio_activity_dropped_count: 0,
@@ -385,23 +386,20 @@ impl MacRecordingService {
         let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
         let mut mic_detector = MicLevelDetector::new(4096); // ~85ms 窗口 @ 48kHz
 
-        // Trim metadata collectors — low-cost activity samples for post-recording
-        // silence detection. Computed in the consumer thread, never sent to React.
-        // Use the user-configured sensitivity so the RMS window matches what
-        // Preview shows (500ms for High, 750ms for Medium, 1000ms for Low).
-        let sensitivity = crate::core::cut::TrimSensitivity::from_str(trim_sensitivity_str)
-            .unwrap_or(crate::core::cut::TrimSensitivity::Medium);
-        let mut rms_analyzer = AudioRmsAnalyzer::new(TrimConfig::from_sensitivity(sensitivity));
+        // Trim metadata collectors — sensitivity-independent 100ms base RMS
+        // buckets. Computed in the consumer thread, never sent to React.
+        // Post-recording aggregation applies the user-configured sensitivity.
+        let mut base_audio_analyzer = BaseAudioActivityAnalyzer::default();
         let frame_diff_analyzer = FrameDiffAnalyzer::new(64, 36);
         // Low-frequency visual sampling: ~4fps to avoid per-frame diff cost.
         const VISUAL_SAMPLE_INTERVAL_NANOS: u64 = 250_000_000;
         // Safety caps to prevent unbounded memory growth during very long recordings.
         const MAX_VISUAL_SAMPLES: usize = 144_000; // ~10h @ 4fps
         const MAX_AUDIO_SAMPLES: usize = 72_000; // ~10h @ 2/sec (750ms window)
+        let mut base_audio_activity = Vec::new();
         let mut previous_sampled_frame: Option<crate::core::frame::VideoFrame> = None;
         let mut last_visual_sample_nanos: u64 = 0;
         let mut visual_activity = Vec::new();
-        let mut audio_activity = Vec::new();
         let mut visual_dropped: u64 = 0;
         let mut audio_dropped: u64 = 0;
         // Tracks the latest observed media timestamp independent of sample caps,
@@ -476,10 +474,10 @@ impl MacRecordingService {
                             / mixed.sample_rate.max(1) as u64;
                         latest_observed_media_nanos = latest_observed_media_nanos
                             .max(mixed.timestamp.nanos.saturating_add(chunk_nanos));
-                        // Collect windowed audio RMS samples for trim metadata.
-                        for sample in rms_analyzer.push_chunk(&mixed) {
-                            if !push_bounded_audio_sample(
-                                &mut audio_activity,
+                        // Collect sensitivity-independent 100ms base RMS buckets.
+                        for sample in base_audio_analyzer.push_chunk(&mixed) {
+                            if !push_bounded_base_audio_sample(
+                                &mut base_audio_activity,
                                 sample,
                                 MAX_AUDIO_SAMPLES,
                             ) {
@@ -544,9 +542,9 @@ impl MacRecordingService {
                         / mixed.sample_rate.max(1) as u64;
                     latest_observed_media_nanos = latest_observed_media_nanos
                         .max(mixed.timestamp.nanos.saturating_add(chunk_nanos));
-                    for sample in rms_analyzer.push_chunk(&mixed) {
-                        if !push_bounded_audio_sample(
-                            &mut audio_activity,
+                    for sample in base_audio_analyzer.push_chunk(&mixed) {
+                        if !push_bounded_base_audio_sample(
+                            &mut base_audio_activity,
                             sample,
                             MAX_AUDIO_SAMPLES,
                         ) {
@@ -563,9 +561,9 @@ impl MacRecordingService {
             }
         }
 
-        // Flush remaining audio samples from the windowed RMS aggregator.
-        if let Some(sample) = rms_analyzer.flush() {
-            if !push_bounded_audio_sample(&mut audio_activity, sample, MAX_AUDIO_SAMPLES) {
+        // Flush remaining base audio buckets from the analyzer.
+        if let Some(sample) = base_audio_analyzer.flush() {
+            if !push_bounded_base_audio_sample(&mut base_audio_activity, sample, MAX_AUDIO_SAMPLES) {
                 audio_dropped += 1;
             }
         }
@@ -603,8 +601,10 @@ impl MacRecordingService {
         RecordingConsumerOutput {
             result,
             trim_metadata: TrimMetadata {
+                schema_version: TRIM_METADATA_SCHEMA_VERSION,
                 duration_nanos,
-                audio_activity,
+                base_audio_activity,
+                audio_activity: Vec::new(),
                 visual_activity,
                 audio_activity_dropped_count: audio_dropped,
                 visual_activity_dropped_count: visual_dropped,
@@ -621,8 +621,23 @@ impl Default for MacRecordingService {
     }
 }
 
-/// Pushes an audio sample into the bounded Vec, dropping it if at capacity.
+/// Pushes a base audio sample into the bounded Vec, dropping it if at capacity.
 /// Returns `true` if the sample was pushed, `false` if dropped.
+fn push_bounded_base_audio_sample(
+    samples: &mut Vec<crate::media::trim_audio_activity::BaseAudioActivitySample>,
+    sample: crate::media::trim_audio_activity::BaseAudioActivitySample,
+    max: usize,
+) -> bool {
+    if samples.len() < max {
+        samples.push(sample);
+        true
+    } else {
+        false
+    }
+}
+
+/// Test-only helper for bounded push of legacy AudioActivitySample.
+#[cfg(test)]
 fn push_bounded_audio_sample(
     samples: &mut Vec<crate::core::cut::AudioActivitySample>,
     sample: crate::core::cut::AudioActivitySample,
@@ -865,7 +880,9 @@ mod tests {
                 cut_timeline_path: None,
             },
             trim_metadata: TrimMetadata {
+                schema_version: TRIM_METADATA_SCHEMA_VERSION,
                 duration_nanos: 0,
+                base_audio_activity: Vec::new(),
                 audio_activity: Vec::new(),
                 visual_activity: Vec::new(),
                 audio_activity_dropped_count: 0,

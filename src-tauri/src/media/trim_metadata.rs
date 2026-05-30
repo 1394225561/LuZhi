@@ -4,13 +4,23 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::app::error::{AppError, AppResult};
-use crate::core::cut::{AudioActivitySample, CutTimeline, FrameDiffSample};
+use crate::core::cut::{AudioActivitySample, CutTimeline, FrameDiffSample, TrimConfig};
+use crate::media::trim_audio_activity::{
+    aggregate_base_audio_activity, BaseAudioActivitySample,
+};
+
+pub const TRIM_METADATA_SCHEMA_VERSION: u32 = 2;
 
 /// Recording-time metadata used to build a CutTimeline after recording.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrimMetadata {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub duration_nanos: u64,
+    #[serde(default)]
+    pub base_audio_activity: Vec<BaseAudioActivitySample>,
+    #[serde(default)]
     pub audio_activity: Vec<AudioActivitySample>,
     pub visual_activity: Vec<FrameDiffSample>,
     /// Number of audio activity samples dropped due to cap overflow.
@@ -23,6 +33,19 @@ pub struct TrimMetadata {
     /// When true, cut timeline analysis may not cover the full recording.
     #[serde(default)]
     pub activity_truncated: bool,
+}
+
+fn default_schema_version() -> u32 {
+    1
+}
+
+impl TrimMetadata {
+    pub fn derive_audio_activity(&self, config: TrimConfig) -> Vec<AudioActivitySample> {
+        if !self.base_audio_activity.is_empty() {
+            return aggregate_base_audio_activity(&self.base_audio_activity, config);
+        }
+        self.audio_activity.clone()
+    }
 }
 
 /// JSON sidecar reader/writer for trim metadata and cut timelines.
@@ -89,7 +112,9 @@ mod tests {
     #[test]
     fn trim_metadata_round_trips_json() {
         let metadata = TrimMetadata {
+            schema_version: TRIM_METADATA_SCHEMA_VERSION,
             duration_nanos: 10_000_000_000,
+            base_audio_activity: Vec::new(),
             audio_activity: vec![AudioActivitySample {
                 start: MediaTimestamp::from_nanos(0),
                 end: MediaTimestamp::from_nanos(1_000_000_000),
@@ -114,7 +139,9 @@ mod tests {
     #[test]
     fn trim_metadata_truncation_fields_serialize() {
         let metadata = TrimMetadata {
+            schema_version: TRIM_METADATA_SCHEMA_VERSION,
             duration_nanos: 10_000_000_000,
+            base_audio_activity: Vec::new(),
             audio_activity: Vec::new(),
             visual_activity: Vec::new(),
             audio_activity_dropped_count: 42,

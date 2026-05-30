@@ -9,5 +9,6 @@ pub mod mic_level;
 pub mod recording_metadata;
 pub mod recording_writer;
 pub mod silence_detector;
+pub mod trim_audio_activity;
 pub mod trim_exporter;
 pub mod trim_metadata;

@@ -726,10 +726,11 @@ async fn build_cut_timeline(
             PathBuf::from(&trim_metadata_path_for_blocking).as_path(),
         )
         .map_err(|error| error.to_string())?;
+        let audio_activity = metadata.derive_audio_activity(trim_config);
         let detector = SilenceDetectorEngine::new(trim_config);
         let timeline = detector
             .analyze(
-                &metadata.audio_activity,
+                &audio_activity,
                 &metadata.visual_activity,
                 metadata.duration_nanos,
             )
