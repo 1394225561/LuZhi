@@ -132,7 +132,7 @@ where
         }
     }
 
-    pub fn status(mut self) -> AppResult<LicenseStatus> {
+    pub fn status(self) -> AppResult<LicenseStatus> {
         let now = self.clock.now_secs();
         let state = match self.trial_store.read()? {
             Some(state) => state,

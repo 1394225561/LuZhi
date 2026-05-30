@@ -119,6 +119,7 @@ pub struct FfmpegTrimExporter;
 #[cfg(feature = "ffmpeg")]
 impl TrimExporter for FfmpegTrimExporter {
     fn export(&mut self, request: TrimExportRequest) -> AppResult<TrimExportResult> {
+        use crate::media::ffmpeg_common::nanos_to_time_base_units;
         use ff::codec;
         use ff::codec::encoder;
         use ff::format;
@@ -161,11 +162,12 @@ impl TrimExporter for FfmpegTrimExporter {
             })?;
         let video_time_base = input.stream(video_stream_index).unwrap().time_base();
 
-        // Find audio stream (optional).
+        // Find audio stream (optional) — store INPUT stream index for packet dispatch.
         let audio_stream_info = input
             .streams()
             .find(|s| s.parameters().medium() == ff::media::Type::Audio)
             .map(|s| (s.index(), s.time_base()));
+        let input_audio_stream_index = audio_stream_info.map(|(idx, _)| idx);
 
         // Create video decoder.
         let video_stream = input.stream(video_stream_index).unwrap();
@@ -220,6 +222,26 @@ impl TrimExporter for FfmpegTrimExporter {
             None
         };
 
+        // Create audio resampler (SwrContext) to convert decoded audio to
+        // F32 planar stereo 48kHz — the format required by the AAC encoder.
+        let mut audio_resampler = if let Some(ref dec) = audio_dec {
+            Some(
+                software::resampling::Context::get(
+                    dec.format(),
+                    dec.channel_layout(),
+                    dec.rate(),
+                    Sample::F32(sample::Type::Planar),
+                    ChannelLayout::STEREO,
+                    48000,
+                )
+                .map_err(|e| AppError::ExportFailed {
+                    reason: format!("创建音频重采样器失败: {e}"),
+                })?,
+            )
+        } else {
+            None
+        };
+
         // --- Output ---
         // Ensure parent directory exists.
         if let Some(parent) = request.output_path.parent() {
@@ -238,7 +260,8 @@ impl TrimExporter for FfmpegTrimExporter {
         let out_w = preset_spec.width;
         let out_h = preset_spec.height;
 
-        // Video encoder (H.264).
+        // Video encoder (H.264) — use fps-based time base.
+        let out_fps = preset_spec.fps;
         let enc_video_codec = encoder::find(ff::codec::Id::H264).ok_or(AppError::ExportFailed {
             reason: "未找到 H.264 编码器".to_string(),
         })?;
@@ -253,7 +276,10 @@ impl TrimExporter for FfmpegTrimExporter {
         video_enc.set_width(out_w);
         video_enc.set_height(out_h);
         video_enc.set_bit_rate(preset_spec.video_bitrate_kbps as usize * 1000);
-        video_enc.set_time_base(video_time_base);
+        // Use fps-based time base for the encoder. PTS values throughout the
+        // pipeline are computed in this time_base.
+        let video_enc_tb = Rational(1, out_fps as i32);
+        video_enc.set_time_base(video_enc_tb);
         video_enc.set_format(Pixel::YUV420P);
         video_enc.set_max_b_frames(0);
         let video_opts = ff::Dictionary::from_iter([("preset", "ultrafast")]);
@@ -269,12 +295,14 @@ impl TrimExporter for FfmpegTrimExporter {
                 .map_err(|e| AppError::ExportFailed {
                     reason: format!("添加视频输出流失败: {e}"),
                 })?;
-        video_stream_out.set_time_base(video_time_base);
+        video_stream_out.set_time_base(video_enc_tb);
         video_stream_out.set_parameters(video_params_out);
         let video_out_idx = video_stream_out.index();
 
-        // Audio encoder (AAC).
-        let (mut audio_encoder, audio_out_idx, audio_enc_tb) = if audio_dec.is_some() {
+        // Audio encoder (AAC) — always created so the output MP4 has an audio
+        // stream even when the source has no audio (silent AAC track).
+        let audio_enc_tb = Rational(1, 48000);
+        let (mut audio_encoder, audio_out_idx): (encoder::audio::Encoder, usize) = {
             let enc_audio_codec =
                 encoder::find(ff::codec::Id::AAC).ok_or(AppError::ExportFailed {
                     reason: "未找到 AAC 编码器".to_string(),
@@ -290,8 +318,7 @@ impl TrimExporter for FfmpegTrimExporter {
             audio_enc.set_rate(48000);
             audio_enc.set_channel_layout(ChannelLayout::STEREO);
             audio_enc.set_format(Sample::F32(sample::Type::Planar));
-            let tb = Rational(1, 48000);
-            audio_enc.set_time_base(tb);
+            audio_enc.set_time_base(audio_enc_tb);
             let enc = audio_enc
                 .open_as(enc_audio_codec)
                 .map_err(|e| AppError::ExportFailed {
@@ -304,20 +331,30 @@ impl TrimExporter for FfmpegTrimExporter {
                     .map_err(|e| AppError::ExportFailed {
                         reason: format!("添加音频输出流失败: {e}"),
                     })?;
-            stream.set_time_base(tb);
+            stream.set_time_base(audio_enc_tb);
             stream.set_parameters(params);
             let idx = stream.index();
-            (Some(enc), Some(idx), Some(tb))
-        } else {
-            (None, None, None)
+            (enc, idx)
         };
 
-        // Video scaler — source pixel format from decoder output.
+        // Video scaler — compute crop/fit geometry based on preset scale policy.
+        // CenterCrop: scale source to cover output, then crop center.
+        // FitWithBars: scale source to fit within output, then pad with black.
         let src_pix_fmt = video_dec.format();
+        let scale_policy = preset_spec.scale_policy;
+        use crate::media::export_presets::ExportScalePolicy;
+
+        let (scaler_src_w, scaler_src_h) = match scale_policy {
+            ExportScalePolicy::CenterCrop => {
+                let (_, _, cw, ch) = compute_center_crop(src_width, src_height, out_w, out_h);
+                (cw, ch)
+            }
+            ExportScalePolicy::FitWithBars => (src_width, src_height),
+        };
         let mut scaler = software::scaling::Context::get(
             src_pix_fmt,
-            src_width,
-            src_height,
+            scaler_src_w,
+            scaler_src_h,
             Pixel::YUV420P,
             out_w,
             out_h,
@@ -327,6 +364,45 @@ impl TrimExporter for FfmpegTrimExporter {
             reason: format!("创建像素格式转换器失败: {e}"),
         })?;
 
+        // Pre-compute crop geometry for CenterCrop (crop_x, crop_y in pixels).
+        let center_crop_origin = match scale_policy {
+            ExportScalePolicy::CenterCrop => {
+                let (cx, cy, _, _) = compute_center_crop(src_width, src_height, out_w, out_h);
+                Some((cx, cy))
+            }
+            ExportScalePolicy::FitWithBars => None,
+        };
+
+        // Pre-create FitWithBars scaler and compute fit dimensions.
+        // These are constant for the entire export since source dimensions
+        // do not change. Creating the scaler once avoids per-frame allocation.
+        let (mut fit_scaler, fit_w, fit_h) = if let ExportScalePolicy::FitWithBars = scale_policy {
+            let src_ratio = src_width as f64 / src_height as f64;
+            let out_ratio = out_w as f64 / out_h as f64;
+            let (fw, fh) = if src_ratio > out_ratio {
+                (out_w, (out_w as f64 / src_ratio).round() as u32)
+            } else {
+                ((out_h as f64 * src_ratio).round() as u32, out_h)
+            };
+            let fw = fw.max(1);
+            let fh = fh.max(1);
+            let s = software::scaling::Context::get(
+                src_pix_fmt,
+                src_width,
+                src_height,
+                Pixel::YUV420P,
+                fw,
+                fh,
+                software::scaling::Flags::BILINEAR,
+            )
+            .map_err(|e| AppError::ExportFailed {
+                reason: format!("创建缩放器失败: {e}"),
+            })?;
+            (Some(s), fw, fh)
+        } else {
+            (None, 0u32, 0u32)
+        };
+
         output.write_header().map_err(|e| AppError::ExportFailed {
             reason: format!("写入文件头失败: {e}"),
         })?;
@@ -334,11 +410,22 @@ impl TrimExporter for FfmpegTrimExporter {
         // --- Segment-based decode/encode loop ---
         // Track cumulative cut duration so output timestamps are continuous
         // across keep segments. E.g., keeps [0..2s, 6..8s] → output [0..2s, 2..4s].
+        // Cut tracking uses nanoseconds; PTS offsets are tracked in each stream's
+        // own time_base to avoid precision loss from nanos→time_base roundtrips.
         let total_keeps = request.cut_timeline.keeps.len();
+        // First frame PTS offset in input video time_base units.
         let mut video_pts_offset: Option<i64> = None;
-        let mut audio_pts_offset: Option<i64> = None;
         let mut cumulative_cut_nanos: i64 = 0;
         let mut prev_seg_end_nanos: i64 = 0;
+        // Track output PTS in encoder time_base units for monotonic continuity.
+        let mut last_video_out_pts: i64 = 0;
+        // Audio output PTS advances by sample count — never derived from
+        // resampled frame PTS, which may be stale after resampler flush.
+        let mut next_audio_out_pts: i64 = 0;
+        // Input audio time_base for boundary checks and PTS conversion.
+        let input_audio_tb = audio_stream_info
+            .map(|(_, tb)| tb)
+            .unwrap_or(Rational(1, 48000));
 
         for (seg_idx, segment) in request.cut_timeline.keeps.iter().enumerate() {
             if request.cancel_token.load(Ordering::Relaxed) {
@@ -355,9 +442,56 @@ impl TrimExporter for FfmpegTrimExporter {
             }
             prev_seg_end_nanos = seg_end_nanos;
 
-            // Seek input to segment start (in stream time_base).
+            // Convert segment boundaries to input video time_base units for seek
+            // and packet comparison.
+            let seg_start_in_vtb =
+                nanos_to_time_base_units(seg_start_nanos as u64, video_time_base).unwrap_or(0);
+            let seg_end_in_vtb =
+                nanos_to_time_base_units(seg_end_nanos as u64, video_time_base).unwrap_or(0);
+
+            // Convert segment boundaries to input audio time_base for audio
+            // packet boundary checks.
+            let seg_start_in_atb =
+                nanos_to_time_base_units(seg_start_nanos as u64, input_audio_tb).unwrap_or(0);
+            let seg_end_in_atb =
+                nanos_to_time_base_units(seg_end_nanos as u64, input_audio_tb).unwrap_or(0);
+
+            // Flush audio resampler between segments to drain buffered frames
+            // from the previous segment. Without this, stale buffered frames
+            // carry old PTS values that break audio monotonicity.
+            if seg_idx > 0 {
+                if let Some(ref mut resampler) = audio_resampler {
+                    let mut flush_out = frame::Audio::empty();
+                    // flush() may return Ok even with no buffered data.
+                    let flush_result = resampler.flush(&mut flush_out);
+                    if flush_result.is_ok() {
+                        let num_samples = flush_out.samples();
+                        if num_samples > 0 {
+                            flush_out.set_pts(Some(next_audio_out_pts));
+                            next_audio_out_pts += num_samples as i64;
+                            audio_encoder.send_frame(&flush_out).map_err(|e| {
+                                AppError::ExportFailed {
+                                    reason: format!("编码刷新音频帧失败: {e}"),
+                                }
+                            })?;
+                            let mut enc_pkt = ff::Packet::empty();
+                            while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
+                                enc_pkt.set_stream(audio_out_idx);
+                                enc_pkt.rescale_ts(audio_enc_tb, audio_enc_tb);
+                                enc_pkt.write_interleaved(&mut output).map_err(|e| {
+                                    AppError::ExportFailed {
+                                        reason: format!("写入刷新音频数据包失败: {e}"),
+                                    }
+                                })?;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Seek input to segment start (in stream time_base units).
             input
-                .seek(seg_start_nanos, ..seg_end_nanos)
+                .seek(seg_start_in_vtb, ..seg_end_in_vtb)
                 .map_err(|e| AppError::ExportFailed {
                     reason: format!("定位到裁剪段失败: {e}"),
                 })?;
@@ -376,14 +510,22 @@ impl TrimExporter for FfmpegTrimExporter {
                         let pkt_ts = packet.pts().unwrap_or(0);
 
                         // Stop if we've passed the segment end.
-                        let pkt_nanos =
-                            pkt_ts * video_time_base.0 as i64 / video_time_base.1 as i64;
-                        if pkt_nanos > seg_end_nanos && pkt_stream == video_stream_index {
+                        if pkt_stream == video_stream_index && pkt_ts > seg_end_in_vtb {
+                            break;
+                        }
+                        if pkt_stream == input_audio_stream_index.unwrap_or(usize::MAX)
+                            && pkt_ts > seg_end_in_atb
+                        {
                             break;
                         }
 
                         // Skip packets before segment start.
-                        if pkt_nanos < seg_start_nanos && pkt_stream == video_stream_index {
+                        if pkt_stream == video_stream_index && pkt_ts < seg_start_in_vtb {
+                            continue;
+                        }
+                        if pkt_stream == input_audio_stream_index.unwrap_or(usize::MAX)
+                            && pkt_ts < seg_start_in_atb
+                        {
                             continue;
                         }
 
@@ -397,65 +539,237 @@ impl TrimExporter for FfmpegTrimExporter {
 
                             let mut decoded = unsafe { frame::Frame::empty() };
                             while video_dec.receive_frame(&mut decoded).is_ok() {
-                                if video_pts_offset.is_none() {
-                                    video_pts_offset = Some(decoded.pts().unwrap_or(0));
-                                }
-                                // Remap PTS: subtract first segment start and cumulative
-                                // cut duration to produce continuous output timestamps.
                                 let raw_pts = decoded.pts().unwrap_or(0);
-                                let cut_offset_in_tb = cumulative_cut_nanos
-                                    * video_time_base.1 as i64
-                                    / video_time_base.0 as i64;
-                                let out_pts =
-                                    raw_pts - video_pts_offset.unwrap() - cut_offset_in_tb;
 
-                                // Copy decoded frame data row-by-row, respecting source
-                                // linesize (stride) padding that differs from destination.
-                                let mut input_frame =
-                                    frame::Video::new(video_dec.format(), src_width, src_height);
-                                input_frame.set_pts(decoded.pts());
-                                // Pre-compute plane heights before mutable borrow of data_mut.
-                                let num_planes = input_frame.planes().min(4);
-                                let plane_heights: Vec<u32> = (0..num_planes)
-                                    .map(|i| input_frame.plane_height(i))
-                                    .collect();
-                                unsafe {
-                                    let src_ptr = decoded.as_ptr();
-                                    for plane_idx in 0..num_planes {
-                                        let dst = input_frame.data_mut(plane_idx);
-                                        let src_data = (*src_ptr).data[plane_idx];
-                                        let src_linesize = (*src_ptr).linesize[plane_idx] as usize;
-                                        if src_data.is_null() || dst.is_empty() {
-                                            continue;
-                                        }
-                                        let plane_h = plane_heights[plane_idx] as usize;
-                                        let dst_linesize = if plane_h > 0 {
-                                            dst.len() / plane_h
-                                        } else {
-                                            continue;
-                                        };
-                                        let copy_per_row = dst_linesize.min(src_linesize);
-                                        for row in 0..plane_h {
-                                            let src_row = src_data.add(row * src_linesize);
-                                            let dst_row = dst.as_mut_ptr().add(row * dst_linesize);
-                                            std::ptr::copy_nonoverlapping(
-                                                src_row,
-                                                dst_row,
-                                                copy_per_row,
-                                            );
-                                        }
-                                    }
+                                // Capture first frame PTS offset in input time_base units.
+                                if video_pts_offset.is_none() {
+                                    video_pts_offset = Some(raw_pts);
                                 }
+                                // Compute cut offset in input video time_base units.
+                                let cut_offset_in_vtb = nanos_to_time_base_units(
+                                    cumulative_cut_nanos as u64,
+                                    video_time_base,
+                                )
+                                .unwrap_or(0);
+                                // Output PTS in input video time_base (continuous after cuts).
+                                let out_pts_in_vtb =
+                                    raw_pts - video_pts_offset.unwrap_or(0) - cut_offset_in_vtb;
+                                // Rescale from input video time_base to encoder output time_base.
+                                // Avoids the precision loss of going through nanoseconds.
+                                let out_pts = if video_time_base == video_enc_tb {
+                                    out_pts_in_vtb
+                                } else {
+                                    (out_pts_in_vtb as i128
+                                        * video_time_base.0 as i128
+                                        * video_enc_tb.1 as i128
+                                        / (video_time_base.1 as i128 * video_enc_tb.0 as i128))
+                                        as i64
+                                };
 
+                                // Ensure monotonic PTS.
+                                let out_pts = out_pts.max(last_video_out_pts);
+                                last_video_out_pts = out_pts;
+
+                                // Apply scale policy (CenterCrop or FitWithBars).
+                                // CenterCrop: create a virtual sub-frame pointing to the
+                                // crop region, then scale to output dimensions.
+                                // FitWithBars: scale to fit, then center on black canvas.
                                 let mut output_frame =
                                     frame::Video::new(Pixel::YUV420P, out_w, out_h);
                                 output_frame.set_pts(Some(out_pts));
 
-                                scaler.run(&input_frame, &mut output_frame).map_err(|e| {
-                                    AppError::ExportFailed {
-                                        reason: format!("像素格式转换失败: {e}"),
+                                if let Some((crop_x, crop_y)) = center_crop_origin {
+                                    // CenterCrop: copy the crop region from the decoded
+                                    // frame into a new frame, then scale to output size.
+                                    // Handles both BGRA (single-plane) and YUV420P
+                                    // (multi-plane with chroma subsampling).
+                                    let mut crop_frame =
+                                        frame::Video::new(src_pix_fmt, scaler_src_w, scaler_src_h);
+                                    unsafe {
+                                        let src_ptr = decoded.as_ptr();
+                                        let num_planes = crop_frame.planes().min(4);
+                                        for plane_idx in 0..num_planes {
+                                            let src_data = (*src_ptr).data[plane_idx];
+                                            let src_linesize =
+                                                (*src_ptr).linesize[plane_idx] as usize;
+                                            if src_data.is_null() {
+                                                continue;
+                                            }
+                                            let plane_h =
+                                                crop_frame.plane_height(plane_idx) as usize;
+                                            let plane_w =
+                                                crop_frame.plane_width(plane_idx) as usize;
+                                            let dst = crop_frame.data_mut(plane_idx);
+                                            let dst_linesize = if plane_h > 0 {
+                                                dst.len() / plane_h
+                                            } else {
+                                                continue;
+                                            };
+                                            // Per-plane crop origin: chroma planes in
+                                            // YUV420P are subsampled by 2 in both axes.
+                                            let plane_crop_x = if plane_idx == 0 {
+                                                crop_x as usize
+                                            } else {
+                                                crop_x as usize / 2
+                                            };
+                                            let plane_crop_y = if plane_idx == 0 {
+                                                crop_y as usize
+                                            } else {
+                                                crop_y as usize / 2
+                                            };
+                                            let copy_per_row = if src_linesize > plane_crop_x {
+                                                plane_w
+                                                    .min(dst_linesize)
+                                                    .min(src_linesize - plane_crop_x)
+                                            } else {
+                                                0
+                                            };
+                                            if copy_per_row == 0 {
+                                                continue;
+                                            }
+                                            for row in 0..plane_h {
+                                                let src_row = src_data.add(
+                                                    (row + plane_crop_y) * src_linesize
+                                                        + plane_crop_x,
+                                                );
+                                                let dst_row =
+                                                    dst.as_mut_ptr().add(row * dst_linesize);
+                                                std::ptr::copy_nonoverlapping(
+                                                    src_row,
+                                                    dst_row,
+                                                    copy_per_row,
+                                                );
+                                            }
+                                        }
                                     }
-                                })?;
+
+                                    scaler.run(&crop_frame, &mut output_frame).map_err(|e| {
+                                        AppError::ExportFailed {
+                                            reason: format!("像素格式转换失败: {e}"),
+                                        }
+                                    })?;
+                                } else {
+                                    // FitWithBars: scale source to fit within output,
+                                    // then center on black canvas (YUV420P).
+                                    let mut fit_frame =
+                                        frame::Video::new(Pixel::YUV420P, fit_w, fit_h);
+                                    // Copy decoded frame data for scaling.
+                                    let mut src_copy =
+                                        frame::Video::new(src_pix_fmt, src_width, src_height);
+                                    let num_planes = src_copy.planes().min(4);
+                                    unsafe {
+                                        let src_ptr = decoded.as_ptr();
+                                        for plane_idx in 0..num_planes {
+                                            let src_data = (*src_ptr).data[plane_idx];
+                                            let src_linesize =
+                                                (*src_ptr).linesize[plane_idx] as usize;
+                                            if src_data.is_null() {
+                                                continue;
+                                            }
+                                            let plane_h = src_copy.plane_height(plane_idx) as usize;
+                                            let dst = src_copy.data_mut(plane_idx);
+                                            let dst_linesize = if plane_h > 0 {
+                                                dst.len() / plane_h
+                                            } else {
+                                                continue;
+                                            };
+                                            let copy_per_row = dst_linesize.min(src_linesize);
+                                            for row in 0..plane_h {
+                                                let src_row = src_data.add(row * src_linesize);
+                                                let dst_row =
+                                                    dst.as_mut_ptr().add(row * dst_linesize);
+                                                std::ptr::copy_nonoverlapping(
+                                                    src_row,
+                                                    dst_row,
+                                                    copy_per_row,
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    fit_scaler
+                                        .as_mut()
+                                        .unwrap()
+                                        .run(&src_copy, &mut fit_frame)
+                                        .map_err(|e| AppError::ExportFailed {
+                                            reason: format!("缩放失败: {e}"),
+                                        })?;
+
+                                    // Fill output with YUV420P black:
+                                    // Y=0 (luma), U=128 (chroma), V=128 (chroma).
+                                    // Setting U/V to 0 would produce green, not black.
+                                    for plane_idx in 0..output_frame.planes() {
+                                        let plane = output_frame.data_mut(plane_idx);
+                                        let fill_value: u8 = if plane_idx == 0 { 0 } else { 128 };
+                                        for byte in plane.iter_mut() {
+                                            *byte = fill_value;
+                                        }
+                                    }
+
+                                    // Copy fit_frame into center of output.
+                                    // YUV420P: Y is full-res, U/V are half-res (2x2 subsampled).
+                                    // x_off/y_off are in full-resolution pixel units.
+                                    let x_off = (out_w - fit_w) / 2;
+                                    let y_off = (out_h - fit_h) / 2;
+                                    // Pre-compute plane dimensions to avoid borrow conflict.
+                                    let out_plane_heights: Vec<u32> = (0..output_frame.planes())
+                                        .map(|i| output_frame.plane_height(i))
+                                        .collect();
+                                    let fit_plane_heights: Vec<u32> = (0..fit_frame.planes())
+                                        .map(|i| fit_frame.plane_height(i))
+                                        .collect();
+                                    let fit_plane_widths: Vec<u32> = (0..fit_frame.planes())
+                                        .map(|i| fit_frame.plane_width(i))
+                                        .collect();
+                                    let num_planes = fit_frame.planes().min(4);
+                                    unsafe {
+                                        for plane_idx in 0..num_planes {
+                                            let src_data = fit_frame.data(plane_idx);
+                                            let dst_data = output_frame.data_mut(plane_idx);
+                                            let src_h = fit_plane_heights[plane_idx] as usize;
+                                            let dst_h = out_plane_heights[plane_idx] as usize;
+                                            let src_linesize = if src_h > 0 {
+                                                src_data.len() / src_h
+                                            } else {
+                                                continue;
+                                            };
+                                            let dst_linesize = if dst_h > 0 {
+                                                dst_data.len() / dst_h
+                                            } else {
+                                                continue;
+                                            };
+                                            // Per-plane offset: chroma planes (1,2) are
+                                            // subsampled by 2 in YUV420P.
+                                            let plane_x_off = if plane_idx == 0 {
+                                                x_off as usize
+                                            } else {
+                                                x_off as usize / 2
+                                            };
+                                            let plane_y_off = if plane_idx == 0 {
+                                                y_off as usize
+                                            } else {
+                                                y_off as usize / 2
+                                            };
+                                            let copy_rows =
+                                                src_h.min(dst_h.saturating_sub(plane_y_off));
+                                            let copy_bytes = fit_plane_widths[plane_idx] as usize;
+                                            let copy_bytes = copy_bytes
+                                                .min(dst_linesize.saturating_sub(plane_x_off));
+                                            let copy_bytes = copy_bytes.min(src_linesize);
+                                            for row in 0..copy_rows {
+                                                let src_row =
+                                                    src_data.as_ptr().add(row * src_linesize);
+                                                let dst_row = dst_data.as_mut_ptr().add(
+                                                    (row + plane_y_off) * dst_linesize
+                                                        + plane_x_off,
+                                                );
+                                                std::ptr::copy_nonoverlapping(
+                                                    src_row, dst_row, copy_bytes,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
 
                                 video_encoder.send_frame(&output_frame).map_err(|e| {
                                     AppError::ExportFailed {
@@ -466,7 +780,7 @@ impl TrimExporter for FfmpegTrimExporter {
                                 let mut enc_pkt = ff::Packet::empty();
                                 while video_encoder.receive_packet(&mut enc_pkt).is_ok() {
                                     enc_pkt.set_stream(video_out_idx);
-                                    enc_pkt.rescale_ts(video_time_base, video_time_base);
+                                    enc_pkt.rescale_ts(video_enc_tb, video_enc_tb);
                                     enc_pkt.write_interleaved(&mut output).map_err(|e| {
                                         AppError::ExportFailed {
                                             reason: format!("写入视频数据包失败: {e}"),
@@ -474,47 +788,52 @@ impl TrimExporter for FfmpegTrimExporter {
                                     })?;
                                 }
                             }
-                        } else if Some(pkt_stream) == audio_out_idx {
-                            // Decode → encode audio.
+                        } else if Some(pkt_stream) == input_audio_stream_index {
+                            // Decode → resample → encode audio.
                             if let Some(ref mut dec) = audio_dec {
                                 dec.send_packet(&packet)
                                     .map_err(|e| AppError::ExportFailed {
                                         reason: format!("发送音频包到解码器失败: {e}"),
                                     })?;
 
-                                let mut decoded = unsafe { frame::Frame::empty() };
-                                while dec.receive_frame(&mut decoded).is_ok() {
-                                    let audio_tb = audio_enc_tb.unwrap_or(Rational(1, 48000));
-                                    if audio_pts_offset.is_none() {
-                                        audio_pts_offset = Some(decoded.pts().unwrap_or(0));
-                                    }
-                                    let raw_audio_pts = decoded.pts().unwrap_or(0);
-                                    let audio_cut_offset = cumulative_cut_nanos * audio_tb.1 as i64
-                                        / audio_tb.0 as i64;
-                                    let out_pts = raw_audio_pts
-                                        - audio_pts_offset.unwrap()
-                                        - audio_cut_offset;
-                                    decoded.set_pts(Some(out_pts));
-
-                                    if let Some(ref mut enc) = audio_encoder {
-                                        enc.send_frame(&decoded).map_err(|e| {
-                                            AppError::ExportFailed {
-                                                reason: format!("编码音频帧失败: {e}"),
-                                            }
-                                        })?;
-
-                                        let mut enc_pkt = ff::Packet::empty();
-                                        while enc.receive_packet(&mut enc_pkt).is_ok() {
-                                            if let Some(idx) = audio_out_idx {
-                                                enc_pkt.set_stream(idx);
-                                            }
-                                            enc_pkt.rescale_ts(audio_tb, audio_tb);
-                                            enc_pkt.write_interleaved(&mut output).map_err(
+                                let mut decoded_audio = frame::Audio::empty();
+                                while dec.receive_frame(&mut decoded_audio).is_ok() {
+                                    // Resample decoded audio to F32P stereo 48kHz.
+                                    let mut resampled =
+                                        if let Some(ref mut resampler) = audio_resampler {
+                                            let mut out = frame::Audio::empty();
+                                            resampler.run(&decoded_audio, &mut out).map_err(
                                                 |e| AppError::ExportFailed {
-                                                    reason: format!("写入音频数据包失败: {e}"),
+                                                    reason: format!("音频重采样失败: {e}"),
                                                 },
                                             )?;
+                                            out
+                                        } else {
+                                            decoded_audio.clone()
+                                        };
+
+                                    // Output PTS is tracked by sample count to guarantee
+                                    // monotonicity. Never derive from resampled frame PTS
+                                    // which may be stale after resampler flush.
+                                    let num_samples = resampled.samples() as i64;
+                                    resampled.set_pts(Some(next_audio_out_pts));
+                                    next_audio_out_pts += num_samples;
+
+                                    audio_encoder.send_frame(&resampled).map_err(|e| {
+                                        AppError::ExportFailed {
+                                            reason: format!("编码音频帧失败: {e}"),
                                         }
+                                    })?;
+
+                                    let mut enc_pkt = ff::Packet::empty();
+                                    while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
+                                        enc_pkt.set_stream(audio_out_idx);
+                                        enc_pkt.rescale_ts(audio_enc_tb, audio_enc_tb);
+                                        enc_pkt.write_interleaved(&mut output).map_err(|e| {
+                                            AppError::ExportFailed {
+                                                reason: format!("写入音频数据包失败: {e}"),
+                                            }
+                                        })?;
                                     }
                                 }
                             }
@@ -530,10 +849,62 @@ impl TrimExporter for FfmpegTrimExporter {
                 }
             }
 
-            // Report progress per segment.
+            // Report progress per segment (clamp to 1..99 for intermediate,
+            // final 100 is reported after successful completion).
             if let Some(ref progress) = request.progress {
-                let pct = ((seg_idx + 1) * 100 / total_keeps).min(100) as u8;
+                let pct = ((seg_idx + 1) * 99 / total_keeps).clamp(1, 99) as u8;
                 progress.report(pct);
+            }
+        }
+
+        // If source has no audio, generate silent AAC frames to cover the
+        // entire kept duration. This ensures the output always has an audio
+        // stream for consistent playback behavior.
+        if audio_dec.is_none() {
+            let total_kept_nanos: i64 = request
+                .cut_timeline
+                .keeps
+                .iter()
+                .map(|s| s.end.nanos as i64 - s.start.nanos as i64)
+                .sum();
+            let total_kept_secs = total_kept_nanos as f64 / 1_000_000_000.0;
+            let total_audio_frames = (total_kept_secs * 48000.0).ceil() as i64;
+            let frame_size = 1024i64;
+            let num_packets = (total_audio_frames / frame_size).max(1);
+
+            for _ in 0..num_packets {
+                let mut silent_frame = frame::Audio::new(
+                    Sample::F32(sample::Type::Planar),
+                    frame_size as usize,
+                    ChannelLayout::STEREO,
+                );
+                silent_frame.set_pts(Some(next_audio_out_pts));
+                next_audio_out_pts += frame_size;
+
+                // Fill with silence.
+                for ch in 0..2 {
+                    let plane = silent_frame.plane_mut::<f32>(ch);
+                    for s in plane.iter_mut() {
+                        *s = 0.0;
+                    }
+                }
+
+                audio_encoder
+                    .send_frame(&silent_frame)
+                    .map_err(|e| AppError::ExportFailed {
+                        reason: format!("编码静音音频帧失败: {e}"),
+                    })?;
+
+                let mut enc_pkt = ff::Packet::empty();
+                while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
+                    enc_pkt.set_stream(audio_out_idx);
+                    enc_pkt.rescale_ts(audio_enc_tb, audio_enc_tb);
+                    enc_pkt
+                        .write_interleaved(&mut output)
+                        .map_err(|e| AppError::ExportFailed {
+                            reason: format!("写入静音音频数据包失败: {e}"),
+                        })?;
+                }
             }
         }
 
@@ -546,7 +917,7 @@ impl TrimExporter for FfmpegTrimExporter {
         let mut enc_pkt = ff::Packet::empty();
         while video_encoder.receive_packet(&mut enc_pkt).is_ok() {
             enc_pkt.set_stream(video_out_idx);
-            enc_pkt.rescale_ts(video_time_base, video_time_base);
+            enc_pkt.rescale_ts(video_enc_tb, video_enc_tb);
             enc_pkt
                 .write_interleaved(&mut output)
                 .map_err(|e| AppError::ExportFailed {
@@ -554,31 +925,66 @@ impl TrimExporter for FfmpegTrimExporter {
                 })?;
         }
 
-        if let Some(ref mut enc) = audio_encoder {
-            enc.send_eof().map_err(|e| AppError::ExportFailed {
+        audio_encoder
+            .send_eof()
+            .map_err(|e| AppError::ExportFailed {
                 reason: format!("刷新音频编码器失败: {e}"),
             })?;
-            while enc.receive_packet(&mut enc_pkt).is_ok() {
-                if let Some(idx) = audio_out_idx {
-                    enc_pkt.set_stream(idx);
-                }
-                enc_pkt
-                    .write_interleaved(&mut output)
-                    .map_err(|e| AppError::ExportFailed {
-                        reason: format!("写入音频数据包失败: {e}"),
-                    })?;
-            }
+        while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
+            enc_pkt.set_stream(audio_out_idx);
+            enc_pkt.rescale_ts(audio_enc_tb, audio_enc_tb);
+            enc_pkt
+                .write_interleaved(&mut output)
+                .map_err(|e| AppError::ExportFailed {
+                    reason: format!("写入音频数据包失败: {e}"),
+                })?;
         }
 
         output.write_trailer().map_err(|e| AppError::ExportFailed {
             reason: format!("写入文件尾失败: {e}"),
         })?;
 
+        // Report final 100% on success.
+        if let Some(ref progress) = request.progress {
+            progress.report(100);
+        }
+
         Ok(TrimExportResult {
             output_path: request.output_path,
             cut_count: request.cut_timeline.cuts.len(),
         })
     }
+}
+
+/// Compute center-crop geometry: (crop_x, crop_y, crop_w, crop_h).
+///
+/// Finds the largest region in the source that has the same aspect ratio as
+/// the output, then centers it. Returns the crop origin and size in source
+/// pixel coordinates. The crop is always clamped to source bounds.
+#[cfg(feature = "ffmpeg")]
+fn compute_center_crop(src_w: u32, src_h: u32, out_w: u32, out_h: u32) -> (u32, u32, u32, u32) {
+    let src_ratio = src_w as f64 / src_h as f64;
+    let out_ratio = out_w as f64 / out_h as f64;
+
+    let (mut crop_w, mut crop_h) = if src_ratio > out_ratio {
+        // Source is wider than output: crop horizontally.
+        let crop_h = src_h;
+        let crop_w = (src_h as f64 * out_ratio).round() as u32;
+        (crop_w.max(1), crop_h)
+    } else {
+        // Source is taller than output: crop vertically.
+        let crop_w = src_w;
+        let crop_h = (src_w as f64 / out_ratio).round() as u32;
+        (crop_w, crop_h.max(1))
+    };
+
+    // Clamp crop dimensions to source bounds to prevent overflow.
+    crop_w = crop_w.min(src_w);
+    crop_h = crop_h.min(src_h);
+
+    let crop_x = (src_w - crop_w) / 2;
+    let crop_y = (src_h - crop_h) / 2;
+    (crop_x, crop_y, crop_w, crop_h)
 }
 
 #[cfg(test)]
@@ -626,8 +1032,6 @@ mod tests {
     #[cfg(feature = "ffmpeg")]
     mod ffmpeg_tests {
         use super::*;
-        use crate::core::cut::{CutReason, CutSegment, KeepSegment};
-        use crate::core::frame::MediaTimestamp;
         use crate::test_support::ffmpeg_helpers;
 
         /// Create a synthetic source artifact and return its path.

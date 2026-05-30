@@ -19,7 +19,9 @@ use crate::core::timeline::BeautifyConfigSnapshot;
 use crate::media::audio_mixer::SimpleAudioMixer;
 use crate::media::mic_level::MicLevelDetector;
 use crate::media::recording_metadata::RecordingMetadataWriter;
-use crate::media::recording_writer::{CountingRecordingWriter, RecordingResult, RecordingWriter};
+#[cfg(not(feature = "ffmpeg"))]
+use crate::media::recording_writer::CountingRecordingWriter;
+use crate::media::recording_writer::{RecordingResult, RecordingWriter};
 use crate::media::silence_detector::FrameDiffAnalyzer;
 use crate::media::trim_audio_activity::BaseAudioActivityAnalyzer;
 use crate::media::trim_metadata::{TrimMetadata, TrimMetadataWriter, TRIM_METADATA_SCHEMA_VERSION};
@@ -218,6 +220,16 @@ impl MacRecordingService {
         let mic_level = self.mic_level.clone();
         frame_count.store(0, Ordering::Relaxed);
 
+        // Use FFmpeg writer when the feature is enabled to produce a playable
+        // original recording artifact. Falls back to counting writer otherwise.
+        #[cfg(feature = "ffmpeg")]
+        let writer: Box<dyn RecordingWriter> = {
+            let output_path = crate::media::export_paths::original_recording_path();
+            Box::new(crate::media::ffmpeg_writer::FfmpegRecordingWriter::new(
+                output_path,
+            )?)
+        };
+        #[cfg(not(feature = "ffmpeg"))]
         let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
         self.consumer_handle = Some(thread::spawn(move || {
             Self::consume_frames(

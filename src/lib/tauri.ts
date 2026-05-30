@@ -49,7 +49,7 @@ export type ExportPreset = 'bilibili' | 'douyin' | 'xiaohongshu'
 export type CursorEffectSummary = {
   frameCount: number
   clickEffectCount: number
-  effectTimelinePath: string
+  effectTimelinePath: string | null
 }
 
 export type CutTimelineSummary = {
@@ -61,7 +61,7 @@ export type CutTimelineSummary = {
 export type ExportSummary = {
   frameCount: number
   clickEffectCount: number
-  effectTimelinePath: string
+  effectTimelinePath: string | null
   cutCount: number
   totalCutNanos: number
   cutTimelinePath: string | null

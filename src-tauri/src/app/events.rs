@@ -73,7 +73,9 @@ impl From<RecordingPermissions> for PermissionPayload {
 pub struct CursorEffectSummaryPayload {
     pub frame_count: usize,
     pub click_effect_count: usize,
-    pub effect_timeline_path: String,
+    /// Path to the cursor effect timeline JSON file. `None` when cursor
+    /// metadata is unavailable or the build was skipped/failed.
+    pub effect_timeline_path: Option<String>,
 }
 
 /// Summary returned after building a cut timeline.
@@ -91,7 +93,9 @@ pub struct CutTimelineSummaryPayload {
 pub struct ExportSummaryPayload {
     pub frame_count: usize,
     pub click_effect_count: usize,
-    pub effect_timeline_path: String,
+    /// Path to cursor effect timeline. `None` when cursor effects are
+    /// unavailable — basic playable export still proceeds without them.
+    pub effect_timeline_path: Option<String>,
     pub cut_count: usize,
     pub total_cut_nanos: u64,
     pub cut_timeline_path: Option<String>,
@@ -180,7 +184,7 @@ mod tests {
         let payload = CursorEffectSummaryPayload {
             frame_count: 10,
             click_effect_count: 2,
-            effect_timeline_path: "/tmp/effects.json".to_string(),
+            effect_timeline_path: Some("/tmp/effects.json".to_string()),
         };
 
         let json = serde_json::to_string(&payload).unwrap();
@@ -239,7 +243,7 @@ mod tests {
         let payload = ExportSummaryPayload {
             frame_count: 10,
             click_effect_count: 1,
-            effect_timeline_path: "/tmp/effects.json".to_string(),
+            effect_timeline_path: Some("/tmp/effects.json".to_string()),
             cut_count: 2,
             total_cut_nanos: 3_000_000_000,
             cut_timeline_path: Some("/tmp/cuts.json".to_string()),

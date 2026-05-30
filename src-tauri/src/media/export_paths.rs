@@ -21,6 +21,22 @@ pub fn export_output_path(
     Ok(parent.join(format!("{stem}-{preset_id}-export-{sequence}.mp4")))
 }
 
+/// Generates a unique output path for the original recording artifact.
+///
+/// Placed in the system temp directory under `luzhi-recordings/` with a
+/// timestamped filename to avoid collisions across recording sessions.
+pub fn original_recording_path() -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir()
+        .join("luzhi-recordings")
+        .join(format!("recording-{millis}-{seq}.mp4"))
+}
+
 pub fn validate_non_empty_output(path: &Path) -> AppResult<()> {
     let metadata = std::fs::metadata(path).map_err(|error| AppError::ExportFailed {
         reason: format!("导出文件不存在或不可访问: {error}"),
