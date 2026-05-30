@@ -44,6 +44,9 @@ pub fn export_recording_with_timeline(
         });
     }
 
+    // Clone output path for cleanup on failure/cancel.
+    let planned_output_path = output_path.clone();
+
     let result = exporter.export(TrimExportRequest {
         input_path,
         output_path,
@@ -52,10 +55,25 @@ pub fn export_recording_with_timeline(
         effect_timeline_path,
         cancel_token,
         progress,
-    })?;
+    });
 
-    validate_non_empty_output(&result.output_path)?;
-    Ok(result)
+    // Clean up partial output on error.
+    match result {
+        Ok(result) => {
+            // Validate the output file.
+            if let Err(error) = validate_non_empty_output(&result.output_path) {
+                // Clean up empty/invalid output file.
+                let _ = std::fs::remove_file(&result.output_path);
+                return Err(error);
+            }
+            Ok(result)
+        }
+        Err(error) => {
+            // Clean up partial output file on error (cancel or failure).
+            let _ = std::fs::remove_file(&planned_output_path);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]

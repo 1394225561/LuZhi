@@ -47,7 +47,9 @@ impl BaseAudioActivityAnalyzer {
                 .saturating_add(frame.saturating_mul(1_000_000_000) / chunk.sample_rate as u64);
 
             let bucket_start = self.bucket_start_nanos.get_or_insert(frame_nanos);
-            if frame_nanos > bucket_start.saturating_add(BASE_RMS_BUCKET_NANOS)
+            // Strict [bucket_start, bucket_start + BASE_RMS_BUCKET_NANOS) boundary.
+            // Exact-boundary samples (frame_nanos == bucket_start + 100ms) go to the next bucket.
+            if frame_nanos >= bucket_start.saturating_add(BASE_RMS_BUCKET_NANOS)
                 && self.sample_count > 0
             {
                 output.push(self.take_bucket());
@@ -175,22 +177,21 @@ mod tests {
     fn base_analyzer_emits_100ms_buckets() {
         let mut analyzer = BaseAudioActivityAnalyzer::default();
         // 20 samples at sample_rate=10 → timestamps 0, 100ms, 200ms, …, 1900ms.
-        // This spans two 100ms bucket windows. Frames at exact boundaries
-        // stay in the current bucket; emission happens when a frame crosses
-        // past the boundary. Expected: 9 emitted buckets (the last bucket
-        // with 2 samples remains in the analyzer until flush).
+        // Strict [start, start+100ms) boundaries: exact-boundary samples (100ms, 200ms, etc.)
+        // trigger emission of the current bucket and start a new one.
+        // Expected: 19 emitted buckets (each with 1 sample, except the first which has 1).
         let samples = analyzer.push_chunk(&chunk(0, 20, 0.5));
 
-        assert_eq!(samples.len(), 9);
+        assert_eq!(samples.len(), 19);
         assert_eq!(samples[0].start.nanos, 0);
         assert_eq!(samples[0].end.nanos, BASE_RMS_BUCKET_NANOS);
         assert!((samples[0].rms() - 0.5).abs() < 0.001);
-        assert_eq!(samples[0].sample_count, 2);
+        assert_eq!(samples[0].sample_count, 1);
 
-        // Flush emits the remaining bucket.
+        // Flush emits the remaining bucket (the last sample at 1900ms).
         let remaining = analyzer.flush().unwrap();
-        assert_eq!(remaining.sample_count, 2);
-        assert_eq!(remaining.start.nanos, 1_800_000_000);
+        assert_eq!(remaining.sample_count, 1);
+        assert_eq!(remaining.start.nanos, 1_900_000_000);
     }
 
     #[test]

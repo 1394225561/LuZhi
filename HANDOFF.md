@@ -1,8 +1,8 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-30 | Phase 6 导出预设与本地授权实现完成（自动化验证全部通过，FFmpeg 生产编码待人工审查）。
+> 最后更新：2026-05-30 | Phase 6 导出预设与本地授权边界部分完成（本地授权边界可接受，导出主路径未完成且存在产品路径回归）。
 >
-> 更新本文件时，**必须**保持“项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
+> 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
 ## 项目概述
 
@@ -81,14 +81,15 @@ W1-W12 Phase：
 
 ## 工作任务记录
 
-### 2026-05-30：Phase 6 导出预设与本地授权实现
+### 2026-05-30：Phase 6 导出预设与本地授权边界部分完成
 
 输入文件：
 
 - `docs/superpowers/plans/2026-05-29-phase-6-export-presets-local-license.md`
 - `tests/phase-6-w11-w12-checklist.md`
+- `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md`
 
-本轮完成（8 Tasks）：
+本轮完成（边界/helper/UI 骨架）：
 
 1. `media/export_presets.rs` 建立固定三种导出预设（Bilibili 16:9、抖音 9:16、小红书 1:1）。
 2. `media/export_paths.rs` 生成独立输出路径并验证非空输出。
@@ -98,6 +99,18 @@ W1-W12 Phase：
 6. `media/original_recording_artifact.rs` 源文件验证器和 `ffmpeg_test_support.rs` 测试辅助。
 7. `FfmpegTrimExporter` 更新为使用新错误类型和验证逻辑（实际转码需 Native Safety 审查）。
 8. `app/license_service.rs` 实现本地 14 天试用与激活状态接口，前端展示试用状态。
+
+Code Review 整改（2026-05-30）：
+
+**整改背景**：Code Review 文件 `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 于 commit `8e050f0` 时生成。后续 commits `a17382a` 和 `e2a6ae2` 包含格式化和锁合并等重构，但未包含行为修复。以下整改在 review 之后进行：
+
+1. **Critical 1 修复**：`export_video()` 在非 FFmpeg 构建中不再因缺失 source artifact 陷入死路，返回明确 FFmpeg Gate 错误。
+2. **Critical 2 修复**：`export_video()` 接入 `ExportService` 和 `TrimExporter`，cancel token 和 progress callback 进入 exporter boundary。
+3. **Important 2 修复**：live-loop `push_audio` 错误不再被吞掉，与 final drain 保持一致进入 `errors`。新增 `consume_frames_writer_push_audio_failure_records_error` 测试验证。
+4. **Important 3 修复**：`ExportService` 在 cancel/failure/validation error 时清理 partial output 文件。
+5. **Important 1 修复**：Base RMS bucket 边界改为严格 `[start, start+100ms)`，exact-boundary sample 进入下一个 bucket。
+6. **Minor 1 修复**：`MAX_AUDIO_SAMPLES` 注释更正为 `~2h @ 10/sec (100ms base buckets)`。
+7. **Minor 3 修复**：清理 unused variable warnings。
 
 验证结果：
 
@@ -113,12 +126,26 @@ W1-W12 Phase：
 - **新增**: `src-tauri/src/media/export_presets.rs`, `src-tauri/src/media/export_paths.rs`, `src-tauri/src/media/trim_audio_activity.rs`, `src-tauri/src/media/original_recording_artifact.rs`, `src-tauri/src/media/ffmpeg_test_support.rs`, `src-tauri/src/app/export_service.rs`, `src-tauri/src/app/license_service.rs`, `src/components/license-status.tsx`
 - **修改**: `src-tauri/src/media/mod.rs`, `src-tauri/src/media/trim_exporter.rs`, `src-tauri/src/media/trim_metadata.rs`, `src-tauri/src/app/mod.rs`, `src-tauri/src/app/error.rs`, `src-tauri/src/app/events.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri.ts`, `src/components/preview-view.tsx`, `src/App.tsx`, `src/App.test.tsx`, `tests/phase-6-w11-w12-checklist.md`
 
-剩余待完成（不阻塞 Phase 6 contract，但需关注）：
+**Phase 6 当前状态（Code Review 结论）**：
 
-- FFmpeg 生产编码器/解码器接入需 Native Safety 人工逐行审查。
-- macOS Keychain / Windows Credential Manager 用于激活持久化。
-- 真实可播放导出需 FFmpeg 绑定实现后人工验收。
-- 长录制导出压力测试和 A/V 同步验证。
+- ✅ **已完成**：固定三种 export presets、export path helper、source artifact validator、local 14-day trial、activation status boundary、no activation secret hardcoded。
+- ⚠️ **边界/helper 通过，产品路径未接入**：ExportService helper、ExportProgressPayload、cancel_export command。
+- ❌ **未完成（阻塞 Phase 6 完成）**：
+  - 默认录制仍使用 `CountingRecordingWriter::new(None)`，无原始录制 artifact。
+  - `export_video()` 已接入 ExportService，但 FFmpeg exporter 仍是骨架。
+  - FFmpeg writer 不写文件，FFmpeg exporter 永远返回 "实现需补齐"。
+  - `src-tauri/tests/ffmpeg_export.rs` 不存在。
+  - Manual FFmpeg Gates 全部未完成。
+  - 文档和 checklist 有明显 overclaim。
+
+**剩余待完成（阻塞 Phase 6 export 完成）**：
+
+1. 完成 original recording artifact writer（FFmpeg feature + Native Safety review）。
+2. 完成 playable preset export（三种 preset 产出可播放 output）。
+3. 完成 FFmpeg artifact integration tests。
+4. 完成 manual FFmpeg gates（1080p 10-minute pressure、A/V sync、original preservation、cancel cleanup）。
+5. 完成 Native Safety Gate review。
+6. 更新 `tests/phase-6-w11-w12-checklist.md` 反映实际状态。
 
 ---
 

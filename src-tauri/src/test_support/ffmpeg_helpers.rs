@@ -118,7 +118,9 @@ fn synthetic_audio_chunk_at(timestamp_nanos: u64) -> MixedAudioChunk {
 }
 
 #[cfg(feature = "ffmpeg")]
-pub fn inspect_media_artifact(path: &std::path::Path) -> crate::app::error::AppResult<MediaArtifactInspection> {
+pub fn inspect_media_artifact(
+    path: &std::path::Path,
+) -> crate::app::error::AppResult<MediaArtifactInspection> {
     use crate::app::error::{AppError, AppResult};
 
     let metadata = std::fs::metadata(path).map_err(|e| AppError::RecordingWriteFailed {

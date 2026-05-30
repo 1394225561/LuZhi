@@ -393,7 +393,7 @@ impl MacRecordingService {
         frame_count: Arc<std::sync::atomic::AtomicU64>,
         mut writer: Box<dyn RecordingWriter>,
         mic_level: Arc<Mutex<f64>>,
-        trim_sensitivity_str: &str,
+        _trim_sensitivity_str: &str,
     ) -> RecordingConsumerOutput {
         let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
         let mut mic_detector = MicLevelDetector::new(4096); // ~85ms 窗口 @ 48kHz
@@ -407,7 +407,7 @@ impl MacRecordingService {
         const VISUAL_SAMPLE_INTERVAL_NANOS: u64 = 250_000_000;
         // Safety caps to prevent unbounded memory growth during very long recordings.
         const MAX_VISUAL_SAMPLES: usize = 144_000; // ~10h @ 4fps
-        const MAX_AUDIO_SAMPLES: usize = 72_000; // ~10h @ 2/sec (750ms window)
+        const MAX_AUDIO_SAMPLES: usize = 72_000; // ~2h @ 10/sec (100ms base buckets)
         let mut base_audio_activity = Vec::new();
         let mut previous_sampled_frame: Option<crate::core::frame::VideoFrame> = None;
         let mut last_visual_sample_nanos: u64 = 0;
@@ -497,7 +497,9 @@ impl MacRecordingService {
                             }
                         }
                         if let Err(e) = writer.push_audio(mixed) {
-                            eprintln!("写入混音音频失败: {e}");
+                            let msg = format!("写入混音音频失败: {e}");
+                            eprintln!("{msg}");
+                            errors.push(msg);
                         }
                     }
                     Err(e) => eprintln!("音频混合失败: {e}"),
@@ -919,7 +921,6 @@ mod tests {
     /// `consume_frames()` into the returned `RecordingConsumerOutput`.
     #[test]
     fn consume_frames_writer_finish_failure_records_error() {
-        use crate::core::cut::TrimConfig;
         use crate::media::recording_writer::FailingRecordingWriter;
 
         let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1);
@@ -1013,6 +1014,63 @@ mod tests {
         assert!(
             output.errors.iter().any(|e| e.contains("写入视频帧失败")),
             "expected push_video error in consumer output, got: {:?}",
+            output.errors
+        );
+    }
+
+    /// Verifies that writer push_audio errors are collected in the live loop,
+    /// matching the final drain behavior.
+    #[test]
+    fn consume_frames_writer_push_audio_failure_records_error() {
+        use crate::media::recording_writer::FailingRecordingWriter;
+
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1);
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(2);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        // Send one audio chunk before stopping.
+        let chunk = AudioChunk {
+            timestamp: MediaTimestamp::from_nanos(0),
+            sample_rate: 44100,
+            channels: 1,
+            samples: Arc::from(vec![0.0f32; 441].into_boxed_slice()),
+        };
+        assert!(audio_tx.try_send_drop_newest(chunk));
+
+        // Writer that fails on push_audio.
+        let writer: Box<dyn RecordingWriter> =
+            Box::new(FailingRecordingWriter::new(false, true, false));
+
+        // Drop senders so the channel drains.
+        drop(video_tx);
+        drop(audio_tx);
+
+        // Use a separate thread to set stop_flag after a brief delay,
+        // giving the consumer time to process the queued audio.
+        let flag_clone = stop_flag.clone();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            flag_clone.store(true, Ordering::Relaxed);
+        });
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+        );
+
+        stopper.join().unwrap();
+
+        assert!(
+            output.errors.iter().any(|e| e.contains("写入混音音频失败")),
+            "expected push_audio error in consumer output, got: {:?}",
             output.errors
         );
     }

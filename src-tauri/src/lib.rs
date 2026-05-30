@@ -26,9 +26,11 @@ use core::cut::{TrimConfig, TrimSensitivity};
 use core::processor::{CursorProcessor, SilenceDetector};
 use core::timeline::{BeautifyConfigSnapshot, EffectTimeline};
 use media::cursor_engine::{ClickAnimationConfig, CursorEffectEngine};
+use media::export_paths::export_output_path;
 use media::recording_metadata::{RecordingMetadata, RecordingMetadataWriter};
 use media::recording_writer::RecordingResult;
 use media::silence_detector::SilenceDetectorEngine;
+use media::trim_exporter::ExportProgressReporter;
 use media::trim_metadata::TrimMetadataWriter;
 #[cfg(target_os = "macos")]
 use platform::macos_service::MacRecordingService;
@@ -706,18 +708,61 @@ async fn export_video(
 
     // Read trim metadata path, source artifact path, and effect timeline path
     // in a single lock acquisition to reduce lock contention.
-    let (trim_metadata_path, source_path, effect_timeline_path) = {
+    let (trim_metadata_path, source_path, effect_timeline) = {
         let service = state
             .service
             .lock()
             .map_err(|_| "录制服务锁已损坏".to_string())?;
         let trim = service.last_trim_metadata_path();
-        let source = service
-            .last_recording_output_path()
-            .ok_or_else(|| "没有可用的原始录制文件，请先完成一次可播放录制".to_string())?;
+        let source = service.last_recording_output_path();
         let effect = service.last_effect_timeline_path().map(PathBuf::from);
         (trim, source, effect)
     };
+
+    // In non-FFmpeg builds, source artifact is not available.
+    // Return a clear FFmpeg Gate error instead of requiring a source artifact.
+    #[cfg(not(feature = "ffmpeg"))]
+    if source_path.is_none() {
+        // Clear cancel token before returning.
+        {
+            let mut guard = state
+                .export_cancel_token
+                .lock()
+                .map_err(|_| "导出取消状态锁已损坏".to_string())?;
+            *guard = None;
+        }
+
+        // Emit error progress.
+        let _ = app.emit(
+            "export-progress",
+            ExportProgressPayload {
+                preset: preset_id,
+                progress: 100,
+                cancellable: false,
+                output_path: None,
+                error: Some("FFmpeg 导出功能未启用，无法生成可播放导出文件。请使用 FFmpeg 构建版本以启用完整导出功能。".to_string()),
+            },
+        );
+
+        return Ok(ExportSummaryPayload {
+            frame_count: cursor.frame_count,
+            click_effect_count: cursor.click_effect_count,
+            effect_timeline_path: cursor.effect_timeline_path,
+            cut_count: cut.as_ref().map(|summary| summary.cut_count).unwrap_or(0),
+            total_cut_nanos: cut
+                .as_ref()
+                .map(|summary| summary.total_cut_nanos)
+                .unwrap_or(0),
+            cut_timeline_path: cut.map(|summary| summary.cut_timeline_path),
+            output_path: None,
+        });
+    }
+
+    // In FFmpeg builds, source artifact is required.
+    // In non-FFmpeg builds, source artifact is optional but we still need to unwrap it for the export service.
+    let source_path = source_path
+        .ok_or_else(|| "没有可用的原始录制文件，请先完成一次可播放录制".to_string())
+        .map(PathBuf::from)?;
 
     // Build cut timeline for the export request.
     let cut_timeline = if let Some(ref summary) = cut {
@@ -735,46 +780,124 @@ async fn export_video(
         core::cut::CutTimeline::empty(duration_nanos)
     };
 
-    // Until production FFmpeg exporter is enabled, return output_path: None.
-    // The structured export request is validated here but the actual FFmpeg
-    // transcoding is gated behind Task 6.
-    let _source = PathBuf::from(&source_path);
-    let _sequence = state
+    // Generate output path for the export.
+    let sequence = state
         .export_sequence
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         + 1;
+    let output_path = export_output_path(&source_path, export_preset, sequence)
+        .map_err(|error| error.to_string())?;
 
-    // Emit final progress and clear cancel token.
-    let _ = app.emit(
-        "export-progress",
-        ExportProgressPayload {
-            preset: preset_id,
-            progress: 100,
-            cancellable: false,
-            output_path: None,
-            error: None,
-        },
-    );
-    {
-        let mut guard = state
-            .export_cancel_token
-            .lock()
-            .map_err(|_| "导出取消状态锁已损坏".to_string())?;
-        *guard = None;
+    // Create progress reporter that emits events to the frontend.
+    let app_for_progress = app.clone();
+    let progress_reporter = ExportProgressReporter::new(Arc::new(move |progress| {
+        let _ = app_for_progress.emit(
+            "export-progress",
+            ExportProgressPayload {
+                preset: preset_id,
+                progress,
+                cancellable: true,
+                output_path: None,
+                error: None,
+            },
+        );
+    }));
+
+    // Call the export service to perform the actual export.
+    #[cfg(feature = "ffmpeg")]
+    let export_result = {
+        let mut exporter = media::trim_exporter::FfmpegTrimExporter;
+        app::export_service::export_recording_with_timeline(
+            &mut exporter,
+            source_path,
+            Some(output_path),
+            export_preset,
+            cut_timeline,
+            effect_timeline,
+            cancel_token.clone(),
+            Some(progress_reporter),
+            sequence,
+        )
+    };
+
+    #[cfg(not(feature = "ffmpeg"))]
+    let export_result = {
+        let mut exporter = media::trim_exporter::MockTrimExporter::new();
+        app::export_service::export_recording_with_timeline(
+            &mut exporter,
+            source_path,
+            Some(output_path),
+            export_preset,
+            cut_timeline,
+            effect_timeline,
+            cancel_token.clone(),
+            Some(progress_reporter),
+            sequence,
+        )
+    };
+
+    // Handle export result.
+    match export_result {
+        Ok(result) => {
+            // Emit final progress with output path.
+            let _ = app.emit(
+                "export-progress",
+                ExportProgressPayload {
+                    preset: preset_id,
+                    progress: 100,
+                    cancellable: false,
+                    output_path: Some(result.output_path.to_string_lossy().to_string()),
+                    error: None,
+                },
+            );
+
+            // Clear cancel token.
+            {
+                let mut guard = state
+                    .export_cancel_token
+                    .lock()
+                    .map_err(|_| "导出取消状态锁已损坏".to_string())?;
+                *guard = None;
+            }
+
+            Ok(ExportSummaryPayload {
+                frame_count: cursor.frame_count,
+                click_effect_count: cursor.click_effect_count,
+                effect_timeline_path: cursor.effect_timeline_path,
+                cut_count: cut.as_ref().map(|summary| summary.cut_count).unwrap_or(0),
+                total_cut_nanos: cut
+                    .as_ref()
+                    .map(|summary| summary.total_cut_nanos)
+                    .unwrap_or(0),
+                cut_timeline_path: cut.map(|summary| summary.cut_timeline_path),
+                output_path: Some(result.output_path.to_string_lossy().to_string()),
+            })
+        }
+        Err(error) => {
+            // Emit error progress.
+            let _ = app.emit(
+                "export-progress",
+                ExportProgressPayload {
+                    preset: preset_id,
+                    progress: 100,
+                    cancellable: false,
+                    output_path: None,
+                    error: Some(error.to_string()),
+                },
+            );
+
+            // Clear cancel token.
+            {
+                let mut guard = state
+                    .export_cancel_token
+                    .lock()
+                    .map_err(|_| "导出取消状态锁已损坏".to_string())?;
+                *guard = None;
+            }
+
+            Err(error.to_string())
+        }
     }
-
-    Ok(ExportSummaryPayload {
-        frame_count: cursor.frame_count,
-        click_effect_count: cursor.click_effect_count,
-        effect_timeline_path: cursor.effect_timeline_path,
-        cut_count: cut.as_ref().map(|summary| summary.cut_count).unwrap_or(0),
-        total_cut_nanos: cut
-            .as_ref()
-            .map(|summary| summary.total_cut_nanos)
-            .unwrap_or(0),
-        cut_timeline_path: cut.map(|summary| summary.cut_timeline_path),
-        output_path: None,
-    })
 }
 
 fn effect_timeline_path() -> PathBuf {
