@@ -418,9 +418,9 @@ describe('App', () => {
     const btn = comingSoonBtns[0].closest('button')
     expect(btn).toBeDisabled()
 
-    // No additional Tauri invokes beyond initial status/permissions
+    // No additional Tauri invokes beyond initial status/permissions/license
     const expectedCalls = invokeMock.mock.calls.length
-    expect(expectedCalls).toBe(2) // recording_status + recording_permissions
+    expect(expectedCalls).toBe(3) // recording_status + recording_permissions + license_status
   })
 
   it('does not render area-level false drag-region wrappers', async () => {
@@ -1727,6 +1727,66 @@ describe('App', () => {
     })
 
     expect(screen.queryByText(/已生成裁剪时间线/)).toBeNull()
+  })
+
+  it('shows local trial days in idle state', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'license_status') {
+        return Promise.resolve({
+          kind: 'trial',
+          trialDaysRemaining: 12,
+          isExpired: false,
+          activated: false,
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    expect(await screen.findByText('试用剩余 12 天')).toBeInTheDocument()
+  })
+
+  it('shows expired local trial state', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'license_status') {
+        return Promise.resolve({
+          kind: 'expired',
+          trialDaysRemaining: 0,
+          isExpired: true,
+          activated: false,
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    expect(await screen.findByText('试用已过期')).toBeInTheDocument()
+  })
+
+  it('shows activated local license state', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'license_status') {
+        return Promise.resolve({
+          kind: 'activated',
+          trialDaysRemaining: 0,
+          isExpired: false,
+          activated: true,
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    expect(await screen.findByText('已激活')).toBeInTheDocument()
   })
 
   it('shows playable export success when outputPath is returned', async () => {

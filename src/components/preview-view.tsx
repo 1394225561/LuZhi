@@ -35,12 +35,15 @@ import {
   type ExportPreset,
   type ExportProgressPayload,
   type ExportSummary,
+  type LicenseStatus as LicenseStatusPayload,
   type RecordingResult,
 } from '@/lib/tauri'
+import { LicenseStatus } from '@/components/license-status'
 
 interface PreviewViewProps {
   onBack: () => void
   recordingResult?: RecordingResult | null
+  licenseStatus?: LicenseStatusPayload | null
 }
 
 function messageForBeautifyError(error: unknown, fallback: string): string {
@@ -61,7 +64,7 @@ function messageForBeautifyError(error: unknown, fallback: string): string {
     : fallback
 }
 
-export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
+export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewViewProps) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(45)
   const [duration] = useState(180)
@@ -282,7 +285,9 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
             返回录制
           </button>
           <h1 className="text-lg font-semibold text-foreground">预览与美化</h1>
-          <div className="w-20" />
+          <div className="shrink-0">
+            <LicenseStatus status={licenseStatus ?? null} />
+          </div>
         </div>
 
         {/* Video Preview */}

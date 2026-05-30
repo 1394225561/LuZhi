@@ -5,9 +5,11 @@ import { RecordingStatusBar } from '@/components/recording-status-bar'
 import { PreviewView } from '@/components/preview-view'
 import { ProcessingView } from '@/components/processing-view'
 import { ErrorView } from '@/components/error-view'
+import { LicenseStatus } from '@/components/license-status'
 import {
   fetchRecordingStatus,
   fetchRecordingPermissions,
+  fetchLicenseStatus,
   startRecording,
   stopRecording,
   pauseRecording,
@@ -17,6 +19,7 @@ import {
   onRecordingTick,
   onRecordingStateChanged,
   onMicLevel,
+  type LicenseStatus as LicenseStatusPayload,
   type RecordingPermissions,
   type RecordingResult,
   type RecordingStatus,
@@ -43,6 +46,7 @@ export default function App() {
   const [recordingResult, setRecordingResult] = useState<RecordingResult | null>(null)
   const [resolution, setResolution] = useState(DEFAULT_RESOLUTION)
   const [fps, setFps] = useState(DEFAULT_FPS)
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatusPayload | null>(null)
   const isStartingRef = useRef(false)
   const isStoppingRef = useRef(false)
 
@@ -58,6 +62,7 @@ export default function App() {
       }
     })
     void fetchRecordingPermissions().then(setPermissions)
+    void fetchLicenseStatus().then(setLicenseStatus).catch(() => setLicenseStatus(null))
   }, [])
 
   // 监听录制状态变化事件
@@ -295,6 +300,9 @@ export default function App() {
               <p>需要麦克风权限才能录制音频，请在启动录制时授权</p>
             </div>
           )}
+          <div className="flex w-full items-start justify-end mt-4">
+            <LicenseStatus status={licenseStatus} />
+          </div>
         </div>
       </div>
     )
@@ -346,5 +354,5 @@ export default function App() {
   }
 
   // Preview state
-  return <PreviewView onBack={handleBackToIdle} recordingResult={recordingResult} />
+  return <PreviewView onBack={handleBackToIdle} recordingResult={recordingResult} licenseStatus={licenseStatus} />
 }
