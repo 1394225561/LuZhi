@@ -575,7 +575,8 @@ impl MacRecordingService {
 
         // Flush remaining base audio buckets from the analyzer.
         if let Some(sample) = base_audio_analyzer.flush() {
-            if !push_bounded_base_audio_sample(&mut base_audio_activity, sample, MAX_AUDIO_SAMPLES) {
+            if !push_bounded_base_audio_sample(&mut base_audio_activity, sample, MAX_AUDIO_SAMPLES)
+            {
                 audio_dropped += 1;
             }
         }

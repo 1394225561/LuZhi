@@ -33,6 +33,9 @@ impl ExportProgressReporter {
     }
 }
 
+// Intentionally always-equal: progress reporters are excluded from
+// TrimExportRequest equality so that request comparison focuses on
+// input/output paths, preset, and timeline — not callback identity.
 impl PartialEq for ExportProgressReporter {
     fn eq(&self, _other: &Self) -> bool {
         true

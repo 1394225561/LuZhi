@@ -25,14 +25,19 @@ pub fn export_recording_with_timeline(
             reason: format!("源文件不存在: {}", input_path.to_string_lossy()),
         });
     }
-    if input_path.metadata().map(|metadata| metadata.len()).unwrap_or(0) == 0 {
+    if input_path
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+        == 0
+    {
         return Err(AppError::ExportFailed {
             reason: "源文件为空，无法导出".to_string(),
         });
     }
 
-    let output_path = requested_output_path
-        .unwrap_or(export_output_path(&input_path, preset, sequence)?);
+    let output_path =
+        requested_output_path.unwrap_or(export_output_path(&input_path, preset, sequence)?);
     if output_path == input_path {
         return Err(AppError::ExportFailed {
             reason: "导出文件不能覆盖原始录制文件".to_string(),
@@ -68,8 +73,10 @@ mod tests {
             if request.cancel_token.load(Ordering::Relaxed) {
                 return Err(AppError::ExportCancelled);
             }
-            std::fs::write(&request.output_path, b"mp4").map_err(|error| AppError::ExportFailed {
-                reason: error.to_string(),
+            std::fs::write(&request.output_path, b"mp4").map_err(|error| {
+                AppError::ExportFailed {
+                    reason: error.to_string(),
+                }
             })?;
             Ok(TrimExportResult {
                 output_path: request.output_path,

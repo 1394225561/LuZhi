@@ -105,7 +105,12 @@ pub fn aggregate_base_audio_activity(
 
     for bucket in buckets {
         if bucket.start.nanos >= window_end && sample_count > 0 {
-            output.push(activity_sample(window_start, window_end, sum_squares, sample_count));
+            output.push(activity_sample(
+                window_start,
+                window_end,
+                sum_squares,
+                sample_count,
+            ));
             window_start = bucket.start.nanos;
             window_end = window_start.saturating_add(config.rms_window_nanos);
             sum_squares = 0.0;
@@ -117,8 +122,16 @@ pub fn aggregate_base_audio_activity(
     }
 
     if sample_count > 0 {
-        let end = buckets.last().map(|bucket| bucket.end.nanos).unwrap_or(window_end);
-        output.push(activity_sample(window_start, end, sum_squares, sample_count));
+        let end = buckets
+            .last()
+            .map(|bucket| bucket.end.nanos)
+            .unwrap_or(window_end);
+        output.push(activity_sample(
+            window_start,
+            end,
+            sum_squares,
+            sample_count,
+        ));
     }
 
     output
@@ -219,7 +232,10 @@ mod tests {
                 channels: 1,
                 samples: Arc::from(vec![0.25; 20].into_boxed_slice()),
             });
-            assert!(samples.is_empty(), "chunk {i} should not trigger bucket emission");
+            assert!(
+                samples.is_empty(),
+                "chunk {i} should not trigger bucket emission"
+            );
         }
 
         // A 6th chunk at 120ms crosses the bucket boundary (>100ms), emitting

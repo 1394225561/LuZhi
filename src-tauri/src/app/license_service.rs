@@ -69,12 +69,15 @@ impl TrialStore for FileTrialStore {
         if !self.path.exists() {
             return Ok(None);
         }
-        let json = std::fs::read_to_string(&self.path).map_err(|error| AppError::LicenseFailed {
-            reason: format!("读取本地授权状态失败: {error}"),
-        })?;
-        serde_json::from_str(&json).map(Some).map_err(|error| AppError::LicenseFailed {
-            reason: format!("解析本地授权状态失败: {error}"),
-        })
+        let json =
+            std::fs::read_to_string(&self.path).map_err(|error| AppError::LicenseFailed {
+                reason: format!("读取本地授权状态失败: {error}"),
+            })?;
+        serde_json::from_str(&json)
+            .map(Some)
+            .map_err(|error| AppError::LicenseFailed {
+                reason: format!("解析本地授权状态失败: {error}"),
+            })
     }
 
     fn write(&mut self, state: &LocalTrialState) -> AppResult<()> {
@@ -83,9 +86,10 @@ impl TrialStore for FileTrialStore {
                 reason: format!("创建授权状态目录失败: {error}"),
             })?;
         }
-        let json = serde_json::to_string_pretty(state).map_err(|error| AppError::LicenseFailed {
-            reason: format!("序列化授权状态失败: {error}"),
-        })?;
+        let json =
+            serde_json::to_string_pretty(state).map_err(|error| AppError::LicenseFailed {
+                reason: format!("序列化授权状态失败: {error}"),
+            })?;
         std::fs::write(&self.path, json).map_err(|error| AppError::LicenseFailed {
             reason: format!("写入授权状态失败: {error}"),
         })

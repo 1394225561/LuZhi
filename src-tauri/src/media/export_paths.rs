@@ -8,13 +8,13 @@ pub fn export_output_path(
     preset: ExportPreset,
     sequence: u64,
 ) -> AppResult<PathBuf> {
-    let parent = source_path.parent().ok_or_else(|| AppError::RecordingWriteFailed {
+    let parent = source_path.parent().ok_or_else(|| AppError::ExportFailed {
         reason: "原始录制文件没有父目录，无法生成导出路径".to_string(),
     })?;
     let stem = source_path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .ok_or_else(|| AppError::RecordingWriteFailed {
+        .ok_or_else(|| AppError::ExportFailed {
             reason: "原始录制文件名无效，无法生成导出路径".to_string(),
         })?;
     let preset_id = preset.spec().id;
@@ -22,11 +22,11 @@ pub fn export_output_path(
 }
 
 pub fn validate_non_empty_output(path: &Path) -> AppResult<()> {
-    let metadata = std::fs::metadata(path).map_err(|error| AppError::RecordingWriteFailed {
+    let metadata = std::fs::metadata(path).map_err(|error| AppError::ExportFailed {
         reason: format!("导出文件不存在或不可访问: {error}"),
     })?;
     if metadata.len() == 0 {
-        return Err(AppError::RecordingWriteFailed {
+        return Err(AppError::ExportFailed {
             reason: "导出文件为空，不能返回 outputPath".to_string(),
         });
     }

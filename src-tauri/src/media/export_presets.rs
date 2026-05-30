@@ -92,8 +92,14 @@ mod tests {
 
     #[test]
     fn preset_parse_rejects_templates_or_unknown_values() {
-        assert_eq!("bilibili".parse::<ExportPreset>().unwrap(), ExportPreset::Bilibili);
-        assert_eq!("douyin".parse::<ExportPreset>().unwrap(), ExportPreset::Douyin);
+        assert_eq!(
+            "bilibili".parse::<ExportPreset>().unwrap(),
+            ExportPreset::Bilibili
+        );
+        assert_eq!(
+            "douyin".parse::<ExportPreset>().unwrap(),
+            ExportPreset::Douyin
+        );
         assert_eq!(
             "xiaohongshu".parse::<ExportPreset>().unwrap(),
             ExportPreset::Xiaohongshu

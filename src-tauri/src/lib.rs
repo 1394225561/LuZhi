@@ -619,12 +619,17 @@ fn license_state_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 #[tauri::command]
 fn license_status(app: AppHandle) -> Result<LicenseStatusPayload, String> {
-    use app::license_service::{FileTrialStore, LicenseService, NoopActivationCredentialStore, SystemLicenseClock};
+    use app::license_service::{
+        FileTrialStore, LicenseService, NoopActivationCredentialStore, SystemLicenseClock,
+    };
     let path = license_state_path(&app)?;
     let mut trial_store = FileTrialStore::new(path);
     let mut activation_store = NoopActivationCredentialStore;
     let service = LicenseService::new(&mut trial_store, &mut activation_store, SystemLicenseClock);
-    service.status().map(LicenseStatusPayload::from).map_err(|error| error.to_string())
+    service
+        .status()
+        .map(LicenseStatusPayload::from)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -721,24 +726,17 @@ async fn export_video(
         core::cut::CutTimeline::empty(duration_nanos)
     };
 
-    // Get source artifact path.
-    let source_path = {
+    // Get source artifact path and effect timeline path in a single lock acquisition.
+    let (source_path, effect_timeline_path) = {
         let service = state
             .service
             .lock()
             .map_err(|_| "录制服务锁已损坏".to_string())?;
-        service
+        let source = service
             .last_recording_output_path()
-            .ok_or_else(|| "没有可用的原始录制文件，请先完成一次可播放录制".to_string())?
-    };
-
-    // Effect timeline path for the export request.
-    let effect_timeline_path = {
-        let service = state
-            .service
-            .lock()
-            .map_err(|_| "录制服务锁已损坏".to_string())?;
-        service.last_effect_timeline_path().map(PathBuf::from)
+            .ok_or_else(|| "没有可用的原始录制文件，请先完成一次可播放录制".to_string())?;
+        let effect = service.last_effect_timeline_path().map(PathBuf::from);
+        (source, effect)
     };
 
     // Until production FFmpeg exporter is enabled, return output_path: None.

@@ -3,11 +3,11 @@ use std::path::Path;
 use crate::app::error::{AppError, AppResult};
 
 pub fn validate_source_artifact(path: &Path) -> AppResult<()> {
-    let metadata = std::fs::metadata(path).map_err(|error| AppError::RecordingWriteFailed {
+    let metadata = std::fs::metadata(path).map_err(|error| AppError::ExportFailed {
         reason: format!("原始录制文件不存在或不可访问: {error}"),
     })?;
     if metadata.len() == 0 {
-        return Err(AppError::RecordingWriteFailed {
+        return Err(AppError::ExportFailed {
             reason: "原始录制文件为空，不能用于导出".to_string(),
         });
     }

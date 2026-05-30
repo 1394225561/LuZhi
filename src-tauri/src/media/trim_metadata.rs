@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::error::{AppError, AppResult};
 use crate::core::cut::{AudioActivitySample, CutTimeline, FrameDiffSample, TrimConfig};
-use crate::media::trim_audio_activity::{
-    aggregate_base_audio_activity, BaseAudioActivitySample,
-};
+use crate::media::trim_audio_activity::{aggregate_base_audio_activity, BaseAudioActivitySample};
 
 pub const TRIM_METADATA_SCHEMA_VERSION: u32 = 2;
 
