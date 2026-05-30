@@ -1729,6 +1729,96 @@ describe('App', () => {
     expect(screen.queryByText(/已生成裁剪时间线/)).toBeNull()
   })
 
+  it('shows playable export success when outputPath is returned', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true,
+          magnificationFactor: 2,
+          cursorSmoothing: true,
+          autoTrimSilences: false,
+          trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'export_video') {
+        return Promise.resolve({
+          frameCount: 1,
+          clickEffectCount: 0,
+          effectTimelinePath: '/tmp/effects.json',
+          cutCount: 0,
+          totalCutNanos: 0,
+          cutTimelinePath: null,
+          outputPath: '/tmp/luzhi-export.mp4',
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('已生成可播放导出文件')).toBeTruthy()
+    })
+    expect(screen.queryByText(/FFmpeg 编码器接入后/)).toBeNull()
+  })
+
+  it('can request export cancellation from preview', async () => {
+    let exportResolve: (value: unknown) => void = () => {}
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true,
+          magnificationFactor: 2,
+          cursorSmoothing: true,
+          autoTrimSilences: false,
+          trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'export_video') {
+        return new Promise((resolve) => { exportResolve = resolve })
+      }
+      if (command === 'cancel_export') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '取消导出' }))
+    })
+
+    expect(invokeMock).toHaveBeenCalledWith('cancel_export', undefined)
+    await act(async () => {
+      exportResolve({
+        frameCount: 1,
+        clickEffectCount: 0,
+        effectTimelinePath: '/tmp/effects.json',
+        cutCount: 0,
+        totalCutNanos: 0,
+        cutTimelinePath: null,
+        outputPath: null,
+      })
+    })
+  })
+
   it('ignores export summary when config changes before export resolves', async () => {
     let resolveExport: (value: unknown) => void = () => {}
 

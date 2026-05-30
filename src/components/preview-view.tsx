@@ -26,11 +26,14 @@ import { motion } from 'framer-motion'
 import {
   buildCursorEffectTimeline,
   buildCutTimeline,
+  cancelExport,
   exportVideo,
   getBeautifyConfig,
+  onExportProgress,
   setBeautifyConfig,
   type BeautifyConfig,
   type ExportPreset,
+  type ExportProgressPayload,
   type ExportSummary,
   type RecordingResult,
 } from '@/lib/tauri'
@@ -71,6 +74,8 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   const [autoTrimSilences, setAutoTrimSilences] = useState(false)
   const [trimSensitivity, setTrimSensitivity] = useState<'low' | 'medium' | 'high'>('medium')
   const [exportSummary, setExportSummary] = useState<ExportSummary | null>(null)
+  const [exportProgress, setExportProgress] = useState<ExportProgressPayload | null>(null)
+  const [isExporting, setIsExporting] = useState(false)
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -97,6 +102,15 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
   // Initialize beautify state from backend on mount so the UI reflects the
   // persistent config rather than hardcoded defaults that may have drifted
   // from what was set in a previous preview session.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void onExportProgress((payload) => {
+      setExportProgress(payload)
+      setIsExporting(payload.cancellable && payload.progress < 100)
+    }).then((fn) => { unlisten = fn })
+    return () => { unlisten?.() }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     getBeautifyConfig()
@@ -202,6 +216,8 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
 
   const handleExport = (preset: ExportPreset) => {
     const revision = exportRevisionRef.current
+    setIsExporting(true)
+    setExportProgress({ preset, progress: 0, cancellable: true, outputPath: null })
     void flushPendingConfig()
       .then(() => exportVideo(preset))
       .then((summary) => {
@@ -215,6 +231,15 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
         console.error('导出失败', error)
         setBeautifyError(msg)
       })
+      .finally(() => {
+        setIsExporting(false)
+      })
+  }
+
+  const handleCancelExport = () => {
+    void cancelExport().catch((error) => {
+      console.error('取消导出失败', error)
+    })
   }
 
   const handleBack = () => {
@@ -478,6 +503,27 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
               {beautifyError}
             </div>
           )}
+          {exportProgress && isExporting && (
+            <div className="mb-3 rounded-lg border border-border/50 bg-secondary/30 p-3 text-xs text-muted-foreground">
+              <div className="mb-2 flex items-center justify-between">
+                <span>正在导出 {exportProgress.progress}%</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-xs"
+                  onClick={handleCancelExport}
+                >
+                  取消导出
+                </Button>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-foreground transition-all"
+                  style={{ width: `${Math.max(0, Math.min(exportProgress.progress, 100))}%` }}
+                />
+              </div>
+            </div>
+          )}
           {exportSummary && (
             <div className="mb-3 rounded-lg border border-border/50 bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
               {exportSummary.cutCount > 0 ? (
@@ -488,7 +534,9 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
               ) : (
                 <p>未检测到可裁剪空白段</p>
               )}
-              {!exportSummary.outputPath && (
+              {exportSummary.outputPath ? (
+                <p className="opacity-80">已生成可播放导出文件</p>
+              ) : (
                 <p className="opacity-60">FFmpeg 编码器接入后将生成可播放文件</p>
               )}
             </div>
@@ -516,6 +564,7 @@ export function PreviewView({ onBack, recordingResult }: PreviewViewProps) {
                   </div>
                   <Button
                     size="sm"
+                    disabled={isExporting}
                     className="h-8 px-4 rounded-lg bg-surface hover:bg-surface-hover text-foreground border border-border/50"
                     onClick={() => handleExport(preset.id)}
                   >
