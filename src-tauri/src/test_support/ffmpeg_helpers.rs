@@ -101,7 +101,7 @@ fn synthetic_video_frame_at(timestamp_nanos: u64, width: u32, height: u32) -> Vi
         timestamp: MediaTimestamp::from_nanos(timestamp_nanos),
         width,
         height,
-        stride_bytes: stride as u32,
+        stride_bytes: stride,
         pixel_format: PixelFormat::Bgra8,
         buffer: FrameBuffer::Owned(Arc::from(buffer.into_boxed_slice())),
     })
@@ -138,12 +138,14 @@ pub fn inspect_media_artifact(
     let mut duration_nanos = 0u64;
 
     for stream in ictx.streams() {
-        let codecpar = stream.codecpar();
-        match codecpar.medium() {
+        let params = stream.parameters();
+        match params.medium() {
             ffmpeg_next::media::Type::Video => {
                 has_video_stream = true;
-                width = codecpar.width() as u32;
-                height = codecpar.height() as u32;
+                // Parameters does not expose width/height helpers; access raw fields.
+                let par = unsafe { &*params.as_ptr() };
+                width = par.width as u32;
+                height = par.height as u32;
             }
             ffmpeg_next::media::Type::Audio => {
                 has_audio_stream = true;

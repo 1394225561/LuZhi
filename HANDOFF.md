@@ -81,6 +81,39 @@ W1-W12 Phase：
 
 ## 工作任务记录
 
+### 2026-05-30：Phase 6 FFmpeg 可播放导出实现
+
+输入文件：
+
+- `docs/superpowers/plans/2026-05-30-phase-6-ffmpeg-playable-export.md`
+
+本轮完成（4 Tasks）：
+
+1. **FfmpegRecordingWriter 完整编码**：BGRA→YUV420P（swscale）+ H.264（libx264 ultrafast）+ AAC + MP4 muxing。支持动态分辨率输入、惰性 scaler 初始化、flush 编码器、写入 trailer。
+2. **FfmpegTrimExporter 完整导出**：输入解码→裁剪段 seek→视频缩放→音频重采样→编码→muxing。支持三种预设分辨率（1920×1080/1080×1920/1080×1080）、cancel token、progress 回调。
+3. **集成测试** `tests/ffmpeg_export.rs`：5 个 artifact-level 测试（全时长导出、三种预设分辨率、取消清理、缺失源文件）。
+4. **手动测试清单** `tests/phase-6-manual-ffmpeg-gates.md`：6 组 Gate 测试（1080p 压力、A/V 同步、原始保留、取消清理、预设尺寸、无 FFmpeg Gate）。
+
+额外修复：
+
+- `test_support/ffmpeg_helpers.rs`：修复 `stride_bytes` 类型（u32→usize）和 `codecpar`→`parameters()` API 兼容性。
+
+验证结果：
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **214 tests** 通过（209 unit + 5 integration）
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --features ffmpeg --all-targets` 通过（warnings only）
+- `cargo build --manifest-path src-tauri/Cargo.toml --features ffmpeg` 通过
+- `npm run build` 通过
+- `npm test -- --run` **51 tests** 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/ffmpeg_writer.rs`（完整实现）, `src-tauri/src/media/trim_exporter.rs`（完整实现）, `src-tauri/src/test_support/ffmpeg_helpers.rs`（API 兼容修复）
+- **新增**: `src-tauri/tests/ffmpeg_export.rs`, `tests/phase-6-manual-ffmpeg-gates.md`
+
+---
+
 ### 2026-05-30：Phase 6 导出预设与本地授权边界部分完成
 
 输入文件：
