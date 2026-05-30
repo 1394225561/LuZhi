@@ -68,6 +68,14 @@ export type ExportSummary = {
   outputPath: string | null
 }
 
+export type ExportProgressPayload = {
+  preset: ExportPreset
+  progress: number
+  cancellable: boolean
+  outputPath: string | null
+  error?: string
+}
+
 export type RecordingResult = {
   durationSecs: number
   frameCount: number
@@ -134,6 +142,10 @@ export async function exportVideo(preset: ExportPreset): Promise<ExportSummary> 
   return invoke<ExportSummary>('export_video', { preset })
 }
 
+export async function cancelExport(): Promise<void> {
+  return invoke('cancel_export')
+}
+
 // ─── Tauri Events ───
 
 export function onRecordingTick(callback: (elapsed: number) => void): Promise<UnlistenFn> {
@@ -150,6 +162,12 @@ export function onMicLevel(callback: (level: number) => void): Promise<UnlistenF
 
 export function onRecordingStateChanged(callback: (status: RecordingStatus) => void): Promise<UnlistenFn> {
   return listen<RecordingStatus>('recording-state-changed', (event) => {
+    callback(event.payload)
+  })
+}
+
+export function onExportProgress(callback: (payload: ExportProgressPayload) => void): Promise<UnlistenFn> {
+  return listen<ExportProgressPayload>('export-progress', (event) => {
     callback(event.payload)
   })
 }

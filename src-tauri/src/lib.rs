@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use app::events::{
-    CursorEffectSummaryPayload, CutTimelineSummaryPayload, ExportSummaryPayload, MicLevelPayload,
-    PermissionPayload, PostProcessProgressPayload, RecordingStatusPayload,
+    CursorEffectSummaryPayload, CutTimelineSummaryPayload, ExportProgressPayload,
+    ExportSummaryPayload, MicLevelPayload, PermissionPayload, PostProcessProgressPayload,
+    RecordingStatusPayload,
 };
 use app::mic_level_runtime::MicLevelRuntime;
 #[cfg(not(target_os = "macos"))]
@@ -66,6 +67,8 @@ struct AppState {
     mic_level_runtime: Arc<Mutex<Option<MicLevelRuntime>>>,
     beautify_config: Arc<Mutex<BeautifyConfigPayload>>,
     beautify_revision: Arc<AtomicU64>,
+    export_cancel_token: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
+    export_sequence: Arc<AtomicU64>,
 }
 
 impl Default for AppState {
@@ -84,6 +87,8 @@ impl Default for AppState {
             mic_level_runtime: Arc::new(Mutex::new(None)),
             beautify_config: Arc::new(Mutex::new(BeautifyConfigPayload::default())),
             beautify_revision: Arc::new(AtomicU64::new(0)),
+            export_cancel_token: Arc::new(Mutex::new(None)),
+            export_sequence: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -606,6 +611,18 @@ async fn build_cursor_effect_timeline(
 }
 
 #[tauri::command]
+fn cancel_export(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let guard = state
+        .export_cancel_token
+        .lock()
+        .map_err(|_| "导出取消状态锁已损坏".to_string())?;
+    if let Some(token) = guard.as_ref() {
+        token.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn export_video(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
@@ -613,6 +630,29 @@ async fn export_video(
 ) -> Result<ExportSummaryPayload, String> {
     use media::export_presets::ExportPreset;
     let export_preset: ExportPreset = preset.parse()?;
+    let preset_id = export_preset.spec().id;
+
+    // Set up cancel token for this export.
+    let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut guard = state
+            .export_cancel_token
+            .lock()
+            .map_err(|_| "导出取消状态锁已损坏".to_string())?;
+        *guard = Some(cancel_token.clone());
+    }
+
+    // Emit initial progress.
+    let _ = app.emit(
+        "export-progress",
+        ExportProgressPayload {
+            preset: preset_id,
+            progress: 0,
+            cancellable: true,
+            output_path: None,
+            error: None,
+        },
+    );
 
     let cursor = build_cursor_effect_timeline(app.clone(), state.clone()).await?;
 
@@ -675,8 +715,29 @@ async fn export_video(
     // The structured export request is validated here but the actual FFmpeg
     // transcoding is gated behind Task 6.
     let _source = PathBuf::from(&source_path);
-    let _cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let _sequence = 1u64;
+    let _sequence = state
+        .export_sequence
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+
+    // Emit final progress and clear cancel token.
+    let _ = app.emit(
+        "export-progress",
+        ExportProgressPayload {
+            preset: preset_id,
+            progress: 100,
+            cancellable: false,
+            output_path: None,
+            error: None,
+        },
+    );
+    {
+        let mut guard = state
+            .export_cancel_token
+            .lock()
+            .map_err(|_| "导出取消状态锁已损坏".to_string())?;
+        *guard = None;
+    }
 
     Ok(ExportSummaryPayload {
         frame_count: cursor.frame_count,
@@ -884,7 +945,8 @@ pub fn run() -> tauri::Result<()> {
             get_beautify_config,
             build_cursor_effect_timeline,
             build_cut_timeline,
-            export_video
+            export_video,
+            cancel_export
         ])
         .run(tauri::generate_context!())?;
 

@@ -109,6 +109,18 @@ pub struct PostProcessProgressPayload {
     pub error: Option<String>,
 }
 
+/// Export progress payload emitted during video export.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProgressPayload {
+    pub preset: &'static str,
+    pub progress: u8,
+    pub cancellable: bool,
+    pub output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +227,22 @@ mod tests {
         assert!(json.contains("\"cutCount\":2"));
         assert!(json.contains("\"totalCutNanos\":3000000000"));
         assert!(json.contains("\"cutTimelinePath\":\"/tmp/cuts.json\""));
+        assert!(json.contains("\"outputPath\":null"));
+    }
+
+    #[test]
+    fn export_progress_serializes_camel_case() {
+        let payload = ExportProgressPayload {
+            preset: "bilibili",
+            progress: 45,
+            cancellable: true,
+            output_path: None,
+            error: None,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"preset\":\"bilibili\""));
+        assert!(json.contains("\"progress\":45"));
+        assert!(json.contains("\"cancellable\":true"));
         assert!(json.contains("\"outputPath\":null"));
     }
 }
