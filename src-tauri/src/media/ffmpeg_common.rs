@@ -11,6 +11,10 @@ pub struct MediaArtifactInspection {
     pub width: u32,
     pub height: u32,
     pub duration_nanos: u64,
+    pub video_duration_nanos: u64,
+    pub audio_duration_nanos: u64,
+    pub video_frame_count: Option<u64>,
+    pub video_avg_fps: Option<f64>,
     pub has_video_stream: bool,
     pub has_audio_stream: bool,
 }
@@ -65,9 +69,22 @@ pub fn inspect_media_artifact(path: &std::path::Path) -> AppResult<MediaArtifact
     let mut width = 0u32;
     let mut height = 0u32;
     let mut duration_nanos = 0u64;
+    let mut video_duration_nanos = 0u64;
+    let mut audio_duration_nanos = 0u64;
+    let mut video_frame_count = None;
+    let mut video_avg_fps = None;
 
     for stream in ictx.streams() {
         let params = stream.parameters();
+        let stream_tb = stream.time_base();
+        // Compute stream-level duration in nanoseconds.
+        let stream_dur_nanos = if stream.duration() > 0 {
+            time_base_units_to_nanos(stream.duration(), stream_tb)
+                .map(|n| n.max(0) as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
         match params.medium() {
             ffmpeg_next::media::Type::Video => {
                 has_video_stream = true;
@@ -77,9 +94,20 @@ pub fn inspect_media_artifact(path: &std::path::Path) -> AppResult<MediaArtifact
                 let par = unsafe { &*params.as_ptr() };
                 width = par.width as u32;
                 height = par.height as u32;
+                video_duration_nanos = stream_dur_nanos;
+                // nb_frames may not always be available; best-effort read.
+                let nb = stream.frames();
+                if nb > 0 {
+                    video_frame_count = Some(nb as u64);
+                    if stream_dur_nanos > 0 {
+                        video_avg_fps =
+                            Some(nb as f64 / (stream_dur_nanos as f64 / 1_000_000_000.0));
+                    }
+                }
             }
             ffmpeg_next::media::Type::Audio => {
                 has_audio_stream = true;
+                audio_duration_nanos = stream_dur_nanos;
             }
             _ => {}
         }
@@ -110,6 +138,10 @@ pub fn inspect_media_artifact(path: &std::path::Path) -> AppResult<MediaArtifact
         width,
         height,
         duration_nanos,
+        video_duration_nanos,
+        audio_duration_nanos,
+        video_frame_count,
+        video_avg_fps,
         has_video_stream,
         has_audio_stream,
     })
@@ -118,6 +150,7 @@ pub fn inspect_media_artifact(path: &std::path::Path) -> AppResult<MediaArtifact
 /// Validates that an export artifact is playable:
 /// - File size > 0
 /// - Has video stream
+/// - Has audio stream
 /// - Dimensions match expected preset
 /// - Duration > 0
 pub fn validate_export_artifact(
@@ -137,6 +170,11 @@ pub fn validate_export_artifact(
             reason: "导出文件缺少视频流".to_string(),
         });
     }
+    if !inspection.has_audio_stream {
+        return Err(AppError::ExportFailed {
+            reason: "导出文件缺少音频流".to_string(),
+        });
+    }
     if inspection.width != expected_width || inspection.height != expected_height {
         return Err(AppError::ExportFailed {
             reason: format!(
@@ -151,12 +189,43 @@ pub fn validate_export_artifact(
         });
     }
 
+    // Stream-level duration checks to catch PTS/muxer bugs (e.g., BUG-004).
+    if inspection.video_duration_nanos == 0 {
+        return Err(AppError::ExportFailed {
+            reason: "导出视频流时长为零".to_string(),
+        });
+    }
+    if inspection.has_audio_stream && inspection.audio_duration_nanos == 0 {
+        return Err(AppError::ExportFailed {
+            reason: "导出音频流时长为零".to_string(),
+        });
+    }
+    // Reject if video and audio duration drift exceeds 500ms.
+    // This catches the case where video packets are written with wrong
+    // time base (e.g., 0.03s video with 19s audio).
+    if inspection.has_audio_stream && inspection.video_duration_nanos > 0 {
+        let drift = inspection
+            .video_duration_nanos
+            .abs_diff(inspection.audio_duration_nanos);
+        if drift > 500_000_000 {
+            return Err(AppError::ExportFailed {
+                reason: format!(
+                    "导出视频/音频时长偏差过大：视频 {}ms，音频 {}ms，偏差 {}ms",
+                    inspection.video_duration_nanos / 1_000_000,
+                    inspection.audio_duration_nanos / 1_000_000,
+                    drift / 1_000_000
+                ),
+            });
+        }
+    }
+
     Ok(())
 }
 
 /// Validates that a source recording artifact is valid for export:
 /// - File exists and size > 0
 /// - Has video stream
+/// - Has audio stream
 /// - Duration > 0
 pub fn validate_source_artifact(path: &std::path::Path) -> AppResult<MediaArtifactInspection> {
     let inspection = inspect_media_artifact(path)?;
@@ -171,13 +240,89 @@ pub fn validate_source_artifact(path: &std::path::Path) -> AppResult<MediaArtifa
             reason: "录制文件缺少视频流".to_string(),
         });
     }
+    if !inspection.has_audio_stream {
+        return Err(AppError::RecordingWriteFailed {
+            reason: "录制文件缺少音频流".to_string(),
+        });
+    }
     if inspection.duration_nanos == 0 {
         return Err(AppError::RecordingWriteFailed {
             reason: "录制文件时长为零".to_string(),
         });
     }
 
+    // Reject source artifacts with excessive A/V duration drift (>1s).
+    // This catches the case where writer PTS model produces video duration
+    // significantly shorter than audio duration.
+    if inspection.has_audio_stream
+        && inspection.video_duration_nanos > 0
+        && inspection.audio_duration_nanos > 0
+    {
+        let drift = inspection
+            .video_duration_nanos
+            .abs_diff(inspection.audio_duration_nanos);
+        if drift > 1_000_000_000 {
+            return Err(AppError::RecordingWriteFailed {
+                reason: format!(
+                    "录制视频/音频时长偏差过大：视频 {}ms，音频 {}ms，偏差 {}ms",
+                    inspection.video_duration_nanos / 1_000_000,
+                    inspection.audio_duration_nanos / 1_000_000,
+                    drift / 1_000_000
+                ),
+            });
+        }
+    }
+
     Ok(inspection)
+}
+
+/// Maps an FFmpeg error to a user-facing `AppError`.
+///
+/// Handles common FFmpeg error codes with precise Chinese messages:
+/// - `Eof`: end of stream (expected during decode loops)
+/// - `EAGAIN` (POSIX): decoder needs more input (expected, not an error)
+/// - Other errors: mapped to `ExportFailed` with the FFmpeg error description
+///
+/// # Usage
+/// Use this when calling FFmpeg APIs that return `ffmpeg_next::Error` to
+/// provide precise error context instead of generic "unknown error" messages.
+pub fn ffmpeg_error_to_app_error(e: ffmpeg_next::Error, context: &str) -> AppError {
+    use ffmpeg_next::util::error::EAGAIN;
+    match e {
+        ffmpeg_next::Error::Eof => AppError::ExportFailed {
+            reason: format!("{context}: 流已结束"),
+        },
+        ffmpeg_next::Error::Other { errno } if errno == EAGAIN => AppError::ExportFailed {
+            reason: format!("{context}: 解码器需要更多数据"),
+        },
+        ffmpeg_next::Error::Other { errno } => AppError::ExportFailed {
+            reason: format!("{context}: FFmpeg 错误 {errno} ({e})"),
+        },
+        _ => AppError::ExportFailed {
+            reason: format!("{context}: {e}"),
+        },
+    }
+}
+
+/// Maps an FFmpeg error to a recording `AppError`.
+///
+/// Similar to `ffmpeg_error_to_app_error` but for recording write operations.
+pub fn ffmpeg_error_to_recording_error(e: ffmpeg_next::Error, context: &str) -> AppError {
+    use ffmpeg_next::util::error::EAGAIN;
+    match e {
+        ffmpeg_next::Error::Eof => AppError::RecordingWriteFailed {
+            reason: format!("{context}: 流已结束"),
+        },
+        ffmpeg_next::Error::Other { errno } if errno == EAGAIN => AppError::RecordingWriteFailed {
+            reason: format!("{context}: 编码器需要更多数据"),
+        },
+        ffmpeg_next::Error::Other { errno } => AppError::RecordingWriteFailed {
+            reason: format!("{context}: FFmpeg 错误 {errno} ({e})"),
+        },
+        _ => AppError::RecordingWriteFailed {
+            reason: format!("{context}: {e}"),
+        },
+    }
 }
 
 #[cfg(test)]

@@ -37,9 +37,10 @@ pub fn test_video_frame_at(timestamp_nanos: u64) -> VideoFrameRef {
 pub fn test_audio_chunk_at(timestamp_nanos: u64) -> MixedAudioChunk {
     MixedAudioChunk {
         timestamp: MediaTimestamp::from_nanos(timestamp_nanos),
-        sample_rate: 44100,
-        channels: 1,
-        samples: Arc::from(vec![0.5f32; 1024].into_boxed_slice()),
+        sample_rate: 48_000,
+        channels: 2,
+        // 1024 samples per channel, stereo interleaved = 2048 total
+        samples: Arc::from(vec![0.5f32; 2048].into_boxed_slice()),
     }
 }
 
@@ -106,8 +107,9 @@ fn synthetic_video_frame_at(timestamp_nanos: u64, width: u32, height: u32) -> Vi
 fn synthetic_audio_chunk_at(timestamp_nanos: u64) -> MixedAudioChunk {
     MixedAudioChunk {
         timestamp: MediaTimestamp::from_nanos(timestamp_nanos),
-        sample_rate: 44100,
-        channels: 1,
-        samples: Arc::from(vec![0.25f32; 1024].into_boxed_slice()),
+        sample_rate: 48_000,
+        channels: 2,
+        // 1024 samples per channel, stereo interleaved = 2048 total
+        samples: Arc::from(vec![0.25f32; 2048].into_boxed_slice()),
     }
 }

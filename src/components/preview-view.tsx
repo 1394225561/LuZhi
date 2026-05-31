@@ -11,6 +11,7 @@ import {
   Scissors,
   Download,
 } from 'lucide-react'
+import { convertFileSrc } from '@tauri-apps/api/core'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
@@ -296,7 +297,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
           <div className="flex-1 bg-black/50 flex items-center justify-center relative">
             {recordingResult?.outputPath ? (
               <video
-                src={`asset://localhost/${recordingResult.outputPath}`}
+                src={convertFileSrc(recordingResult.outputPath)}
                 controls
                 className="w-full h-full object-contain"
               />
@@ -309,7 +310,9 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
                     {recordingResult.durationSecs > 0 && ` · ${recordingResult.durationSecs}s`}
                   </p>
                 )}
-                <p className="text-xs opacity-40 mt-2">视频编码尚未实现（FFmpeg 集成待完成）</p>
+                <p className="text-xs opacity-40 mt-2">
+                  当前构建未启用 FFmpeg，无法生成可播放文件。请使用 npm run tauri:dev:ffmpeg
+                </p>
               </div>
             )}
             {cursorMagnification && (
@@ -540,7 +543,12 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
                 <p>未检测到可裁剪空白段</p>
               )}
               {exportSummary.outputPath ? (
-                <p className="opacity-80">已生成可播放导出文件</p>
+                <div>
+                  <p className="opacity-80 mb-1">✅ 已生成可播放导出文件</p>
+                  <p className="opacity-60 break-all font-mono text-[10px]">
+                    {exportSummary.outputPath}
+                  </p>
+                </div>
               ) : (
                 <p className="opacity-60">FFmpeg 编码器接入后将生成可播放文件</p>
               )}

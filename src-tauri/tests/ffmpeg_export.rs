@@ -214,7 +214,7 @@ fn cut_timeline_export_produces_shorter_output() {
     };
 
     let mut exporter = FfmpegTrimExporter;
-    let result = export_recording_with_timeline(
+    export_recording_with_timeline(
         &mut exporter,
         source.clone(),
         Some(output.clone()),
@@ -244,6 +244,139 @@ fn cut_timeline_export_produces_shorter_output() {
 
     // Original source should still exist.
     assert!(source.exists(), "original source should be preserved");
+
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// Cut export produces output with duration within ±500ms of expected.
+/// Source is 10 seconds; cut [3s, 7s] should produce ~6 seconds output.
+#[test]
+fn cut_export_duration_within_tolerance() {
+    let source = create_source("int-cut-dur", 10_000_000_000);
+    let output = unique_path("int-cut-dur-out", "mp4");
+
+    let cut_timeline = CutTimeline {
+        duration_nanos: 10_000_000_000,
+        keeps: vec![
+            KeepSegment {
+                start: MediaTimestamp::from_nanos(0),
+                end: MediaTimestamp::from_nanos(3_000_000_000),
+            },
+            KeepSegment {
+                start: MediaTimestamp::from_nanos(7_000_000_000),
+                end: MediaTimestamp::from_nanos(10_000_000_000),
+            },
+        ],
+        cuts: vec![CutSegment {
+            start: MediaTimestamp::from_nanos(3_000_000_000),
+            end: MediaTimestamp::from_nanos(7_000_000_000),
+            reason: CutReason::SilentAndStill,
+            mean_audio_rms: 0.0,
+            mean_visual_change: 0.0,
+        }],
+        total_cut_nanos: 4_000_000_000,
+    };
+
+    let mut exporter = FfmpegTrimExporter;
+    export_recording_with_timeline(
+        &mut exporter,
+        source.clone(),
+        Some(output.clone()),
+        ExportPreset::Bilibili,
+        cut_timeline,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        None,
+        1,
+    )
+    .unwrap();
+
+    assert!(output.exists());
+    let inspection =
+        luzhi_lib::test_support::ffmpeg_helpers::inspect_media_artifact(&output).unwrap();
+    assert!(inspection.has_video_stream, "must have video stream");
+    assert!(inspection.has_audio_stream, "must have audio stream");
+
+    // Expected duration: ~6 seconds (10s - 4s cut).
+    // Tolerance: ±500ms for codec delay and seek imprecision.
+    let expected_nanos = 6_000_000_000u64;
+    let tolerance_nanos = 500_000_000u64; // 500ms
+    let diff = if inspection.duration_nanos > expected_nanos {
+        inspection.duration_nanos - expected_nanos
+    } else {
+        expected_nanos - inspection.duration_nanos
+    };
+    assert!(
+        diff <= tolerance_nanos,
+        "output duration {}ns should be within ±500ms of expected {}ns (diff={}ns)",
+        inspection.duration_nanos,
+        expected_nanos,
+        diff
+    );
+
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// Export with keep segment at the very start of source produces valid output.
+/// Source is 10s; keep only [0s, 1s] → output ~1s.
+#[test]
+fn start_of_source_keep_segment() {
+    let source = create_source("int-start-keep", 10_000_000_000);
+    let output = unique_path("int-start-keep-out", "mp4");
+
+    let cut_timeline = CutTimeline {
+        duration_nanos: 10_000_000_000,
+        keeps: vec![KeepSegment {
+            start: MediaTimestamp::from_nanos(0),
+            end: MediaTimestamp::from_nanos(1_000_000_000),
+        }],
+        cuts: vec![CutSegment {
+            start: MediaTimestamp::from_nanos(1_000_000_000),
+            end: MediaTimestamp::from_nanos(10_000_000_000),
+            reason: CutReason::SilentAndStill,
+            mean_audio_rms: 0.0,
+            mean_visual_change: 0.0,
+        }],
+        total_cut_nanos: 9_000_000_000,
+    };
+
+    let mut exporter = FfmpegTrimExporter;
+    export_recording_with_timeline(
+        &mut exporter,
+        source.clone(),
+        Some(output.clone()),
+        ExportPreset::Bilibili,
+        cut_timeline,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        None,
+        1,
+    )
+    .unwrap();
+
+    assert!(output.exists());
+    let inspection =
+        luzhi_lib::test_support::ffmpeg_helpers::inspect_media_artifact(&output).unwrap();
+    assert!(inspection.has_video_stream, "must have video stream");
+    assert!(inspection.has_audio_stream, "must have audio stream");
+
+    // Expected duration: ~1s.
+    let expected_nanos = 1_000_000_000u64;
+    let tolerance_nanos = 500_000_000u64; // 500ms
+    let diff = if inspection.duration_nanos > expected_nanos {
+        inspection.duration_nanos - expected_nanos
+    } else {
+        expected_nanos - inspection.duration_nanos
+    };
+    assert!(
+        diff <= tolerance_nanos,
+        "output duration {}ns should be within ±500ms of expected {}ns (diff={}ns)",
+        inspection.duration_nanos,
+        expected_nanos,
+        diff
+    );
 
     let _ = std::fs::remove_file(&source);
     let _ = std::fs::remove_file(&output);

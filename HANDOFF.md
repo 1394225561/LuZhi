@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-30 | Phase 6 导出预设与本地授权边界部分完成（本地授权边界可接受，导出主路径未完成且存在产品路径回归）。
+> 最后更新：2026-05-31 | Phase 6 FFmpeg 可播放导出整改中（BUG-004、BUG-005、BUG-006、BUG-007、BUG-008 已修复；cursor compositor、audio cut boundary、worker-backed writer 已实现；Native Safety Gate、1080p 10 分钟压力 Gate 仍待完成）。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,35 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-05-31：Phase 6 第 20 节 code review 整改（BUG-005/006/008 修复）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 第 20 节
+
+本轮修复（6 个 Phase）：
+
+1. **R1 BUG.md housekeeping**：修正重复 BUG-005 编号（已解决区改为 BUG-007），拆分 BUG-006 为两个独立条目（BUG-006 系统音频稀疏时间轴、BUG-008 cursor overlay 数值溢出），更新 HANDOFF.md 状态。
+2. **R2 麦克风 CPAL 配置协商**（BUG-005）：`cpal_microphone.rs` 不再使用前端请求的 48kHz/stereo 直接构建输入流，改为使用 `device.default_input_config()` 的实际设备配置。`AudioMixer` 负责下游重采样。增加配置协商诊断日志。
+3. **R3 writer 音频 timestamp 与 silence padding**（BUG-006 现象一）：`EncoderMessage::Audio` 携带 `timestamp_nanos`，worker 维护 48kHz audio timeline cursor。对前导 gap、中间 gap（稀疏系统音频）和尾部 gap 写入 silence。修复 ffmpeg_common.rs 重复注释。
+4. **R4 cursor overlay 数值安全**（BUG-006 现象二 / BUG-008）：`draw_on_frame` 对 `x/y/scale` 做 finite check，scale clamp 到 `0.25..=4.0`，radius clamp 到 `4..min(frame/2, 256)`。`draw_circle`/`draw_circle_outline` 距离计算改用 `i64` 防止溢出。
+5. **R5 trim 后 cursor overlay 时间轴**：`draw_on_frame` 参数从 output PTS 改为 source timestamp nanos。trim_exporter 传入 `raw_pts` 转换的 source nanos，避免 auto-trim 后 cursor 查询错位。
+6. **R6 no-FFmpeg gate、terminal progress 与 UI 状态收口**：no-FFmpeg branch 不再调用 MockTrimExporter，返回明确 gate 错误。failure/cancel 路径 emit terminal `export-progress`（`cancellable: false` + error payload）。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **199 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **228 unit + 8 integration tests** 通过
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --features ffmpeg --all-targets` 通过（既有 macOS FFI warnings）
+- `npm test -- --run` **51 tests** 通过
+- `npm run build` 通过
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/platform/macos/cpal_microphone.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/media/ffmpeg_common.rs`, `src-tauri/src/media/cursor_overlay.rs`, `src-tauri/src/media/trim_exporter.rs`, `src-tauri/src/lib.rs`
+
+---
 
 ### 2026-05-30：Phase 6 FFmpeg 可播放导出实现
 

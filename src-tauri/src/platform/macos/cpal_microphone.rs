@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, SampleRate, StreamConfig};
+use cpal::{Device, SampleFormat, StreamConfig};
 
 use crate::app::error::{AppError, AppResult};
 use crate::core::capture::{
@@ -85,35 +85,42 @@ impl AudioCapture for CpalMicrophoneCapture {
         };
 
         // Configure the input stream.
+        //
+        // IMPORTANT: Always use the device's default config for the actual
+        // hardware stream. The requested sample_rate/channels from the frontend
+        // represent the desired *mixer output* format (48kHz stereo), not what
+        // the hardware supports. The AudioMixer downstream handles resampling.
         let supported_config =
             device
                 .default_input_config()
                 .map_err(|e| AppError::AudioCaptureFailed {
-                    reason: format!("获取麦克风配置失败: {}", e),
+                    reason: format!("获取麦克风默认配置失败: {}", e),
                 })?;
 
-        let sample_rate = if config.sample_rate > 0 {
-            SampleRate(config.sample_rate)
-        } else {
-            supported_config.sample_rate()
-        };
-
-        let channels = if config.channels > 0 {
-            config.channels
-        } else {
-            supported_config.channels()
-        };
-
         let stream_config = StreamConfig {
-            channels,
-            sample_rate,
+            channels: supported_config.channels(),
+            sample_rate: supported_config.sample_rate(),
             buffer_size: cpal::BufferSize::Default,
         };
 
+        // Log the negotiation result for diagnostics.
+        let requested_rate = config.sample_rate;
+        let requested_ch = config.channels;
+        let actual_rate = stream_config.sample_rate.0;
+        let actual_ch = stream_config.channels;
+        if requested_rate > 0 && requested_rate != actual_rate
+            || requested_ch > 0 && requested_ch != actual_ch
+        {
+            eprintln!(
+                "麦克风配置协商: 请求 {}Hz/{}ch, 设备实际 {}Hz/{}ch",
+                requested_rate, requested_ch, actual_rate, actual_ch
+            );
+        }
+
         let sample_format = supported_config.sample_format();
         let running = self.running.clone();
-        let sample_rate_val = sample_rate.0;
-        let channels_val = channels;
+        let sample_rate_val = stream_config.sample_rate.0;
+        let channels_val = stream_config.channels;
         let session_clock = self.session_clock.clone();
 
         // Build the input stream based on the sample format.

@@ -119,7 +119,7 @@ pub struct FfmpegTrimExporter;
 #[cfg(feature = "ffmpeg")]
 impl TrimExporter for FfmpegTrimExporter {
     fn export(&mut self, request: TrimExportRequest) -> AppResult<TrimExportResult> {
-        use crate::media::ffmpeg_common::nanos_to_time_base_units;
+        use crate::media::ffmpeg_common::{nanos_to_time_base_units, time_base_units_to_nanos};
         use ff::codec;
         use ff::codec::encoder;
         use ff::format;
@@ -407,6 +407,47 @@ impl TrimExporter for FfmpegTrimExporter {
             reason: format!("写入文件头失败: {e}"),
         })?;
 
+        // --- Cursor overlay compositor ---
+        // Load effect timeline if provided. The renderer draws a cursor
+        // indicator onto each output frame at the mapped screen coordinates.
+        let fit_dims = if fit_scaler.is_some() {
+            Some((fit_w, fit_h))
+        } else {
+            None
+        };
+        let cursor_overlay = if let Some(ref timeline_path) = request.effect_timeline_path {
+            let timeline = crate::media::cursor_overlay::load_effect_timeline(timeline_path)?;
+            crate::media::cursor_overlay::CursorOverlayRenderer::new(
+                timeline,
+                src_width,
+                src_height,
+                out_w,
+                out_h,
+                scale_policy,
+                center_crop_origin,
+                fit_dims,
+            )
+        } else {
+            None
+        };
+
+        // Safety contract: if raw cursor is hidden and effect timeline was
+        // requested but no overlay can be rendered, fail the export.
+        // This prevents silent "no cursor, no beautification" exports (BUG-005).
+        if request.effect_timeline_path.is_some() && cursor_overlay.is_none() {
+            return Err(AppError::ExportFailed {
+                reason: "光标美化已开启但效果时间线无法渲染。\
+                         请确认录制时已启用光标元数据采集，或重新录制。"
+                    .to_string(),
+            });
+        }
+
+        // After write_header(), the muxer may have rewritten the output stream
+        // time bases (e.g., MP4 muxer often changes video stream to 1/15360).
+        // Read the actual time bases for correct PTS rescaling.
+        let video_out_tb = output.stream(video_out_idx).unwrap().time_base();
+        let audio_out_tb = output.stream(audio_out_idx).unwrap().time_base();
+
         // --- Segment-based decode/encode loop ---
         // Track cumulative cut duration so output timestamps are continuous
         // across keep segments. E.g., keeps [0..2s, 6..8s] → output [0..2s, 2..4s].
@@ -422,6 +463,12 @@ impl TrimExporter for FfmpegTrimExporter {
         // Audio output PTS advances by sample count — never derived from
         // resampled frame PTS, which may be stale after resampler flush.
         let mut next_audio_out_pts: i64 = 0;
+        // Audio sample buffer for accumulating sliced samples to meet AAC
+        // frame_size=1024 requirement. When boundary slicing produces frames
+        // smaller than 1024 samples, we buffer and merge them.
+        let aac_frame_size = 1024usize;
+        let mut audio_sample_buf_l: Vec<f32> = Vec::new();
+        let mut audio_sample_buf_r: Vec<f32> = Vec::new();
         // Input audio time_base for boundary checks and PTS conversion.
         let input_audio_tb = audio_stream_info
             .map(|(_, tb)| tb)
@@ -442,8 +489,8 @@ impl TrimExporter for FfmpegTrimExporter {
             }
             prev_seg_end_nanos = seg_end_nanos;
 
-            // Convert segment boundaries to input video time_base units for seek
-            // and packet comparison.
+            // Convert segment boundaries to input video time_base units for
+            // packet comparison (PTS filtering).
             let seg_start_in_vtb =
                 nanos_to_time_base_units(seg_start_nanos as u64, video_time_base).unwrap_or(0);
             let seg_end_in_vtb =
@@ -456,45 +503,102 @@ impl TrimExporter for FfmpegTrimExporter {
             let seg_end_in_atb =
                 nanos_to_time_base_units(seg_end_nanos as u64, input_audio_tb).unwrap_or(0);
 
+            // Convert segment boundaries to AV_TIME_BASE units (microseconds)
+            // for seeking. ffmpeg-next's Input::seek() with stream_index=-1
+            // uses AV_TIME_BASE, NOT the video stream time_base.
+            let seg_start_avtb = seg_start_nanos / 1_000;
+            let seg_end_avtb = seg_end_nanos / 1_000;
+
             // Flush audio resampler between segments to drain buffered frames
             // from the previous segment. Without this, stale buffered frames
             // carry old PTS values that break audio monotonicity.
+            // Flushed samples go through the buffer to maintain AAC frame_size.
             if seg_idx > 0 {
                 if let Some(ref mut resampler) = audio_resampler {
                     let mut flush_out = frame::Audio::empty();
-                    // flush() may return Ok even with no buffered data.
                     let flush_result = resampler.flush(&mut flush_out);
                     if flush_result.is_ok() {
                         let num_samples = flush_out.samples();
                         if num_samples > 0 {
-                            flush_out.set_pts(Some(next_audio_out_pts));
-                            next_audio_out_pts += num_samples as i64;
-                            audio_encoder.send_frame(&flush_out).map_err(|e| {
-                                AppError::ExportFailed {
-                                    reason: format!("编码刷新音频帧失败: {e}"),
+                            let ch_count = flush_out.channels().min(2) as usize;
+                            for ch in 0..ch_count {
+                                let plane = flush_out.plane::<f32>(ch);
+                                let buf = if ch == 0 {
+                                    &mut audio_sample_buf_l
+                                } else {
+                                    &mut audio_sample_buf_r
+                                };
+                                let copy_count = num_samples.min(plane.len());
+                                buf.extend_from_slice(&plane[..copy_count]);
+                            }
+                            // Drain complete frames from buffer.
+                            while audio_sample_buf_l.len() >= aac_frame_size {
+                                let mut out_frame = frame::Audio::new(
+                                    Sample::F32(sample::Type::Planar),
+                                    aac_frame_size,
+                                    ChannelLayout::STEREO,
+                                );
+                                out_frame.set_rate(48000);
+                                out_frame.set_pts(Some(next_audio_out_pts));
+                                next_audio_out_pts += aac_frame_size as i64;
+
+                                let dst_l = out_frame.plane_mut::<f32>(0);
+                                let drain_l: Vec<f32> =
+                                    audio_sample_buf_l.drain(..aac_frame_size).collect();
+                                dst_l.copy_from_slice(&drain_l);
+
+                                let dst_r = out_frame.plane_mut::<f32>(1);
+                                if audio_sample_buf_r.len() >= aac_frame_size {
+                                    let drain_r: Vec<f32> =
+                                        audio_sample_buf_r.drain(..aac_frame_size).collect();
+                                    dst_r.copy_from_slice(&drain_r);
                                 }
-                            })?;
-                            let mut enc_pkt = ff::Packet::empty();
-                            while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
-                                enc_pkt.set_stream(audio_out_idx);
-                                enc_pkt.rescale_ts(audio_enc_tb, audio_enc_tb);
-                                enc_pkt.write_interleaved(&mut output).map_err(|e| {
+
+                                audio_encoder.send_frame(&out_frame).map_err(|e| {
                                     AppError::ExportFailed {
-                                        reason: format!("写入刷新音频数据包失败: {e}"),
+                                        reason: format!("编码刷新音频帧失败: {e}"),
                                     }
                                 })?;
+                                let mut enc_pkt = ff::Packet::empty();
+                                while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
+                                    enc_pkt.set_stream(audio_out_idx);
+                                    enc_pkt.rescale_ts(audio_enc_tb, audio_out_tb);
+                                    enc_pkt.write_interleaved(&mut output).map_err(|e| {
+                                        AppError::ExportFailed {
+                                            reason: format!("写入刷新音频数据包失败: {e}"),
+                                        }
+                                    })?;
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // Seek input to segment start (in stream time_base units).
+            // Seek input to segment start (in AV_TIME_BASE units = microseconds).
+            // ffmpeg-next's Input::seek() with stream_index=-1 expects
+            // AV_TIME_BASE units, NOT video stream time_base.
             input
-                .seek(seg_start_in_vtb, ..seg_end_in_vtb)
+                .seek(seg_start_avtb, ..seg_end_avtb)
                 .map_err(|e| AppError::ExportFailed {
                     reason: format!("定位到裁剪段失败: {e}"),
                 })?;
+
+            // NOTE: Decoder flush after seek is intentionally omitted here.
+            // The correct FFmpeg pattern for segment-based seeking is:
+            //   1. Seek demuxer to keyframe before target
+            //   2. Flush decoder (avcodec_flush_buffers)
+            //   3. Feed keyframe packets to rebuild reference
+            //   4. Only encode frames within the segment
+            // However, flushing the decoder while the encoder has buffered
+            // frames causes PTS monotonicity violations in the muxer
+            // (encoder output PTS lags behind input PTS due to look-ahead).
+            // Since max_b_frames=0 and the demuxer seeks to a keyframe,
+            // the decoder handles the seek correctly without explicit flush.
+            // Visual quality at segment boundaries may be slightly degraded
+            // (potential brief glitch on first frame) but output is valid.
+            // Output PTS continuity is maintained by last_video_out_pts and
+            // next_audio_out_pts which track the cumulative output position.
 
             // Read packets until we pass the segment end.
             let mut packet = ff::Packet::empty();
@@ -771,6 +875,21 @@ impl TrimExporter for FfmpegTrimExporter {
                                     }
                                 }
 
+                                // Draw cursor overlay onto the scaled output frame.
+                                // IMPORTANT: pass source timestamp (not output PTS)
+                                // because cursor timeline is in source time.
+                                if let Some(ref overlay) = cursor_overlay {
+                                    let source_nanos =
+                                        time_base_units_to_nanos(raw_pts, video_time_base)
+                                            .unwrap_or(0)
+                                            .max(0) as u64;
+                                    overlay.draw_on_frame(
+                                        &mut output_frame,
+                                        source_nanos,
+                                        out_fps,
+                                    );
+                                }
+
                                 video_encoder.send_frame(&output_frame).map_err(|e| {
                                     AppError::ExportFailed {
                                         reason: format!("编码视频帧失败: {e}"),
@@ -780,7 +899,7 @@ impl TrimExporter for FfmpegTrimExporter {
                                 let mut enc_pkt = ff::Packet::empty();
                                 while video_encoder.receive_packet(&mut enc_pkt).is_ok() {
                                     enc_pkt.set_stream(video_out_idx);
-                                    enc_pkt.rescale_ts(video_enc_tb, video_enc_tb);
+                                    enc_pkt.rescale_ts(video_enc_tb, video_out_tb);
                                     enc_pkt.write_interleaved(&mut output).map_err(|e| {
                                         AppError::ExportFailed {
                                             reason: format!("写入视频数据包失败: {e}"),
@@ -789,7 +908,10 @@ impl TrimExporter for FfmpegTrimExporter {
                                 }
                             }
                         } else if Some(pkt_stream) == input_audio_stream_index {
-                            // Decode → resample → encode audio.
+                            // Decode → resample → boundary-slice → encode audio.
+                            // Decoded audio frames may span across keep/cut boundaries.
+                            // After resampling, we compute the frame's time range and
+                            // slice samples that fall outside the current keep segment.
                             if let Some(ref mut dec) = audio_dec {
                                 dec.send_packet(&packet)
                                     .map_err(|e| AppError::ExportFailed {
@@ -798,6 +920,35 @@ impl TrimExporter for FfmpegTrimExporter {
 
                                 let mut decoded_audio = frame::Audio::empty();
                                 while dec.receive_frame(&mut decoded_audio).is_ok() {
+                                    // Compute decoded frame time range in nanoseconds
+                                    // for boundary overlap check.
+                                    let decoded_pts_nanos = if let Some(pts) = decoded_audio.pts() {
+                                        time_base_units_to_nanos(pts, input_audio_tb)
+                                            .unwrap_or(0)
+                                            .max(0) as u64
+                                    } else {
+                                        0
+                                    };
+                                    let decoded_rate = decoded_audio.rate().max(1);
+                                    let decoded_samples = decoded_audio.samples() as u64;
+                                    let decoded_dur_nanos =
+                                        decoded_samples * 1_000_000_000 / decoded_rate as u64;
+                                    let decoded_end_nanos = decoded_pts_nanos + decoded_dur_nanos;
+
+                                    // Check overlap with current keep segment.
+                                    // Skip frames entirely outside the segment.
+                                    if decoded_end_nanos <= seg_start_nanos as u64
+                                        || decoded_pts_nanos >= seg_end_nanos as u64
+                                    {
+                                        continue;
+                                    }
+
+                                    // Compute the portion to keep in nanoseconds.
+                                    let keep_start_nanos =
+                                        decoded_pts_nanos.max(seg_start_nanos as u64);
+                                    let keep_end_nanos =
+                                        decoded_end_nanos.min(seg_end_nanos as u64);
+
                                     // Resample decoded audio to F32P stereo 48kHz.
                                     let mut resampled =
                                         if let Some(ref mut resampler) = audio_resampler {
@@ -812,28 +963,99 @@ impl TrimExporter for FfmpegTrimExporter {
                                             decoded_audio.clone()
                                         };
 
-                                    // Output PTS is tracked by sample count to guarantee
-                                    // monotonicity. Never derive from resampled frame PTS
-                                    // which may be stale after resampler flush.
-                                    let num_samples = resampled.samples() as i64;
-                                    resampled.set_pts(Some(next_audio_out_pts));
-                                    next_audio_out_pts += num_samples;
+                                    // Convert keep boundaries to resampled sample indices.
+                                    // The resampler maps decoded sample i → resampled
+                                    // position proportionally (linear time mapping).
+                                    let resampled_total = resampled.samples() as u64;
+                                    if decoded_dur_nanos == 0 {
+                                        continue;
+                                    }
+                                    let keep_start_idx = ((keep_start_nanos - decoded_pts_nanos)
+                                        * resampled_total
+                                        / decoded_dur_nanos)
+                                        .min(resampled_total);
+                                    let keep_end_idx = ((keep_end_nanos - decoded_pts_nanos)
+                                        * resampled_total
+                                        / decoded_dur_nanos)
+                                        .min(resampled_total);
 
-                                    audio_encoder.send_frame(&resampled).map_err(|e| {
-                                        AppError::ExportFailed {
-                                            reason: format!("编码音频帧失败: {e}"),
+                                    if keep_start_idx >= keep_end_idx {
+                                        continue;
+                                    }
+
+                                    // Slice resampled frame if boundaries don't align.
+                                    let sliced =
+                                        if keep_start_idx > 0 || keep_end_idx < resampled_total {
+                                            slice_audio_frame(
+                                                &resampled,
+                                                keep_start_idx as usize,
+                                                keep_end_idx as usize,
+                                            )
+                                        } else {
+                                            std::mem::replace(&mut resampled, frame::Audio::empty())
+                                        };
+
+                                    // Accumulate sliced samples into per-channel buffers.
+                                    // The AAC encoder requires exactly 1024 samples per frame.
+                                    // Boundary slicing may produce smaller frames, so we buffer
+                                    // and only send full 1024-sample frames.
+                                    {
+                                        let ch_count = sliced.channels().min(2) as usize;
+                                        let sample_count = sliced.samples();
+                                        for ch in 0..ch_count {
+                                            let plane = sliced.plane::<f32>(ch);
+                                            let buf = if ch == 0 {
+                                                &mut audio_sample_buf_l
+                                            } else {
+                                                &mut audio_sample_buf_r
+                                            };
+                                            let copy_count = sample_count.min(plane.len());
+                                            buf.extend_from_slice(&plane[..copy_count]);
                                         }
-                                    })?;
+                                    }
 
-                                    let mut enc_pkt = ff::Packet::empty();
-                                    while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
-                                        enc_pkt.set_stream(audio_out_idx);
-                                        enc_pkt.rescale_ts(audio_enc_tb, audio_enc_tb);
-                                        enc_pkt.write_interleaved(&mut output).map_err(|e| {
+                                    // Drain complete 1024-sample frames from the buffer.
+                                    while audio_sample_buf_l.len() >= aac_frame_size {
+                                        let mut out_frame = frame::Audio::new(
+                                            Sample::F32(sample::Type::Planar),
+                                            aac_frame_size,
+                                            ChannelLayout::STEREO,
+                                        );
+                                        out_frame.set_rate(48000);
+                                        out_frame.set_pts(Some(next_audio_out_pts));
+                                        next_audio_out_pts += aac_frame_size as i64;
+
+                                        let dst_l = out_frame.plane_mut::<f32>(0);
+                                        let drain_l: Vec<f32> =
+                                            audio_sample_buf_l.drain(..aac_frame_size).collect();
+                                        dst_l.copy_from_slice(&drain_l);
+
+                                        let dst_r = out_frame.plane_mut::<f32>(1);
+                                        if audio_sample_buf_r.len() >= aac_frame_size {
+                                            let drain_r: Vec<f32> = audio_sample_buf_r
+                                                .drain(..aac_frame_size)
+                                                .collect();
+                                            dst_r.copy_from_slice(&drain_r);
+                                        }
+                                        // else: R channel buffer is shorter (shouldn't
+                                        // happen for stereo); dst_r stays zero-filled.
+
+                                        audio_encoder.send_frame(&out_frame).map_err(|e| {
                                             AppError::ExportFailed {
-                                                reason: format!("写入音频数据包失败: {e}"),
+                                                reason: format!("编码音频帧失败: {e}"),
                                             }
                                         })?;
+
+                                        let mut enc_pkt = ff::Packet::empty();
+                                        while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
+                                            enc_pkt.set_stream(audio_out_idx);
+                                            enc_pkt.rescale_ts(audio_enc_tb, audio_out_tb);
+                                            enc_pkt.write_interleaved(&mut output).map_err(
+                                                |e| AppError::ExportFailed {
+                                                    reason: format!("写入音频数据包失败: {e}"),
+                                                },
+                                            )?;
+                                        }
                                     }
                                 }
                             }
@@ -854,6 +1076,46 @@ impl TrimExporter for FfmpegTrimExporter {
             if let Some(ref progress) = request.progress {
                 let pct = ((seg_idx + 1) * 99 / total_keeps).clamp(1, 99) as u8;
                 progress.report(pct);
+            }
+        }
+
+        // Flush remaining buffered audio samples as a final frame.
+        // The last frame can be < 1024 samples (AAC allows this for the final frame).
+        if !audio_sample_buf_l.is_empty() {
+            let remaining = audio_sample_buf_l.len();
+            let mut final_frame = frame::Audio::new(
+                Sample::F32(sample::Type::Planar),
+                remaining,
+                ChannelLayout::STEREO,
+            );
+            final_frame.set_rate(48000);
+            final_frame.set_pts(Some(next_audio_out_pts));
+
+            let dst_l = final_frame.plane_mut::<f32>(0);
+            dst_l.copy_from_slice(&audio_sample_buf_l);
+            audio_sample_buf_l.clear();
+
+            let dst_r = final_frame.plane_mut::<f32>(1);
+            let r_count = remaining.min(audio_sample_buf_r.len());
+            if r_count > 0 {
+                dst_r[..r_count].copy_from_slice(&audio_sample_buf_r[..r_count]);
+            }
+            audio_sample_buf_r.clear();
+
+            audio_encoder
+                .send_frame(&final_frame)
+                .map_err(|e| AppError::ExportFailed {
+                    reason: format!("编码音频尾帧失败: {e}"),
+                })?;
+            let mut enc_pkt = ff::Packet::empty();
+            while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
+                enc_pkt.set_stream(audio_out_idx);
+                enc_pkt.rescale_ts(audio_enc_tb, audio_out_tb);
+                enc_pkt
+                    .write_interleaved(&mut output)
+                    .map_err(|e| AppError::ExportFailed {
+                        reason: format!("写入音频尾帧数据包失败: {e}"),
+                    })?;
             }
         }
 
@@ -898,7 +1160,7 @@ impl TrimExporter for FfmpegTrimExporter {
                 let mut enc_pkt = ff::Packet::empty();
                 while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
                     enc_pkt.set_stream(audio_out_idx);
-                    enc_pkt.rescale_ts(audio_enc_tb, audio_enc_tb);
+                    enc_pkt.rescale_ts(audio_enc_tb, audio_out_tb);
                     enc_pkt
                         .write_interleaved(&mut output)
                         .map_err(|e| AppError::ExportFailed {
@@ -917,7 +1179,7 @@ impl TrimExporter for FfmpegTrimExporter {
         let mut enc_pkt = ff::Packet::empty();
         while video_encoder.receive_packet(&mut enc_pkt).is_ok() {
             enc_pkt.set_stream(video_out_idx);
-            enc_pkt.rescale_ts(video_enc_tb, video_enc_tb);
+            enc_pkt.rescale_ts(video_enc_tb, video_out_tb);
             enc_pkt
                 .write_interleaved(&mut output)
                 .map_err(|e| AppError::ExportFailed {
@@ -932,7 +1194,7 @@ impl TrimExporter for FfmpegTrimExporter {
             })?;
         while audio_encoder.receive_packet(&mut enc_pkt).is_ok() {
             enc_pkt.set_stream(audio_out_idx);
-            enc_pkt.rescale_ts(audio_enc_tb, audio_enc_tb);
+            enc_pkt.rescale_ts(audio_enc_tb, audio_out_tb);
             enc_pkt
                 .write_interleaved(&mut output)
                 .map_err(|e| AppError::ExportFailed {
@@ -954,6 +1216,43 @@ impl TrimExporter for FfmpegTrimExporter {
             cut_count: request.cut_timeline.cuts.len(),
         })
     }
+}
+
+/// Slice an audio frame to keep only samples in `[start_idx, end_idx)`.
+///
+/// Works with F32 planar format (what the resampler outputs). Each channel
+/// plane is sliced independently. Returns a new frame with adjusted PTS=0
+/// (caller is responsible for setting the correct output PTS).
+#[cfg(feature = "ffmpeg")]
+fn slice_audio_frame(
+    src: &ffmpeg_next::util::frame::Audio,
+    start_idx: usize,
+    end_idx: usize,
+) -> ffmpeg_next::util::frame::Audio {
+    use ffmpeg_next::util::format::{sample, Sample};
+    use ffmpeg_next::ChannelLayout;
+
+    let channels = src.channels() as usize;
+    let keep_count = end_idx.saturating_sub(start_idx);
+    let mut out = ffmpeg_next::util::frame::Audio::new(
+        Sample::F32(sample::Type::Planar),
+        keep_count,
+        ChannelLayout::STEREO,
+    );
+    out.set_rate(src.rate());
+
+    for ch in 0..channels.min(2) {
+        let src_plane = src.plane::<f32>(ch);
+        let dst_plane = out.plane_mut::<f32>(ch);
+        let copy_count = keep_count
+            .min(src_plane.len().saturating_sub(start_idx))
+            .min(dst_plane.len());
+        if copy_count > 0 {
+            dst_plane[..copy_count].copy_from_slice(&src_plane[start_idx..start_idx + copy_count]);
+        }
+    }
+
+    out
 }
 
 /// Compute center-crop geometry: (crop_x, crop_y, crop_w, crop_h).

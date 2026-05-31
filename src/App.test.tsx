@@ -14,6 +14,7 @@ const invokeMock = vi.fn()
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (command: string, args?: unknown) => invokeMock(command, args),
+  convertFileSrc: (path: string) => `asset://localhost/${path}`,
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -1826,7 +1827,7 @@ describe('App', () => {
     })
 
     await vi.waitFor(() => {
-      expect(screen.getByText('已生成可播放导出文件')).toBeTruthy()
+      expect(screen.getByText(/已生成可播放导出文件/)).toBeTruthy()
     })
     expect(screen.queryByText(/FFmpeg 编码器接入后/)).toBeNull()
   })

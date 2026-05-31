@@ -165,7 +165,7 @@ where
         }
 
         let remaining = TRIAL_SECONDS - elapsed;
-        let days = ((remaining + 24 * 60 * 60 - 1) / (24 * 60 * 60)).min(14) as u8;
+        let days = (remaining.div_ceil(24 * 60 * 60)).min(14) as u8;
         Ok(LicenseStatus {
             kind: LicenseStatusKind::Trial,
             trial_days_remaining: days,

@@ -696,21 +696,26 @@ async fn export_video(
     // Any error from this function will be handled by the outer code which
     // always clears the cancel token and emits terminal progress.
     let do_export = async {
-        // Cursor timeline is optional — basic playable export proceeds even
-        // when cursor metadata is unavailable or the build fails.
-        let cursor = build_cursor_effect_timeline(app.clone(), state.clone())
-            .await
-            .unwrap_or(CursorEffectSummaryPayload {
-                frame_count: 0,
-                click_effect_count: 0,
-                effect_timeline_path: None,
-            });
-
         let config = state
             .beautify_config
             .lock()
             .map_err(|_| "美化配置锁已损坏".to_string())?
             .clone();
+
+        // Cursor timeline: when beautification is enabled (cursor hidden),
+        // the effect timeline is REQUIRED. A failed build must block export
+        // to prevent silent "no cursor, no beautification" exports (BUG-005).
+        let cursor_needs_overlay = config.cursor_magnification || config.cursor_smoothing;
+        let cursor = build_cursor_effect_timeline(app.clone(), state.clone()).await;
+        let cursor = if cursor_needs_overlay {
+            cursor.map_err(|e| format!("光标美化已开启但效果时间线构建失败：{e}"))?
+        } else {
+            cursor.unwrap_or(CursorEffectSummaryPayload {
+                frame_count: 0,
+                click_effect_count: 0,
+                effect_timeline_path: None,
+            })
+        };
 
         let cut = if config.auto_trim_silences {
             Some(build_cut_timeline(app.clone(), state.clone()).await?)
@@ -718,18 +723,20 @@ async fn export_video(
             None
         };
 
-        // Read trim metadata path, source artifact path, and effect timeline path
-        // in a single lock acquisition to reduce lock contention.
-        let (trim_metadata_path, source_path, effect_timeline) = {
+        // Read trim metadata path and source artifact path from service.
+        // Effect timeline path comes from the current cursor build result,
+        // NOT from service.last_effect_timeline_path() which may be stale
+        // from a previous recording session.
+        let (trim_metadata_path, source_path) = {
             let service = state
                 .service
                 .lock()
                 .map_err(|_| "录制服务锁已损坏".to_string())?;
             let trim = service.last_trim_metadata_path();
             let source = service.last_recording_output_path();
-            let effect = service.last_effect_timeline_path().map(PathBuf::from);
-            (trim, source, effect)
+            (trim, source)
         };
+        let effect_timeline = cursor.effect_timeline_path.as_ref().map(PathBuf::from);
 
         // In non-FFmpeg builds, source artifact is not available.
         // Return a clear FFmpeg Gate error instead of requiring a source artifact.
@@ -817,20 +824,25 @@ async fn export_video(
             .map_err(|e| format!("导出工作线程异常终止: {e}"))?
         };
 
+        // No-FFmpeg build: return explicit gate result, no output file.
         #[cfg(not(feature = "ffmpeg"))]
-        let export_result = {
-            let mut exporter = media::trim_exporter::MockTrimExporter::new();
-            app::export_service::export_recording_with_timeline(
-                &mut exporter,
-                source_path,
-                Some(output_path),
-                export_preset,
-                cut_timeline,
-                effect_timeline,
-                cancel_token.clone(),
-                Some(progress_reporter),
-                sequence,
-            )
+        let export_result: Result<
+            media::trim_exporter::TrimExportResult,
+            crate::app::error::AppError,
+        > = {
+            let _ = (
+                &source_path,
+                &output_path,
+                &export_preset,
+                &cut_timeline,
+                &effect_timeline,
+                &progress_reporter,
+                &sequence,
+            );
+            Err(crate::app::error::AppError::ExportFailed {
+                reason: "当前构建未启用 FFmpeg，无法导出视频。请使用 `--features ffmpeg` 构建。"
+                    .to_string(),
+            })
         };
 
         // Validate artifact is playable (streams, dimensions, duration).
@@ -876,7 +888,7 @@ async fn export_video(
     };
 
     // Execute the inner export logic and handle cleanup on all paths.
-    let result = do_export.await;
+    let result: Result<ExportSummaryPayload, String> = do_export.await;
 
     // Always clear the cancel token — this handles ALL early return paths.
     {
@@ -885,6 +897,26 @@ async fn export_video(
             .lock()
             .map_err(|_| "导出取消状态锁已损坏".to_string())?;
         *guard = None;
+    }
+
+    // Emit terminal progress on failure/cancel so UI can clean up.
+    if let Err(ref error_msg) = result {
+        let error_str = error_msg.to_string();
+        let is_cancel = error_str.contains("ExportCancelled") || error_str.contains("已取消");
+        let _ = app.emit(
+            "export-progress",
+            ExportProgressPayload {
+                preset: preset_id,
+                progress: 0,
+                cancellable: false,
+                output_path: None,
+                error: Some(if is_cancel {
+                    "导出已取消".to_string()
+                } else {
+                    error_str
+                }),
+            },
+        );
     }
 
     result
