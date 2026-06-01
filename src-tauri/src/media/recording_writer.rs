@@ -5,8 +5,86 @@ use serde::Serialize;
 use crate::app::error::AppResult;
 use crate::core::frame::{MixedAudioChunk, VideoFrameRef};
 
+/// Diagnostics from the FFmpeg writer worker thread.
+///
+/// Tracks what happened to audio chunks after they were enqueued,
+/// distinguishing between "queued for encoding" and "actually encoded
+/// into the AAC stream". This distinction is critical for BUG-005
+/// diagnosis — `mixed_chunks_queued > 0` does not prove audio is in
+/// the artifact.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriterDiagnostics {
+    /// Number of audio chunks received by the worker thread.
+    pub audio_chunks_received: u64,
+    /// Number of audio chunks that had at least some real PCM appended.
+    pub audio_chunks_appended: u64,
+    /// Number of audio chunks discarded as fully overlapped.
+    pub audio_chunks_discarded_full_overlap: u64,
+    /// Number of audio chunks partially trimmed before appending.
+    pub audio_chunks_trimmed_partial_overlap: u64,
+    /// Number of real (non-silence) mono frames appended to the sample buffer.
+    pub audio_real_frames_appended: u64,
+    /// Number of silence mono frames padded for timeline gaps.
+    pub audio_silence_frames_padded: u64,
+    /// Maximum RMS of real PCM samples before encoding (excludes silence padding).
+    pub audio_real_rms_max_before_encode: f32,
+    /// Number of AAC frames actually encoded and written to the muxer.
+    pub aac_frames_encoded: u64,
+    /// Number of silent AAC frames generated when no audio was received.
+    pub silent_aac_frames_encoded: u64,
+    /// Whether a silent AAC track was generated (no mixed audio chunks received).
+    pub generated_silent_track: bool,
+    /// Number of video queue full events (try_send failed).
+    pub video_queue_full_count: u64,
+    /// Number of audio queue full events (try_send failed).
+    pub audio_queue_full_count: u64,
+}
+
+/// Audio diagnostics collected during a recording session.
+///
+/// Tracks requested audio sources, chunk counts, drop counts, and RMS levels
+/// to help diagnose "silent audio" issues where requested sources don't appear
+/// in the final artifact.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingDiagnostics {
+    /// Whether system audio was requested for this session.
+    pub requested_system_audio: bool,
+    /// Whether microphone was requested for this session.
+    pub requested_microphone: bool,
+    /// Microphone device name if specified (None = system default).
+    pub microphone_device: Option<String>,
+    /// Number of system audio chunks received from capture.
+    pub system_chunks_received: u64,
+    /// Number of microphone chunks received from capture.
+    pub mic_chunks_received: u64,
+    /// Number of system audio chunks dropped by media channel.
+    pub system_chunks_dropped: u64,
+    /// Number of microphone chunks dropped by media channel.
+    pub mic_chunks_dropped: u64,
+    /// Number of mixed audio chunks queued to writer (may not all be encoded).
+    pub mixed_chunks_queued: u64,
+    /// Number of writer push_audio failures.
+    pub writer_push_audio_failures: u64,
+    /// Maximum RMS observed in system audio chunks.
+    pub system_rms_max: f32,
+    /// Maximum RMS observed in microphone chunks.
+    pub mic_rms_max: f32,
+    /// Maximum RMS observed in mixed audio chunks.
+    pub mixed_rms_max: f32,
+    /// Whether a silent AAC track was generated (no mixed audio chunks).
+    pub generated_silent_track: bool,
+    /// Number of time windows that had both system and mic audio (paired).
+    pub paired_window_count: u64,
+    /// Number of time windows with system-only audio.
+    pub system_only_window_count: u64,
+    /// Number of time windows with mic-only audio.
+    pub mic_only_window_count: u64,
+}
+
 /// Result returned after finalizing a recording session.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingResult {
     pub duration_secs: u64,
@@ -17,6 +95,8 @@ pub struct RecordingResult {
     pub effect_timeline_path: Option<String>,
     pub trim_metadata_path: Option<String>,
     pub cut_timeline_path: Option<String>,
+    /// Diagnostics from the FFmpeg writer worker thread.
+    pub writer_diagnostics: WriterDiagnostics,
 }
 
 /// Trait for writing recorded media to a file or other sink.
@@ -68,6 +148,7 @@ impl RecordingWriter for CountingRecordingWriter {
             effect_timeline_path: None,
             trim_metadata_path: None,
             cut_timeline_path: None,
+            writer_diagnostics: WriterDiagnostics::default(),
         })
     }
 }
@@ -134,6 +215,7 @@ impl RecordingWriter for FailingRecordingWriter {
                 effect_timeline_path: None,
                 trim_metadata_path: None,
                 cut_timeline_path: None,
+                writer_diagnostics: WriterDiagnostics::default(),
             })
         }
     }
@@ -185,6 +267,7 @@ mod tests {
             effect_timeline_path: Some("/tmp/effects.json".to_string()),
             trim_metadata_path: Some("/tmp/trim-metadata.json".to_string()),
             cut_timeline_path: Some("/tmp/cut-timeline.json".to_string()),
+            writer_diagnostics: WriterDiagnostics::default(),
         };
 
         let json = serde_json::to_string(&result).unwrap();

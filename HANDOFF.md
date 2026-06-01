@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-05-31 | Phase 6 FFmpeg 可播放导出整改中（BUG-004、BUG-005、BUG-006、BUG-007、BUG-008 已修复；cursor compositor、audio cut boundary、worker-backed writer 已实现；Native Safety Gate、1080p 10 分钟压力 Gate 仍待完成）。
+> 最后更新：2026-06-01 | Phase 6 第 24 节 code review 整改完成（R1-R6 全部完成：RequestedAudioContract、AudioSynchronizer window merger、WriterDiagnostics、finish() non-blocking、strict artifact helper、麦克风设备选择和蓝牙提示）；真实设备 manual gate 仍待完成。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,144 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-01：Phase 6 第 24 节 code review 整改（RequestedAudioContract、window merger、WriterDiagnostics、finish non-blocking、strict helper、蓝牙提示）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 第 24 节
+
+本轮修复（6 个 Phase）：
+
+1. **R1 RequestedAudioArtifactContract**（Critical 1）：新增 `RequestedAudioContract` 结构体和 `validate_source_artifact_with_audio_contract()` / `validate_export_artifact_with_audio_contract()`。当用户请求了音频源时，validation 解码 artifact 的 AAC 流并检查 decoded RMS/peak 是否超过阈值（min_rms=0.003, min_peak=0.02）。未请求音频时允许 silent AAC track。`macos_service.rs` consumer thread 在 writer.finish() 后自动执行 contract validation。
+2. **R2 AudioSynchronizer window merger**（Critical 2）：将 AudioSynchronizer 从 per-chunk 配对重构为固定 20ms 窗口合并器。system/mic chunk 按 timestamp 分配到窗口，每个窗口最多输出一个 `SynchronizedAudioChunk`。watermark-based live drain 确保窗口在 hold window（40ms）后才输出。彻底解决 `mixed_chunks_written = system_chunks_received + mic_chunks_received` 的双写问题。
+3. **R3 WriterDiagnostics**（Critical 3）：新增 `WriterDiagnostics` 结构体，区分 `audio_chunks_received`/`audio_chunks_appended`/`audio_chunks_discarded_full_overlap`/`audio_chunks_trimmed_partial_overlap`/`aac_frames_encoded`。`RecordingResult` 携带写入器诊断。`RecordingDiagnostics.mixed_chunks_written` 重命名为 `mixed_chunks_queued` 以明确语义。
+4. **R4 finish() non-blocking**（Important 2）：`finish()` 从 blocking `send(Flush)` 改为 `try_send(Flush)` + bounded retry（100次 × 10ms = 1秒上限），不再无限阻塞录制停止路径。
+5. **R5 strict synthetic artifact helper**（Important 3）：新增 `create_synthetic_source_artifact_strict()`，任何 push 失败立即返回错误。音频内容测试（RMS/peak 验证）使用 strict helper，backpressure 测试保留 tolerant helper。
+6. **R6 麦克风设备选择和蓝牙兼容提示**（Important 4）：后端新增 `list_microphone_devices` 命令返回设备列表和蓝牙检测。前端新增麦克风设备选择器，对蓝牙麦克风显示 HFP profile 兼容性警告。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **263 unit + 10 integration tests** 通过
+- `npm test -- --run` **52 tests** 通过
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/lib.rs`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/media/audio_synchronizer.rs`, `src-tauri/src/media/ffmpeg_common.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/test_support/ffmpeg_helpers.rs`, `src/lib/tauri.ts`, `src/App.tsx`, `src/components/recording-panel.tsx`
+
+---
+
+### 2026-06-01：Phase 6 第 23 节 code review 整改（audio diagnostics、synchronizer、RMS inspection、non-blocking queue）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 第 23 节
+
+本轮修复（7 个 Phase）：
+
+1. **R1 audio diagnostics 和 requested-audio contract**（Critical 1）：新增 `RecordingDiagnostics` 结构体跟踪 `requested_system_audio`/`requested_microphone`、system/mic chunks received/dropped、mixed chunks written、writer push_audio failures、RMS max、generated silent track。consumer thread 在 diagnostics 中记录所有音频源 metrics，当请求的音频源无 chunk 或被 drop 时输出明确警告。
+2. **R2 AudioSynchronizer drain_final 和 source-aware output**（Critical 2）：新增 `drain_final()` 方法在停止录制时 flush all remaining system/mic chunks，不再按 MAX_HOLD_NANOS 保留。新增 `SynchronizedAudioChunk` 结构体携带 `has_system`/`has_mic`/`system_rms`/`mic_rms` 元数据。consumer thread 使用 `drain_final()` 替代 `drain_mixed()` 作为最终排空路径。
+3. **R3 FFmpeg artifact audio RMS/peak inspection**（Important 4）：`MediaArtifactInspection` 新增 `audio_sample_count`/`audio_rms`/`audio_peak`/`audio_sample_rate`/`audio_channels` 字段。新增 `decode_audio_stats()` 函数解码 AAC 流计算 RMS 和 peak。新增 `inspect_media_artifact_with_audio_stats()` 便捷函数。
+4. **R4 真实 24kHz/1ch mixer -> writer integration test**（Important 3）：新增 `ffmpeg_writer_records_non_silent_mixed_24khz_mono_mic` 测试，构造 `AudioChunk { sample_rate: 24000, channels: 1 }` 经 `SimpleAudioMixer::mix()` 后推入 writer，验证 mixed sample layout、A/V drift、decoded audio RMS。
+5. **R5 writer queue non-blocking send 和 audio starvation 修复**（Important 1）：`FfmpegRecordingWriter` 的 `push_video()`/`push_audio()` 从 blocking `send()` 改为 non-blocking `try_send()`，queue full 时返回结构化错误。consumer loop 使用 bounded batch（MAX_VIDEO_BATCH_PER_ITERATION=10）处理视频帧，避免音频被无限 drain video 饿死。queue capacity 从 25 调整为 64。
+6. **R6 蓝牙耳机麦克风兼容性**（Important 2）：已在 `docs/platform-diff/macos-compatibility.md` 记录为已知限制。UI 设备选择需后续实现。
+7. **R7 真实设备 manual gate 收口**：已在测试中添加 audio RMS inspection 和 24kHz mixer integration test，真实设备验证仍需人工完成。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **212 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **254 unit + 10 integration tests** 通过
+- `npm test -- --run` **52 tests** 通过
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/media/audio_synchronizer.rs`, `src-tauri/src/media/ffmpeg_common.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/test_support/ffmpeg_helpers.rs`
+
+---
+
+### 2026-06-01：Phase 6 第 25 节 code review 整改（BUG-009 writer gap 修复、per-source metadata、diagnostics 语义修正）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 第 25 节
+
+**BUG-009 根因**：`FfmpegRecordingWriter` 音频 timeline gap 分支实现错误。当 `target_sample > audio_timeline_cursor` 时，writer 只补齐 gap silence 并推进 cursor 到 chunk 起点，没有追加当前 audio chunk 的真实 samples。真实设备录制的首个音频 chunk 通常带有非零 timestamp，因此大量非静音 PCM 被替换为静音 AAC frame。
+
+本轮修复（6 个 Phase）：
+
+1. **R1 WriterDiagnostics 扩展**：新增 `audio_real_frames_appended`、`audio_silence_frames_padded`、`audio_real_rms_max_before_encode`、`silent_aac_frames_encoded`、`generated_silent_track` 字段，区分真实 PCM append 与 silence padding。
+2. **R2 BUG-009 writer gap 分支修复**：提取 `append_audio_chunk_to_timeline()` helper，gap 分支补齐静音后必须继续 append 当前 chunk 的真实 PCM 样本，cursor 推进到 chunk 结束位置。新增 `compute_chunk_rms()` helper 计算真实 PCM RMS。
+3. **R3 silent track diagnostics**：`generated_silent_track` 从 writer diagnostics 直接获取，不再通过 `mixed_audio_chunk_count == 0` 推断。
+4. **R4 macos_service.rs 更新**：`diagnostics.generated_silent_track = result.writer_diagnostics.generated_silent_track`。
+5. **R5 AudioSynchronizer per-source metadata**：`AudioWindow` 改为 `SourceWindowBuffer` 结构，system 和 mic 各自保留 `sample_rate/channels`，避免 48kHz/2ch system 与 48kHz/1ch mic 被套用同一份 metadata。
+6. **R6 新增测试**：`ffmpeg_writer_preserves_non_silent_audio_after_leading_gap`、`ffmpeg_writer_preserves_non_silent_audio_after_middle_gap`、`audio_synchronizer_preserves_mic_mono_metadata_when_system_arrives_first`、`audio_synchronizer_preserves_system_stereo_metadata_when_mic_arrives_first`。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **266 unit + 10 integration tests** 通过
+- `npm test -- --run` **52 tests** 通过
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/media/audio_synchronizer.rs`, `src-tauri/src/platform/macos_service.rs`
+
+---
+
+### 2026-06-01：Phase 6 第 22 节 code review 整改（partial-overlap drain、mixer defense、test matrix）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 第 22 节
+
+本轮修复（6 个 Phase）：
+
+1. **R1 partial-overlap drain bug 修复**（Critical 1）：`ffmpeg_writer.rs` 提取 `drain_audio_sample_buffer()` helper，partial-overlap chunk append 后立即进入 AAC drain loop，不再跳过。flush 阶段复用同一 helper。
+2. **R2 BUG-005 测试矩阵补强**（Important 2）：新增 `ffmpeg_writer_drains_partial_overlap_audio_before_finish`（~500 轻微 overlap chunks，A/V drift < 1s）和 `ffmpeg_writer_handles_out_of_order_audio_chunks` 测试。既有 overlap 测试增加 duration 非膨胀断言。
+3. **R3 AudioMixer 输入 metadata 防御**（Important 1）：新增 `validate_audio_chunk()` 在 `passthrough()`/`mix_two()` 入口校验 `channels > 0`、`sample_rate > 0`、`samples.len() % channels == 0`。新增 4 个测试覆盖零通道、零采样率、样本数不匹配场景。
+4. **R4 cursor overlay integration tests**（Important 3）：新增 `ffmpeg_exporter_accepts_render_cursor_overlay_false_noop_timeline` 和 `ffmpeg_exporter_rejects_required_overlay_with_empty_timeline` 集成测试。
+5. **R5 terminal progress test**（Important 3）：前端新增 `clears exporting state on terminal progress with cancellable=false` 测试，验证 no-FFmpeg gate 的 `cancellable=false` 事件清除导出状态。
+6. **R6 test helper artifact contract**（Minor 1）：`create_synthetic_source_artifact()` 新增 output_path 校验和 `inspect_media_artifact()` 自证 video/audio stream 和非零 duration。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **206 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **245 unit + 10 integration tests** 通过
+- `npm test -- --run` **52 tests** 通过
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/media/audio_mixer.rs`, `src-tauri/src/test_support/ffmpeg_helpers.rs`, `src-tauri/tests/ffmpeg_export.rs`, `src/App.test.tsx`
+
+---
+
+### 2026-06-01：Phase 6 第 21 节 code review 整改（BUG-005/008 修复、no-op export、terminal progress）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 第 21 节
+
+本轮修复（7 个 Phase）：
+
+1. **R1 文档状态收口**：更新 BUG.md BUG-005 状态为"部分修复-待真实设备验证"，补充修复进展和预防规则。更新 HANDOFF.md 状态。
+2. **R2 writer audio timeline 测试**：新增 5 个 BUG-005 相关测试：leading gap padding、overlap trimming、full overlap discard、24kHz mic after mixer A/V drift、multiple chunk inflation prevention。
+3. **R3 writer audio timeline merge 修复**（BUG-005 核心修复）：`ffmpeg_writer.rs` 音频时间轴合并逻辑重写——首个 chunk 正确补前导静音、overlap 裁剪/丢弃、`audio_timeline_cursor` 作为唯一时间轴游标、`audio_pts` 作为单调递增编码器 PTS 计数器、tail padding 使用 video end + one frame duration。修复 flush 阶段处理多帧 buffer 的逻辑。
+4. **R4 AudioMixer::to_stereo() 多声道修复**：`src_channels > 2` 时按 frame 截取前两个通道，`src_channels == 0` 返回空输出。
+5. **R5 cursor overlay 数值安全修复**（BUG-008 完全闭环）：`cursor_overlay.rs` 对 mapped coordinates 做 finite check、viewport clamp、i64 bounding box arithmetic。新增 3 个 BUG-008 测试。
+6. **R6 raw cursor visible no-op export 修复**：`trim_exporter.rs` 区分 `render_cursor_overlay=false`（no-op）和 overlay required but failed（fatal）。raw cursor 已可见时基础导出不再被误阻断。
+7. **R7 no-FFmpeg terminal progress 修复**：`lib.rs` export handler 对 `Ok(output_path=None)` 也 emit terminal `export-progress`（`cancellable=false`），UI 不再残留 exporting 状态。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **199 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **243 unit + 8 integration tests** 通过
+- `npm test -- --run` **51 tests** 通过
+- `npm run build` 通过
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/media/cursor_overlay.rs`, `src-tauri/src/media/trim_exporter.rs`, `src-tauri/src/media/audio_mixer.rs`, `src-tauri/src/lib.rs`
+
+---
 
 ### 2026-05-31：Phase 6 第 20 节 code review 整改（BUG-005/006/008 修复）
 

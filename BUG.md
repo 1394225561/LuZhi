@@ -6,29 +6,141 @@
 
 ### BUG-005: 音频捕获失败
 
+**当前状态**：第 24 节整改完成（R1-R4），待真实设备验证。
+
+**修复进展**：
+
+1. **CPAL 配置协商**（第 20 节 R2）：`cpal_microphone.rs` 使用 `device.default_input_config()` 获取真实设备配置，不再把 UI 目标格式当作硬件 stream config。
+2. **writer audio timeline merge**（第 21 节 R3）：`ffmpeg_writer.rs` 的音频时间轴合并逻辑已重写。
+3. **AudioMixer::to_stereo()**（第 21 节 R4）：多声道输入（>2ch）正确截取前两个通道。
+4. **RequestedAudioArtifactContract**（第 24 节 R1）：新增 `RequestedAudioContract` 结构体和 `validate_source_artifact_with_audio_contract()` / `validate_export_artifact_with_audio_contract()`。录制结束后自动解码 artifact 并检查 decoded RMS/peak，当请求了音频但 artifact 静音时返回错误。
+5. **AudioSynchronizer window merger**（第 24 节 R2）：重构为固定 20ms 窗口合并器，同一窗口只输出一个 mixed chunk，彻底解决 system/mic 双写同一时间轴问题。
+6. **WriterDiagnostics**（第 24 节 R3）：新增 `WriterDiagnostics` 结构体，区分 queued/appended/discarded/trimmed/encoded，`RecordingResult` 携带写入器诊断。
+7. **finish() non-blocking**（第 24 节 R4）：`finish()` 改为 `try_send(Flush)` + bounded retry，不再无限阻塞。
+8. **strict synthetic artifact helper**（第 24 节 R5）：新增 `create_synthetic_source_artifact_strict()`，任何 push 失败立即返回错误。音频内容测试（RMS/peak 验证）使用 strict helper，backpressure 测试保留 tolerant helper。
+9. **麦克风设备选择和蓝牙兼容提示**（第 24 节 R6）：后端新增 `list_microphone_devices` 命令返回设备列表和蓝牙检测。前端新增麦克风设备选择器，对蓝牙麦克风显示 HFP profile 兼容性警告。
+
+**待验证**：需要在真实设备上开启麦克风（特别是 `24000Hz/1ch` 设备）录制 10 秒，确认不再出现 `音频 53s` 的偏差。
+**验证结果**：
+
+1. 可以录制并导出，不会出现偏差报错。
+2. 但是出现了新的bug， **新 bug 现象**：
+   - [ ] 录制的源视频、导出的视频，播放时，都听不见系统音频声音、麦克风的声音，但是录制中顶部胶囊状态栏上有麦克风的波动反馈。（这个问题在只录制系统音频、同时录制系统音频和麦克风，这两种情况下都存在）
+   - [x] 同时开启系统音频、麦克风录制，录制过程中从耳机里听到的电脑输出的系统音频声音音质变差，断断续续。结束录制后，耳机里声音就恢复正常了。
+     - 该问题暂时标记为不可抗力。
+   - [ ] 同时开启系统音频、麦克风录制（蓝牙耳机麦克风），结束录制后，没有释放麦克风进程，导致音质一直都是处于很差的状态。
+   - [ ] 同时开启系统音频、麦克风录制（系统默认麦克风，此时默认麦克风貌似是蓝牙耳机麦克风，因为音质变差了），结束录制后，可以释放麦克风进程，音质恢复。
+
+以下是**新 bug 复现**时的终端日志：
+
+```
+麦克风配置协商: 请求 48000Hz/2ch, 设备实际 24000Hz/1ch
+[libx264 @ 0x8fa094000] using cpu capabilities: ARMv8 NEON DotProd
+[libx264 @ 0x8fa094000] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+[aac @ 0x8fa094e00] Qavg: 3247.884
+[libx264 @ 0x8fa094000] frame I:2     Avg QP:13.00  size:409994
+[libx264 @ 0x8fa094000] frame P:290   Avg QP: 2.01  size: 17771
+[libx264 @ 0x8fa094000] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x8fa094000] mb P  I16..4:  0.6%  0.0%  0.0%  P16..4: 20.7%  0.0%  0.0%  0.0%  0.0%    skip:78.7%
+[libx264 @ 0x8fa094000] final ratefactor: 6.76
+[libx264 @ 0x8fa094000] coded y,uvDC,uvAC intra: 38.9% 23.5% 21.7% inter: 8.3% 3.8% 3.5%
+[libx264 @ 0x8fa094000] i16 v,h,dc,p: 55% 40%  2%  3%
+[libx264 @ 0x8fa094000] i8c dc,h,v,p: 68% 20% 10%  2%
+[libx264 @ 0x8fa094000] kb/s:4762.88
+录制音频诊断: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: None, system_chunks_received: 499, mic_chunks_received: 493, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 904, writer_push_audio_failures: 0, system_rms_max: 0.017147802, mic_rms_max: 0.09349334, mixed_rms_max: 0.088926174, generated_silent_track: false, paired_window_count: 88, system_only_window_count: 411, mic_only_window_count: 405 }
+录制音频 contract 验证通过: RMS=0.006991, peak=0.039398, samples=972800
+录制音频诊断摘要: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: None, system_chunks_received: 499, mic_chunks_received: 493, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 904, writer_push_audio_failures: 0, system_rms_max: 0.017147802, mic_rms_max: 0.09349334, mixed_rms_max: 0.088926174, generated_silent_track: false, paired_window_count: 88, system_only_window_count: 411, mic_only_window_count: 405 }
+写入器诊断摘要: WriterDiagnostics { audio_chunks_received: 904, audio_chunks_appended: 499, audio_chunks_discarded_full_overlap: 405, audio_chunks_trimmed_partial_overlap: 0, audio_real_frames_appended: 479040, audio_silence_frames_padded: 3840, audio_real_rms_max_before_encode: 0.014637499, aac_frames_encoded: 474, silent_aac_frames_encoded: 0, generated_silent_track: false, video_queue_full_count: 0, audio_queue_full_count: 0 }
+[libx264 @ 0x8fa096300] using cpu capabilities: ARMv8 NEON DotProd
+[libx264 @ 0x8fa096300] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
+[aac @ 0x8fa096a00] Qavg: 2443.667
+[libx264 @ 0x8fa096300] frame I:2     Avg QP:13.00  size:408898
+[libx264 @ 0x8fa096300] frame P:288   Avg QP: 2.18  size: 13739
+[libx264 @ 0x8fa096300] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x8fa096300] mb P  I16..4:  0.6%  0.0%  0.0%  P16..4: 14.9%  0.0%  0.0%  0.0%  0.0%    skip:84.5%
+[libx264 @ 0x8fa096300] final ratefactor: 5.49
+[libx264 @ 0x8fa096300] coded y,uvDC,uvAC intra: 39.9% 23.1% 21.3% inter: 5.8% 2.7% 2.3%
+[libx264 @ 0x8fa096300] i16 v,h,dc,p: 52% 43%  3%  3%
+[libx264 @ 0x8fa096300] i8c dc,h,v,p: 67% 21% 10%  2%
+[libx264 @ 0x8fa096300] kb/s:3832.41
+```
+
 **现象**：
 
 - 录制前开启 `麦克风`，点击开始录制
-- `录制中界面` 报错：
-  - `音频捕获失败：构建麦克风输入流失败：The requested stream configuration is not supported by the device.`
+- `录制中界面` 没有报错，但是点击`结束录制`，会出现报错：
+  - `录制写入器完成失败: 写入录制文件失败：录制视频/音频时长偏差过大：视频 10033ms，音频 53397ms，偏差 43363ms`
+
+以下是终端日志：
+
+```
+     Running `target/debug/luzhi`
+麦克风配置协商: 请求 48000Hz/2ch, 设备实际 24000Hz/1ch
+[libx264 @ 0x8cbccc700] using cpu capabilities: ARMv8 NEON DotProd
+[libx264 @ 0x8cbccc700] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
+[aac @ 0x8cbccce00] Qavg: 50300.516
+[libx264 @ 0x8cbccc700] frame I:2     Avg QP:12.50  size:269829
+[libx264 @ 0x8cbccc700] frame P:281   Avg QP: 1.81  size: 33703
+[libx264 @ 0x8cbccc700] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x8cbccc700] mb P  I16..4:  4.0%  0.0%  0.0%  P16..4: 16.3%  0.0%  0.0%  0.0%  0.0%    skip:79.7%
+[libx264 @ 0x8cbccc700] final ratefactor: 7.00
+[libx264 @ 0x8cbccc700] coded y,uvDC,uvAC intra: 36.8% 20.2% 19.6% inter: 7.6% 3.7% 3.3%
+[libx264 @ 0x8cbccc700] i16 v,h,dc,p: 62% 34%  2%  2%
+[libx264 @ 0x8cbccc700] i8c dc,h,v,p: 76% 15%  8%  1%
+[libx264 @ 0x8cbccc700] kb/s:7955.15
+录制写入器完成失败: 写入录制文件失败：录制视频/音频时长偏差过大：视频 10033ms，音频 53397ms，偏差 43363ms
+```
 
 ---
 
-### 延期-001: 透明区域鼠标点击不穿透
+**预防规则**：
 
-**现象**：窗口视觉透明区域的鼠标点击不会穿透到被覆盖的应用（桌面、其他窗口），点击透明区域不会激活后方应用。
-
-**原因**：Tauri 2 的 `setIgnoreCursorEvents(true)` 是全窗口级开关，开启后整个窗口（包括面板按钮）都无法交互。无像素级点击穿透支持。
-
-**计划方案**（后期实现）：
-
-- 方案 A：自定义 NSWindow `hitTest:` 重写，透明像素处返回 nil（需原生 macOS 代码）
-- 方案 B：主窗口忽略鼠标事件 + 独立子窗口承载控制面板
-- 方案 C：使用窗口 shape mask 裁剪到面板区域
+- 麦克风设备 stream config 必须来自设备 default/supported config，UI 目标格式只能作为 mixer output target
+- writer 对音频 timestamp 的处理必须同时覆盖 first-gap、middle-gap、tail-gap、overlap、out-of-order 五种情况
+- `MixedAudioChunk.samples` 的布局必须与 `channels` 元数据一致；任何 downmix/truncate/resample 后都必须用测试验证 sample length 与 duration
+- writer `audio_pts` 必须作为单调递增的编码器 PTS 计数器，不能与 timeline cursor 混用
+- writer partial-overlap chunk append 后必须立即进入 AAC drain loop，不能跳过 drain 直接 continue（否则音频 buffer 累积到 finish 阶段）
+- AudioMixer 入口必须校验 `channels > 0`、`sample_rate > 0`、`samples.len() % channels == 0`，不信任底层音频 chunk metadata
+- "请求录制音频源"必须和"实际写入非静音音频内容"建立可验证 contract；不能只检查 audio stream 是否存在
+- 麦克风 UI 电平只能作为 capture-side indicator，不能作为 recording artifact 成功证据
+- system/mic synchronizer 必须 source-aware，同一时间窗口只输出一个 mixed chunk，不能让先到的单源 chunk 占用时间轴并吞掉后到的另一源
+- capture channel drop count 必须进入 diagnostics；音频 drop 不能完全静默
+- silent AAC track 只能用于"没有请求音频"的录屏兼容；用户请求音频时 silent track 必须触发 warning/error
+- artifact validation 必须包含 audio RMS/peak 检查，不能只依赖 stream presence 和 duration
+- FFmpeg writer queue 必须使用 non-blocking send，避免 capture consumer thread 被编码压力阻塞导致音频丢包
+- consumer loop 必须使用 bounded batch 处理视频帧，避免音频被无限 drain video 饿死
+- writer diagnostics 必须区分 queued（进入队列）和 encoded（实际编码进 AAC），不能用 queued 数冒充 encoded 数
+- `finish()` 必须使用 bounded wait 策略（try_send + retry），不能无限阻塞等待编码队列
+- 蓝牙耳机麦克风可能触发 macOS HFP profile 切换，建议用户选择内置麦克风作为输入设备
 
 ---
 
 ## 已解决
+
+### BUG-009: 选择系统默认麦克风会导致录制失败
+
+**当前状态**：已修复（第 25 节整改）。
+
+**根因**：`FfmpegRecordingWriter` 音频 timeline gap 分支实现错误。当 `target_sample > audio_timeline_cursor` 时，writer 只补齐 gap silence 并推进 cursor 到 chunk 起点，没有追加当前 audio chunk 的真实 samples，也没有把 cursor 推进到 chunk 末尾。真实设备录制的首个音频 chunk 通常带有非零 timestamp（因为 CPAL callback 有延迟），因此大量非静音 PCM 被替换为静音 AAC frame。
+
+**修复内容**：
+
+1. **writer gap 分支修复**：gap 分支补齐静音后必须继续 append 当前 chunk 的真实 PCM 样本，cursor 推进到 chunk 结束位置。提取 `append_audio_chunk_to_timeline()` helper 统一处理 gap/overlap/contiguous 三种情况。
+2. **WriterDiagnostics 语义修正**：新增 `audio_real_frames_appended`、`audio_silence_frames_padded`、`audio_real_rms_max_before_encode`、`silent_aac_frames_encoded`、`generated_silent_track` 字段，区分真实 PCM append 与 silence padding。
+3. **AudioSynchronizer per-source metadata**：`AudioWindow` 改为 `SourceWindowBuffer` 结构，system 和 mic 各自保留 `sample_rate/channels`，避免 48kHz/2ch system 与 48kHz/1ch mic 被套用同一份 metadata。
+4. **silent track diagnostics**：`generated_silent_track` 从 writer diagnostics 直接获取，不再通过 `mixed_audio_chunk_count == 0` 推断。
+
+**预防规则**：
+
+1. writer 处理 audio gap 时，padding silence 后必须继续 append 当前真实 chunk；gap padding 不能替代 chunk append。
+2. 音频 timeline 单元测试不能只检查 duration，还必须检查 decoded RMS/peak。
+3. writer diagnostics 必须区分 real PCM append 与 silence padding。
+4. `aac_frames_encoded > 0` 不能作为"artifact 有声"的证据，只能说明 AAC encoder 输出了 frame。
+5. synchronizer window 必须保留 per-source metadata，不能把 system/mic 两路 PCM 套用同一份 sample_rate/channels。
+
+---
 
 ### BUG-004: 导出视频无法播放（视频 PTS 被压缩到 0.03s）
 
@@ -244,5 +356,21 @@ cursor effect timeline 来自录制时的外部输入和动画计算，不应被
 
 - framer-motion 的 `whileTap` 会拦截指针事件，不要将其作为可交互元素（Button、Link 等）的直接父容器。
 - 如需在可交互元素上添加按压动画，优先使用 CSS `active:` 伪类，或将 `whileTap` 直接放在元素本身上（如 `motion.button`）。
+
+---
+
+## 延期解决
+
+### 延期-001: 透明区域鼠标点击不穿透
+
+**现象**：窗口视觉透明区域的鼠标点击不会穿透到被覆盖的应用（桌面、其他窗口），点击透明区域不会激活后方应用。
+
+**原因**：Tauri 2 的 `setIgnoreCursorEvents(true)` 是全窗口级开关，开启后整个窗口（包括面板按钮）都无法交互。无像素级点击穿透支持。
+
+**计划方案**（后期实现）：
+
+- 方案 A：自定义 NSWindow `hitTest:` 重写，透明像素处返回 nil（需原生 macOS 代码）
+- 方案 B：主窗口忽略鼠标事件 + 独立子窗口承载控制面板
+- 方案 C：使用窗口 shape mask 裁剪到面板区域
 
 ---

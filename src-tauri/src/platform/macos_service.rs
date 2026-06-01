@@ -21,7 +21,7 @@ use crate::media::mic_level::MicLevelDetector;
 use crate::media::recording_metadata::RecordingMetadataWriter;
 #[cfg(not(feature = "ffmpeg"))]
 use crate::media::recording_writer::CountingRecordingWriter;
-use crate::media::recording_writer::{RecordingResult, RecordingWriter};
+use crate::media::recording_writer::{RecordingDiagnostics, RecordingResult, RecordingWriter};
 use crate::media::silence_detector::FrameDiffAnalyzer;
 use crate::media::trim_audio_activity::BaseAudioActivityAnalyzer;
 use crate::media::trim_metadata::{TrimMetadata, TrimMetadataWriter, TRIM_METADATA_SCHEMA_VERSION};
@@ -30,6 +30,8 @@ use crate::media::trim_metadata::{TrimMetadata, TrimMetadataWriter, TRIM_METADAT
 struct RecordingConsumerOutput {
     result: RecordingResult,
     trim_metadata: TrimMetadata,
+    /// Audio diagnostics collected during consumer thread execution.
+    diagnostics: RecordingDiagnostics,
     /// Errors collected during consumer thread execution (writer push/finish failures).
     errors: Vec<String>,
 }
@@ -187,7 +189,7 @@ impl MacRecordingService {
         if audio_config.capture_microphone {
             let (mic_sender, mic_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY);
             self.mic_capture.set_session_clock(session_clock.clone());
-            if let Err(error) = self.mic_capture.start(audio_config, mic_sender) {
+            if let Err(error) = self.mic_capture.start(audio_config.clone(), mic_sender) {
                 // Rollback: stop screen capture.
                 let _ = ScreenCapture::stop(&mut self.screen_capture);
                 self.video_receiver = None;
@@ -231,6 +233,10 @@ impl MacRecordingService {
         };
         #[cfg(not(feature = "ffmpeg"))]
         let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
+        let requested_system_audio = audio_config.capture_system_audio;
+        let requested_microphone = audio_config.capture_microphone;
+        let microphone_device = audio_config.microphone_device.clone();
+
         self.consumer_handle = Some(thread::spawn(move || {
             Self::consume_frames(
                 stop_flag,
@@ -241,6 +247,9 @@ impl MacRecordingService {
                 writer,
                 mic_level,
                 &trim_sensitivity,
+                requested_system_audio,
+                requested_microphone,
+                microphone_device,
             )
         }));
 
@@ -284,6 +293,7 @@ impl MacRecordingService {
             effect_timeline_path: None,
             trim_metadata_path: None,
             cut_timeline_path: None,
+            writer_diagnostics: crate::media::recording_writer::WriterDiagnostics::default(),
         };
         let empty_output = RecordingConsumerOutput {
             result: empty_result,
@@ -297,6 +307,7 @@ impl MacRecordingService {
                 visual_activity_dropped_count: 0,
                 activity_truncated: false,
             },
+            diagnostics: RecordingDiagnostics::default(),
             errors: Vec::new(),
         };
         let (consumer_output, consumer_panicked) = if let Some(handle) = self.consumer_handle.take()
@@ -315,6 +326,10 @@ impl MacRecordingService {
         };
         let mut result = consumer_output.result;
         errors.extend(consumer_output.errors);
+
+        // Log diagnostics summary.
+        eprintln!("录制音频诊断摘要: {:?}", consumer_output.diagnostics);
+        eprintln!("写入器诊断摘要: {:?}", result.writer_diagnostics);
 
         self.stop_flag = None;
 
@@ -406,9 +421,20 @@ impl MacRecordingService {
         mut writer: Box<dyn RecordingWriter>,
         mic_level: Arc<Mutex<f64>>,
         _trim_sensitivity_str: &str,
+        requested_system_audio: bool,
+        requested_microphone: bool,
+        microphone_device: Option<String>,
     ) -> RecordingConsumerOutput {
         let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
         let mut mic_detector = MicLevelDetector::new(4096); // ~85ms 窗口 @ 48kHz
+
+        // Audio diagnostics — tracks source-aware metrics to diagnose silent audio issues.
+        let mut diagnostics = RecordingDiagnostics {
+            requested_system_audio,
+            requested_microphone,
+            microphone_device,
+            ..Default::default()
+        };
 
         // Trim metadata collectors — sensitivity-independent 100ms base RMS
         // buckets. Computed in the consumer thread, never sent to React.
@@ -436,48 +462,71 @@ impl MacRecordingService {
                 break;
             }
 
-            // Drain video frames (non-blocking).
-            while let Ok(frame) = video_rx.try_recv() {
-                frame_count.fetch_add(1, Ordering::Relaxed);
+            // Drain video frames (non-blocking, bounded batch).
+            // Limit to MAX_VIDEO_BATCH_PER_ITERATION to prevent audio starvation
+            // when the FFmpeg encoder can't keep up and video frames pile up.
+            const MAX_VIDEO_BATCH_PER_ITERATION: usize = 10;
+            let mut video_batch_count = 0;
+            while video_batch_count < MAX_VIDEO_BATCH_PER_ITERATION {
+                match video_rx.try_recv() {
+                    Ok(frame) => {
+                        video_batch_count += 1;
+                        frame_count.fetch_add(1, Ordering::Relaxed);
 
-                // Low-frequency frame-diff sampling: only diff when enough
-                // time has elapsed since the last visual sample. This avoids
-                // running expensive thumbnail+diff on every 30fps frame.
-                let frame_nanos = frame.timestamp.nanos;
-                latest_observed_media_nanos = latest_observed_media_nanos.max(frame_nanos);
-                if frame_nanos.saturating_sub(last_visual_sample_nanos)
-                    >= VISUAL_SAMPLE_INTERVAL_NANOS
-                {
-                    if let Some(ref previous) = previous_sampled_frame {
-                        if let Ok(diff) = frame_diff_analyzer.diff_pair(previous, &frame) {
-                            if !push_bounded_visual_sample(
-                                &mut visual_activity,
-                                diff,
-                                MAX_VISUAL_SAMPLES,
-                            ) {
-                                visual_dropped += 1;
+                        // Low-frequency frame-diff sampling: only diff when enough
+                        // time has elapsed since the last visual sample. This avoids
+                        // running expensive thumbnail+diff on every 30fps frame.
+                        let frame_nanos = frame.timestamp.nanos;
+                        latest_observed_media_nanos = latest_observed_media_nanos.max(frame_nanos);
+                        if frame_nanos.saturating_sub(last_visual_sample_nanos)
+                            >= VISUAL_SAMPLE_INTERVAL_NANOS
+                        {
+                            if let Some(ref previous) = previous_sampled_frame {
+                                if let Ok(diff) = frame_diff_analyzer.diff_pair(previous, &frame) {
+                                    if !push_bounded_visual_sample(
+                                        &mut visual_activity,
+                                        diff,
+                                        MAX_VISUAL_SAMPLES,
+                                    ) {
+                                        visual_dropped += 1;
+                                    }
+                                }
                             }
+                            previous_sampled_frame = Some((*frame).clone());
+                            last_visual_sample_nanos = frame_nanos;
+                        }
+
+                        if let Err(e) = writer.push_video(frame) {
+                            let msg = format!("写入视频帧失败: {e}");
+                            eprintln!("{msg}");
+                            errors.push(msg);
                         }
                     }
-                    previous_sampled_frame = Some((*frame).clone());
-                    last_visual_sample_nanos = frame_nanos;
-                }
-
-                if let Err(e) = writer.push_video(frame) {
-                    let msg = format!("写入视频帧失败: {e}");
-                    eprintln!("{msg}");
-                    errors.push(msg);
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
                 }
             }
 
             // Enqueue system audio chunks for ordered pairing.
             while let Ok(chunk) = system_audio_rx.try_recv() {
+                diagnostics.system_chunks_received += 1;
+                // Track system audio RMS.
+                let rms = compute_rms(&chunk.samples);
+                if rms > diagnostics.system_rms_max {
+                    diagnostics.system_rms_max = rms;
+                }
                 synchronizer.push_system(chunk);
             }
 
             // Enqueue microphone audio chunks and compute RMS level.
             if let Some(ref mic_rx) = mic_rx {
                 while let Ok(chunk) = mic_rx.try_recv() {
+                    diagnostics.mic_chunks_received += 1;
+                    // Track mic RMS.
+                    let rms = compute_rms(&chunk.samples);
+                    if rms > diagnostics.mic_rms_max {
+                        diagnostics.mic_rms_max = rms;
+                    }
                     // Feed mic samples to the level detector
                     let level = mic_detector.push_samples(&chunk.samples);
                     if let Ok(mut guard) = mic_level.lock() {
@@ -498,6 +547,11 @@ impl MacRecordingService {
                             / mixed.sample_rate.max(1) as u64;
                         latest_observed_media_nanos = latest_observed_media_nanos
                             .max(mixed.timestamp.nanos.saturating_add(chunk_nanos));
+                        // Track mixed audio RMS.
+                        let mixed_rms = compute_rms(&mixed.samples);
+                        if mixed_rms > diagnostics.mixed_rms_max {
+                            diagnostics.mixed_rms_max = mixed_rms;
+                        }
                         // Collect sensitivity-independent 100ms base RMS buckets.
                         for sample in base_audio_analyzer.push_chunk(&mixed) {
                             if !push_bounded_base_audio_sample(
@@ -509,9 +563,12 @@ impl MacRecordingService {
                             }
                         }
                         if let Err(e) = writer.push_audio(mixed) {
+                            diagnostics.writer_push_audio_failures += 1;
                             let msg = format!("写入混音音频失败: {e}");
                             eprintln!("{msg}");
                             errors.push(msg);
+                        } else {
+                            diagnostics.mixed_chunks_queued += 1;
                         }
                     }
                     Err(e) => eprintln!("音频混合失败: {e}"),
@@ -551,39 +608,22 @@ impl MacRecordingService {
         }
 
         while let Ok(chunk) = system_audio_rx.try_recv() {
+            diagnostics.system_chunks_received += 1;
+            let rms = compute_rms(&chunk.samples);
+            if rms > diagnostics.system_rms_max {
+                diagnostics.system_rms_max = rms;
+            }
             synchronizer.push_system(chunk);
         }
 
         if let Some(ref mic_rx) = mic_rx {
             while let Ok(chunk) = mic_rx.try_recv() {
-                synchronizer.push_mic(chunk);
-            }
-        }
-
-        for mixed_result in synchronizer.drain_mixed() {
-            match mixed_result {
-                Ok(mixed) => {
-                    let chunk_frames = mixed.samples.len() as u64 / mixed.channels.max(1) as u64;
-                    let chunk_nanos = chunk_frames.saturating_mul(1_000_000_000)
-                        / mixed.sample_rate.max(1) as u64;
-                    latest_observed_media_nanos = latest_observed_media_nanos
-                        .max(mixed.timestamp.nanos.saturating_add(chunk_nanos));
-                    for sample in base_audio_analyzer.push_chunk(&mixed) {
-                        if !push_bounded_base_audio_sample(
-                            &mut base_audio_activity,
-                            sample,
-                            MAX_AUDIO_SAMPLES,
-                        ) {
-                            audio_dropped += 1;
-                        }
-                    }
-                    if let Err(e) = writer.push_audio(mixed) {
-                        let msg = format!("写入混音音频失败: {e}");
-                        eprintln!("{msg}");
-                        errors.push(msg);
-                    }
+                diagnostics.mic_chunks_received += 1;
+                let rms = compute_rms(&chunk.samples);
+                if rms > diagnostics.mic_rms_max {
+                    diagnostics.mic_rms_max = rms;
                 }
-                Err(e) => eprintln!("音频混合失败: {e}"),
+                synchronizer.push_mic(chunk);
             }
         }
 
@@ -592,6 +632,51 @@ impl MacRecordingService {
             if !push_bounded_base_audio_sample(&mut base_audio_activity, sample, MAX_AUDIO_SAMPLES)
             {
                 audio_dropped += 1;
+            }
+        }
+
+        // Final drain: flush all remaining system/mic chunks without holding.
+        // This ensures no audio chunks are left in the queues when stopping.
+        let drain_results = synchronizer.drain_final();
+        // Record window pairing diagnostics from the synchronizer.
+        let (paired, sys_only, mic_only) = synchronizer.diagnostics();
+        diagnostics.paired_window_count = paired;
+        diagnostics.system_only_window_count = sys_only;
+        diagnostics.mic_only_window_count = mic_only;
+        for (synchronized, was_unpaired) in drain_results {
+            if was_unpaired {
+                if synchronized.has_system && !synchronized.has_mic {
+                    eprintln!("警告: 最终排空发现未配对的系统音频块");
+                } else if synchronized.has_mic && !synchronized.has_system {
+                    eprintln!("警告: 最终排空发现未配对的麦克风音频块");
+                }
+            }
+            let chunk_frames =
+                synchronized.mixed.samples.len() as u64 / synchronized.mixed.channels.max(1) as u64;
+            let chunk_nanos = chunk_frames.saturating_mul(1_000_000_000)
+                / synchronized.mixed.sample_rate.max(1) as u64;
+            latest_observed_media_nanos = latest_observed_media_nanos
+                .max(synchronized.mixed.timestamp.nanos.saturating_add(chunk_nanos));
+            let mixed_rms = compute_rms(&synchronized.mixed.samples);
+            if mixed_rms > diagnostics.mixed_rms_max {
+                diagnostics.mixed_rms_max = mixed_rms;
+            }
+            for sample in base_audio_analyzer.push_chunk(&synchronized.mixed) {
+                if !push_bounded_base_audio_sample(
+                    &mut base_audio_activity,
+                    sample,
+                    MAX_AUDIO_SAMPLES,
+                ) {
+                    audio_dropped += 1;
+                }
+            }
+            if let Err(e) = writer.push_audio(synchronized.mixed) {
+                diagnostics.writer_push_audio_failures += 1;
+                let msg = format!("写入混音音频失败: {e}");
+                eprintln!("{msg}");
+                errors.push(msg);
+            } else {
+                diagnostics.mixed_chunks_queued += 1;
             }
         }
 
@@ -610,9 +695,85 @@ impl MacRecordingService {
                     effect_timeline_path: None,
                     trim_metadata_path: None,
                     cut_timeline_path: None,
+                    writer_diagnostics: crate::media::recording_writer::WriterDiagnostics::default(),
                 }
             }
         };
+
+        // Use writer diagnostics for silent track detection instead of inferring
+        // from mixed_audio_chunk_count (which gets overwritten by silent packet count).
+        diagnostics.generated_silent_track = result.writer_diagnostics.generated_silent_track;
+
+        // Record channel drop counts from media receivers.
+        diagnostics.system_chunks_dropped = system_audio_rx.dropped_count();
+        if let Some(ref mic_rx) = mic_rx {
+            diagnostics.mic_chunks_dropped = mic_rx.dropped_count();
+        }
+
+        // Log diagnostics for debugging.
+        eprintln!("录制音频诊断: {:?}", diagnostics);
+
+        // Warn if requested audio sources didn't produce content.
+        if requested_system_audio && diagnostics.system_chunks_received == 0 {
+            let msg = "警告: 请求了系统音频但未收到任何音频块".to_string();
+            eprintln!("{msg}");
+            errors.push(msg);
+        }
+        if requested_microphone && diagnostics.mic_chunks_received == 0 {
+            let msg = "警告: 请求了麦克风但未收到任何音频块".to_string();
+            eprintln!("{msg}");
+            errors.push(msg);
+        }
+        if requested_system_audio && diagnostics.system_chunks_dropped > 0 {
+            let msg = format!(
+                "警告: 系统音频通道丢弃了 {} 个音频块",
+                diagnostics.system_chunks_dropped
+            );
+            eprintln!("{msg}");
+            errors.push(msg);
+        }
+        if requested_microphone && diagnostics.mic_chunks_dropped > 0 {
+            let msg = format!(
+                "警告: 麦克风通道丢弃了 {} 个音频块",
+                diagnostics.mic_chunks_dropped
+            );
+            eprintln!("{msg}");
+            errors.push(msg);
+        }
+
+        // Artifact-level audio contract validation (BUG-005).
+        // Decodes the written artifact's audio stream and checks RMS/peak
+        // to verify that requested audio sources actually produced audible content.
+        // This catches the case where capture-side RMS is non-zero but the artifact
+        // contains silence due to writer timeline overlap or encoder issues.
+        #[cfg(feature = "ffmpeg")]
+        if let Some(ref output_path) = result.output_path {
+            let contract = crate::media::ffmpeg_common::RequestedAudioContract {
+                requested_system_audio,
+                requested_microphone,
+                ..Default::default()
+            };
+            if contract.any_audio_requested() {
+                match crate::media::ffmpeg_common::validate_source_artifact_with_audio_contract(
+                    std::path::Path::new(output_path),
+                    &contract,
+                ) {
+                    Ok(inspection) => {
+                        eprintln!(
+                            "录制音频 contract 验证通过: RMS={:.6}, peak={:.6}, samples={}",
+                            inspection.audio_rms.unwrap_or(0.0),
+                            inspection.audio_peak.unwrap_or(0.0),
+                            inspection.audio_sample_count.unwrap_or(0),
+                        );
+                    }
+                    Err(e) => {
+                        let msg = format!("录制音频 contract 验证失败: {e}");
+                        eprintln!("{msg}");
+                        errors.push(msg);
+                    }
+                }
+            }
+        }
 
         // Writer duration may be 0 when using CountingRecordingWriter (no
         // production encoder yet). Fall back to the latest observed media
@@ -637,6 +798,7 @@ impl MacRecordingService {
                 visual_activity_dropped_count: visual_dropped,
                 activity_truncated,
             },
+            diagnostics,
             errors,
         }
     }
@@ -712,6 +874,17 @@ fn extract_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
     } else {
         "unknown panic".to_string()
     }
+}
+
+/// Computes the RMS (root mean square) of a slice of f32 audio samples.
+///
+/// Returns 0.0 for empty slices.
+fn compute_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_squares: f32 = samples.iter().map(|s| s * s).sum();
+    (sum_squares / samples.len() as f32).sqrt()
 }
 
 fn cursor_metadata_path() -> PathBuf {
@@ -905,6 +1078,7 @@ mod tests {
                 effect_timeline_path: None,
                 trim_metadata_path: None,
                 cut_timeline_path: None,
+                writer_diagnostics: crate::media::recording_writer::WriterDiagnostics::default(),
             },
             trim_metadata: TrimMetadata {
                 schema_version: TRIM_METADATA_SCHEMA_VERSION,
@@ -916,6 +1090,7 @@ mod tests {
                 visual_activity_dropped_count: 0,
                 activity_truncated: false,
             },
+            diagnostics: RecordingDiagnostics::default(),
             errors: vec![
                 "写入视频帧失败: fake".to_string(),
                 "录制写入器完成失败: fake".to_string(),
@@ -958,6 +1133,9 @@ mod tests {
             writer,
             mic_level,
             "medium",
+            false,
+            false,
+            None,
         );
 
         assert!(
@@ -1019,6 +1197,9 @@ mod tests {
             writer,
             mic_level,
             "medium",
+            false,
+            false,
+            None,
         );
 
         stopper.join().unwrap();
@@ -1076,6 +1257,9 @@ mod tests {
             writer,
             mic_level,
             "medium",
+            false,
+            false,
+            None,
         );
 
         stopper.join().unwrap();
@@ -1133,5 +1317,58 @@ mod tests {
         assert_eq!(audio_dropped, 1);
         assert_eq!(visual_dropped, 1);
         assert!(audio_dropped > 0 || visual_dropped > 0);
+    }
+
+    /// Verifies that audio diagnostics tracks requested audio sources.
+    #[test]
+    fn audio_diagnostics_tracks_requested_sources() {
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1);
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(1);
+        let stop_flag = Arc::new(AtomicBool::new(true)); // immediate stop
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        let writer: Box<dyn RecordingWriter> =
+            Box::new(crate::media::recording_writer::CountingRecordingWriter::new(None));
+
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+            true,  // requested_system_audio
+            true,  // requested_microphone
+            Some("Built-in Microphone".to_string()),
+        );
+
+        assert!(output.diagnostics.requested_system_audio);
+        assert!(output.diagnostics.requested_microphone);
+        assert_eq!(
+            output.diagnostics.microphone_device,
+            Some("Built-in Microphone".to_string())
+        );
+    }
+
+    /// Verifies that compute_rms returns correct RMS values.
+    #[test]
+    fn compute_rms_returns_correct_value() {
+        // Empty slice.
+        assert_eq!(compute_rms(&[]), 0.0);
+
+        // Single sample.
+        assert!((compute_rms(&[0.5]) - 0.5).abs() < 0.001);
+
+        // Multiple samples: sqrt((0.25 + 0.25) / 2) = sqrt(0.25) = 0.5
+        assert!((compute_rms(&[0.5, 0.5]) - 0.5).abs() < 0.001);
+
+        // Mixed positive/negative: sqrt((0.04 + 0.04) / 2) = sqrt(0.04) = 0.2
+        assert!((compute_rms(&[0.2, -0.2]) - 0.2).abs() < 0.001);
     }
 }
