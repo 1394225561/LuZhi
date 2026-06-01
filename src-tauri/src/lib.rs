@@ -371,6 +371,52 @@ fn set_audio_config(
     Ok(())
 }
 
+/// Information about a microphone device available on the system.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MicrophoneDeviceInfo {
+    /// Device name (used as identifier in `set_audio_config`).
+    name: String,
+    /// Whether this is likely a Bluetooth device based on name heuristics.
+    is_bluetooth: bool,
+}
+
+/// Lists available microphone input devices.
+///
+/// Returns device names and Bluetooth detection hints.
+/// The frontend uses this to populate a device selector and show
+/// Bluetooth HFP compatibility warnings.
+#[tauri::command]
+fn list_microphone_devices() -> Result<Vec<MicrophoneDeviceInfo>, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = cpal::default_host();
+    let devices = host
+        .input_devices()
+        .map_err(|e| format!("枚举麦克风设备失败: {e}"))?;
+
+    let bluetooth_keywords = [
+        "bluetooth", "airpods", "headset", "hands-free", "hfp", "a2dp",
+        "wireless", "bt ", "bt-",
+    ];
+
+    let mut result = Vec::new();
+    for device in devices {
+        if let Ok(name) = device.name() {
+            let name_lower = name.to_lowercase();
+            let is_bluetooth = bluetooth_keywords
+                .iter()
+                .any(|kw| name_lower.contains(kw));
+            result.push(MicrophoneDeviceInfo {
+                name,
+                is_bluetooth,
+            });
+        }
+    }
+
+    Ok(result)
+}
+
 #[tauri::command]
 fn set_beautify_config(
     state: tauri::State<'_, AppState>,
@@ -900,23 +946,42 @@ async fn export_video(
     }
 
     // Emit terminal progress on failure/cancel so UI can clean up.
-    if let Err(ref error_msg) = result {
-        let error_str = error_msg.to_string();
-        let is_cancel = error_str.contains("ExportCancelled") || error_str.contains("已取消");
-        let _ = app.emit(
-            "export-progress",
-            ExportProgressPayload {
-                preset: preset_id,
-                progress: 0,
-                cancellable: false,
-                output_path: None,
-                error: Some(if is_cancel {
-                    "导出已取消".to_string()
-                } else {
-                    error_str
-                }),
-            },
-        );
+    // Also emit when Ok has output_path: None (no-FFmpeg gate) to ensure
+    // UI clears the exporting/cancellable state.
+    match &result {
+        Err(error_msg) => {
+            let error_str = error_msg.to_string();
+            let is_cancel = error_str.contains("ExportCancelled") || error_str.contains("已取消");
+            let _ = app.emit(
+                "export-progress",
+                ExportProgressPayload {
+                    preset: preset_id,
+                    progress: 0,
+                    cancellable: false,
+                    output_path: None,
+                    error: Some(if is_cancel {
+                        "导出已取消".to_string()
+                    } else {
+                        error_str
+                    }),
+                },
+            );
+        }
+        Ok(ref payload) if payload.output_path.is_none() => {
+            // No-FFmpeg gate or other gate condition: emit terminal progress
+            // so UI clears the exporting/cancellable state.
+            let _ = app.emit(
+                "export-progress",
+                ExportProgressPayload {
+                    preset: preset_id,
+                    progress: 0,
+                    cancellable: false,
+                    output_path: None,
+                    error: Some("当前构建未启用 FFmpeg，无法生成可播放文件".to_string()),
+                },
+            );
+        }
+        _ => {}
     }
 
     result
@@ -1110,6 +1175,7 @@ pub fn run() -> tauri::Result<()> {
             resume_recording,
             set_capture_mode,
             set_audio_config,
+            list_microphone_devices,
             set_beautify_config,
             get_beautify_config,
             build_cursor_effect_timeline,

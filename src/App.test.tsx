@@ -887,6 +887,48 @@ describe('App', () => {
     })
   })
 
+  it('clears exporting state on terminal progress with cancellable=false', async () => {
+    // R5: When no-FFmpeg gate emits terminal progress (cancellable=false,
+    // outputPath=null), the UI must clear exporting state and not show
+    // a cancel button or success file path.
+    const listenCallbacks: Record<string, (event: { payload: unknown }) => void> = {}
+    const { listen } = await import('@tauri-apps/api/event')
+    vi.mocked(listen).mockImplementation((event: string, cb: (event: { payload: unknown }) => void) => {
+      listenCallbacks[event] = cb
+      return Promise.resolve(() => { delete listenCallbacks[event] })
+    })
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: null })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+
+    // Simulate terminal progress event (no-FFmpeg gate: cancellable=false, outputPath=null).
+    await act(async () => {
+      listenCallbacks['export-progress']?.({
+        payload: {
+          preset: 'bilibili',
+          progress: 0,
+          cancellable: false,
+          outputPath: null,
+          error: '当前构建未启用 FFmpeg，无法生成可播放文件',
+        },
+      })
+    })
+
+    // The exporting state should be cleared — no cancel button visible.
+    const cancelButtons = screen.queryAllByRole('button', { name: '取消' })
+    expect(cancelButtons).toHaveLength(0)
+  })
+
   it('debounces consecutive beautify changes into a single timeline build', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })

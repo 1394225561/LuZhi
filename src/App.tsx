@@ -35,6 +35,7 @@ export default function App() {
   const [recordingMode, setRecordingMode] = useState<'fullscreen' | 'window' | 'area'>('fullscreen')
   const [systemAudioEnabled, setSystemAudioEnabled] = useState(true)
   const [micEnabled, setMicEnabled] = useState(false)
+  const [micDevice, setMicDevice] = useState<string | null>(null)
   const [micVolume, setMicVolume] = useState(0)
   const [elapsedTime, setElapsedTime] = useState(0)
   const [isPaused, setIsPaused] = useState(false)
@@ -149,7 +150,7 @@ export default function App() {
       await setAudioConfig({
         captureSystemAudio: systemAudioEnabled,
         captureMicrophone: micEnabled,
-        microphoneDevice: null,
+        microphoneDevice: micDevice,
         sampleRate: 48000,
         channels: 2,
       })
@@ -166,7 +167,7 @@ export default function App() {
       setErrorMessage(String(e))
       isStartingRef.current = false
     }
-  }, [appState, recordingMode, systemAudioEnabled, micEnabled, resolution, fps])
+  }, [appState, recordingMode, systemAudioEnabled, micEnabled, micDevice, resolution, fps])
 
   const handlePauseRecording = useCallback(async () => {
     if (appState !== 'recording') return
@@ -272,6 +273,8 @@ export default function App() {
             setSystemAudioEnabled={setSystemAudioEnabled}
             micEnabled={micEnabled}
             setMicEnabled={setMicEnabled}
+            micDevice={micDevice}
+            setMicDevice={setMicDevice}
             micVolume={micVolume}
             onStartRecording={handleStartRecording}
             resolution={resolution}

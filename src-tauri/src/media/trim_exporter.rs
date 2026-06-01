@@ -410,14 +410,22 @@ impl TrimExporter for FfmpegTrimExporter {
         // --- Cursor overlay compositor ---
         // Load effect timeline if provided. The renderer draws a cursor
         // indicator onto each output frame at the mapped screen coordinates.
+        //
+        // When `render_cursor_overlay` is false (raw cursor already visible),
+        // overlay is not needed — this is a no-op, not an error.
+        // When `render_cursor_overlay` is true but renderer can't be created
+        // (e.g., empty frames), the export must fail to prevent silent
+        // "no cursor, no beautification" exports (BUG-007).
         let fit_dims = if fit_scaler.is_some() {
             Some((fit_w, fit_h))
         } else {
             None
         };
-        let cursor_overlay = if let Some(ref timeline_path) = request.effect_timeline_path {
+        let mut cursor_overlay = None;
+        if let Some(ref timeline_path) = request.effect_timeline_path {
             let timeline = crate::media::cursor_overlay::load_effect_timeline(timeline_path)?;
-            crate::media::cursor_overlay::CursorOverlayRenderer::new(
+            let needs_overlay = timeline.render_cursor_overlay;
+            cursor_overlay = crate::media::cursor_overlay::CursorOverlayRenderer::new(
                 timeline,
                 src_width,
                 src_height,
@@ -426,20 +434,18 @@ impl TrimExporter for FfmpegTrimExporter {
                 scale_policy,
                 center_crop_origin,
                 fit_dims,
-            )
-        } else {
-            None
-        };
-
-        // Safety contract: if raw cursor is hidden and effect timeline was
-        // requested but no overlay can be rendered, fail the export.
-        // This prevents silent "no cursor, no beautification" exports (BUG-005).
-        if request.effect_timeline_path.is_some() && cursor_overlay.is_none() {
-            return Err(AppError::ExportFailed {
-                reason: "光标美化已开启但效果时间线无法渲染。\
-                         请确认录制时已启用光标元数据采集，或重新录制。"
-                    .to_string(),
-            });
+            );
+            // Safety contract: if raw cursor is hidden (overlay required) but
+            // renderer couldn't be created, fail the export.
+            // If render_cursor_overlay=false, cursor_overlay being None is fine
+            // (raw cursor is already visible in the source frames).
+            if needs_overlay && cursor_overlay.is_none() {
+                return Err(AppError::ExportFailed {
+                    reason: "光标美化已开启但效果时间线无法渲染。\
+                             请确认录制时已启用光标元数据采集，或重新录制。"
+                        .to_string(),
+                });
+            }
         }
 
         // After write_header(), the muxer may have rewritten the output stream
@@ -883,11 +889,7 @@ impl TrimExporter for FfmpegTrimExporter {
                                         time_base_units_to_nanos(raw_pts, video_time_base)
                                             .unwrap_or(0)
                                             .max(0) as u64;
-                                    overlay.draw_on_frame(
-                                        &mut output_frame,
-                                        source_nanos,
-                                        out_fps,
-                                    );
+                                    overlay.draw_on_frame(&mut output_frame, source_nanos, out_fps);
                                 }
 
                                 video_encoder.send_frame(&output_frame).map_err(|e| {

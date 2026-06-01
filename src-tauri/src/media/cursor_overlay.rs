@@ -206,10 +206,20 @@ impl CursorOverlayRenderer {
             None => return, // Cursor outside visible region.
         };
 
+        // BUG-008: Validate mapped coordinates are finite before drawing.
+        // Huge finite values after mapping can still cause i32 overflow in
+        // bounding box arithmetic. Skip the frame rather than panic.
+        if !out_x.is_finite() || !out_y.is_finite() {
+            return;
+        }
+
         // Draw on Y plane (luma) only. YUV420P Y=0 is black, Y=235 is white.
         // Read immutable dimensions before mutable data borrow.
         let w = frame.width() as i32;
         let h = frame.height() as i32;
+        if w <= 0 || h <= 0 {
+            return;
+        }
         let data = frame.data_mut(0);
         let linesize = if h > 0 {
             data.len() / h as usize
@@ -223,16 +233,60 @@ impl CursorOverlayRenderer {
             .max(4)
             .min(max_radius);
 
+        // BUG-008: Clamp mapped coordinates to a safe drawing range.
+        // Allow margin of max_radius so partially-visible cursors at edges
+        // are still drawn. Use i64 for all bounding box arithmetic to
+        // prevent overflow on debug builds.
+        let margin = max_radius as i64;
+        let out_x_clamped = (out_x.round() as i64).clamp(-margin, w as i64 + margin);
+        let out_y_clamped = (out_y.round() as i64).clamp(-margin, h as i64 + margin);
+
+        // Skip if entirely outside the visible area (beyond margin).
+        if out_x_clamped + (radius as i64) < 0
+            || out_x_clamped - (radius as i64) > w as i64
+            || out_y_clamped + (radius as i64) < 0
+            || out_y_clamped - (radius as i64) > h as i64
+        {
+            return;
+        }
+
         // Dark outline (radius + 1) for contrast.
-        Self::draw_circle(data, w, h, linesize, out_x, out_y, radius + 1, 0);
+        Self::draw_circle_i64(
+            data,
+            w as i64,
+            h as i64,
+            linesize,
+            out_x_clamped,
+            out_y_clamped,
+            radius as i64 + 1,
+            0,
+        );
         // White fill for visibility.
-        Self::draw_circle(data, w, h, linesize, out_x, out_y, radius, 235);
+        Self::draw_circle_i64(
+            data,
+            w as i64,
+            h as i64,
+            linesize,
+            out_x_clamped,
+            out_y_clamped,
+            radius as i64,
+            235,
+        );
 
         // Click magnification ring: when scale > 1.0, draw a faint outer ring.
         if clamped_scale > 1.05 {
             let ring_radius =
-                ((self.cursor_radius * clamped_scale * 1.4).round() as i32).min(max_radius);
-            Self::draw_circle_outline(data, w, h, linesize, out_x, out_y, ring_radius, 180);
+                ((self.cursor_radius * clamped_scale * 1.4).round() as i64).min(max_radius as i64);
+            Self::draw_circle_outline_i64(
+                data,
+                w as i64,
+                h as i64,
+                linesize,
+                out_x_clamped,
+                out_y_clamped,
+                ring_radius,
+                180,
+            );
         }
     }
 
@@ -251,38 +305,36 @@ impl CursorOverlayRenderer {
         frames.get(idx)
     }
 
-    /// Draw a filled circle on the Y plane.
+    /// Draw a filled circle on the Y plane using i64 coordinates.
     ///
-    /// Uses `i64` for distance calculations to prevent `i32` overflow on
-    /// large radius or extreme coordinates.
+    /// BUG-008: Uses i64 throughout to prevent overflow on extreme coordinates
+    /// after coordinate mapping. This is the primary drawing function used by
+    /// `draw_on_frame()` after clamping.
     #[allow(clippy::too_many_arguments)]
-    fn draw_circle(
+    fn draw_circle_i64(
         data: &mut [u8],
-        frame_w: i32,
-        frame_h: i32,
+        frame_w: i64,
+        frame_h: i64,
         linesize: usize,
-        cx: f32,
-        cy: f32,
-        radius: i32,
+        cx: i64,
+        cy: i64,
+        radius: i64,
         value: u8,
     ) {
-        let cx_i = cx as i32;
-        let cy_i = cy as i32;
-        let r = radius as i64;
-        let r2 = r * r;
+        let r2 = radius * radius;
 
-        let y_start = (cy_i - radius).max(0) as u32;
-        let y_end = ((cy_i + radius).min(frame_h - 1)) as u32;
-        let x_start = (cx_i - radius).max(0) as u32;
-        let x_end = ((cx_i + radius).min(frame_w - 1)) as u32;
+        let y_start = (cy - radius).max(0) as usize;
+        let y_end = ((cy + radius).min(frame_h - 1)) as usize;
+        let x_start = (cx - radius).max(0) as usize;
+        let x_end = ((cx + radius).min(frame_w - 1)) as usize;
 
         for y in y_start..=y_end {
-            let row_offset = y as usize * linesize;
+            let row_offset = y * linesize;
             for x in x_start..=x_end {
-                let dx = x as i64 - cx_i as i64;
-                let dy = y as i64 - cy_i as i64;
+                let dx = x as i64 - cx;
+                let dy = y as i64 - cy;
                 if dx * dx + dy * dy <= r2 {
-                    if let Some(pixel) = data.get_mut(row_offset + x as usize) {
+                    if let Some(pixel) = data.get_mut(row_offset + x) {
                         *pixel = value;
                     }
                 }
@@ -290,40 +342,37 @@ impl CursorOverlayRenderer {
         }
     }
 
-    /// Draw a circle outline (1px wide) on the Y plane.
+    /// Draw a circle outline (1px wide) on the Y plane using i64 coordinates.
     ///
-    /// Uses `i64` for distance calculations to prevent `i32` overflow.
+    /// BUG-008: Uses i64 throughout to prevent overflow on extreme coordinates.
     #[allow(clippy::too_many_arguments)]
-    fn draw_circle_outline(
+    fn draw_circle_outline_i64(
         data: &mut [u8],
-        frame_w: i32,
-        frame_h: i32,
+        frame_w: i64,
+        frame_h: i64,
         linesize: usize,
-        cx: f32,
-        cy: f32,
-        radius: i32,
+        cx: i64,
+        cy: i64,
+        radius: i64,
         value: u8,
     ) {
-        let cx_i = cx as i32;
-        let cy_i = cy as i32;
-        let r = radius as i64;
-        let r2 = r * r;
-        let inner_r = (radius - 1).max(0) as i64;
+        let r2 = radius * radius;
+        let inner_r = (radius - 1).max(0);
         let inner_r2 = inner_r * inner_r;
 
-        let y_start = (cy_i - radius).max(0) as u32;
-        let y_end = ((cy_i + radius).min(frame_h - 1)) as u32;
-        let x_start = (cx_i - radius).max(0) as u32;
-        let x_end = ((cx_i + radius).min(frame_w - 1)) as u32;
+        let y_start = (cy - radius).max(0) as usize;
+        let y_end = ((cy + radius).min(frame_h - 1)) as usize;
+        let x_start = (cx - radius).max(0) as usize;
+        let x_end = ((cx + radius).min(frame_w - 1)) as usize;
 
         for y in y_start..=y_end {
-            let row_offset = y as usize * linesize;
+            let row_offset = y * linesize;
             for x in x_start..=x_end {
-                let dx = x as i64 - cx_i as i64;
-                let dy = y as i64 - cy_i as i64;
+                let dx = x as i64 - cx;
+                let dy = y as i64 - cy;
                 let dist2 = dx * dx + dy * dy;
                 if dist2 <= r2 && dist2 >= inner_r2 {
-                    if let Some(pixel) = data.get_mut(row_offset + x as usize) {
+                    if let Some(pixel) = data.get_mut(row_offset + x) {
                         *pixel = value;
                     }
                 }
@@ -551,6 +600,108 @@ mod tests {
             y_plane[offset] > 100,
             "ring pixel at ({ring_x}, {ring_y}) should be visible, got {}",
             y_plane[offset]
+        );
+    }
+
+    #[test]
+    fn cursor_overlay_skips_huge_finite_coordinates_without_panic() {
+        // BUG-008: Huge finite coordinates after mapping must not panic.
+        // The mapper returns (out_x, out_y) which could be very large finite values.
+        let frames = vec![CursorFrame {
+            timestamp: MediaTimestamp::from_nanos(0),
+            x: 999_999.0,
+            y: 999_999.0,
+            scale: 1.0,
+            opacity: 1.0,
+        }];
+        let timeline = make_timeline(frames, true);
+        let renderer = CursorOverlayRenderer::new(
+            timeline,
+            1920,
+            1080,
+            1920,
+            1080,
+            ExportScalePolicy::FitWithBars,
+            None,
+            Some((1920, 1080)),
+        )
+        .unwrap();
+
+        let mut frame = ffmpeg_next::util::frame::Video::new(
+            ffmpeg_next::util::format::Pixel::YUV420P,
+            1920,
+            1080,
+        );
+        // Should not panic — cursor is drawn at clamped position or skipped.
+        renderer.draw_on_frame(&mut frame, 0, 30);
+    }
+
+    #[test]
+    fn cursor_overlay_handles_extreme_negative_coordinates_without_panic() {
+        // BUG-008: Extreme negative coordinates must not cause underflow.
+        let frames = vec![CursorFrame {
+            timestamp: MediaTimestamp::from_nanos(0),
+            x: -999_999.0,
+            y: -999_999.0,
+            scale: 1.0,
+            opacity: 1.0,
+        }];
+        let timeline = make_timeline(frames, true);
+        let renderer = CursorOverlayRenderer::new(
+            timeline,
+            1920,
+            1080,
+            1920,
+            1080,
+            ExportScalePolicy::FitWithBars,
+            None,
+            Some((1920, 1080)),
+        )
+        .unwrap();
+
+        let mut frame = ffmpeg_next::util::frame::Video::new(
+            ffmpeg_next::util::format::Pixel::YUV420P,
+            1920,
+            1080,
+        );
+        // Should not panic.
+        renderer.draw_on_frame(&mut frame, 0, 30);
+    }
+
+    #[test]
+    fn cursor_overlay_skips_mapped_infinite_coordinates() {
+        // BUG-008: If source coordinates produce infinite mapped values, skip.
+        let frames = vec![CursorFrame {
+            timestamp: MediaTimestamp::from_nanos(0),
+            x: f32::INFINITY,
+            y: 540.0,
+            scale: 1.0,
+            opacity: 1.0,
+        }];
+        let timeline = make_timeline(frames, true);
+        let renderer = CursorOverlayRenderer::new(
+            timeline,
+            1920,
+            1080,
+            1920,
+            1080,
+            ExportScalePolicy::FitWithBars,
+            None,
+            Some((1920, 1080)),
+        )
+        .unwrap();
+
+        let mut frame = ffmpeg_next::util::frame::Video::new(
+            ffmpeg_next::util::format::Pixel::YUV420P,
+            1920,
+            1080,
+        );
+        renderer.draw_on_frame(&mut frame, 0, 30);
+        // Frame should be untouched (all zeros).
+        let y_plane = frame.data(0);
+        assert!(
+            y_plane.iter().all(|&b| b == 0),
+            "infinite cursor should not draw"
         );
     }
 }

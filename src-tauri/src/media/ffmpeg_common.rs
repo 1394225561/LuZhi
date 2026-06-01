@@ -5,7 +5,44 @@
 use crate::app::error::{AppError, AppResult};
 use ffmpeg_next::Rational;
 
+/// Contract specifying which audio sources were requested for a recording.
+///
+/// Used by validation to distinguish "silent AAC is expected" from
+/// "user requested audio but got silence" — the root cause of BUG-005.
+#[derive(Clone, Debug)]
+pub struct RequestedAudioContract {
+    /// Whether system audio capture was requested.
+    pub requested_system_audio: bool,
+    /// Whether microphone capture was requested.
+    pub requested_microphone: bool,
+    /// Minimum decoded RMS to consider audio non-silent.
+    /// Default: 0.003 (conservative threshold for audible content).
+    pub min_rms: f64,
+    /// Minimum decoded peak to consider audio non-silent.
+    /// Default: 0.02 (conservative threshold for audible content).
+    pub min_peak: f32,
+}
+
+impl Default for RequestedAudioContract {
+    fn default() -> Self {
+        Self {
+            requested_system_audio: false,
+            requested_microphone: false,
+            min_rms: 0.003,
+            min_peak: 0.02,
+        }
+    }
+}
+
+impl RequestedAudioContract {
+    /// Returns true if any audio source was requested.
+    pub fn any_audio_requested(&self) -> bool {
+        self.requested_system_audio || self.requested_microphone
+    }
+}
+
 /// Inspection result for an FFmpeg-produced media file.
+#[derive(Debug)]
 pub struct MediaArtifactInspection {
     pub file_size_bytes: u64,
     pub width: u32,
@@ -17,6 +54,16 @@ pub struct MediaArtifactInspection {
     pub video_avg_fps: Option<f64>,
     pub has_video_stream: bool,
     pub has_audio_stream: bool,
+    /// Number of decoded audio samples (per channel).
+    pub audio_sample_count: Option<u64>,
+    /// RMS (root mean square) of decoded audio samples.
+    pub audio_rms: Option<f64>,
+    /// Peak absolute value of decoded audio samples.
+    pub audio_peak: Option<f32>,
+    /// Audio stream sample rate in Hz.
+    pub audio_sample_rate: Option<u32>,
+    /// Number of audio channels.
+    pub audio_channels: Option<u16>,
 }
 
 /// Converts a PTS value in `time_base` units to nanoseconds.
@@ -73,6 +120,11 @@ pub fn inspect_media_artifact(path: &std::path::Path) -> AppResult<MediaArtifact
     let mut audio_duration_nanos = 0u64;
     let mut video_frame_count = None;
     let mut video_avg_fps = None;
+    let mut audio_sample_count = None;
+    let mut audio_rms = None;
+    let mut audio_peak = None;
+    let mut audio_sample_rate = None;
+    let mut audio_channels = None;
 
     for stream in ictx.streams() {
         let params = stream.parameters();
@@ -133,6 +185,23 @@ pub fn inspect_media_artifact(path: &std::path::Path) -> AppResult<MediaArtifact
         }
     }
 
+    // Decode audio stream to compute RMS and peak if requested.
+    if has_audio_stream {
+        match decode_audio_stats(path) {
+            Ok(stats) => {
+                audio_sample_count = Some(stats.sample_count);
+                audio_rms = Some(stats.rms);
+                audio_peak = Some(stats.peak);
+                audio_sample_rate = Some(stats.sample_rate);
+                audio_channels = Some(stats.channels);
+            }
+            Err(e) => {
+                // Non-fatal: log warning but don't fail inspection.
+                eprintln!("警告: 解码音频统计信息失败: {e}");
+            }
+        }
+    }
+
     Ok(MediaArtifactInspection {
         file_size_bytes: metadata.len(),
         width,
@@ -144,7 +213,156 @@ pub fn inspect_media_artifact(path: &std::path::Path) -> AppResult<MediaArtifact
         video_avg_fps,
         has_video_stream,
         has_audio_stream,
+        audio_sample_count,
+        audio_rms,
+        audio_peak,
+        audio_sample_rate,
+        audio_channels,
     })
+}
+
+/// Decodes the audio stream and computes RMS and peak statistics.
+struct AudioStats {
+    sample_count: u64,
+    rms: f64,
+    peak: f32,
+    sample_rate: u32,
+    channels: u16,
+}
+
+fn decode_audio_stats(path: &std::path::Path) -> AppResult<AudioStats> {
+    let mut ictx = ffmpeg_next::format::input(path).map_err(|e| AppError::ExportFailed {
+        reason: format!("打开文件进行音频解码失败: {e}"),
+    })?;
+
+    // Find audio stream.
+    let audio_stream_index = ictx
+        .streams()
+        .find(|s| s.parameters().medium() == ffmpeg_next::media::Type::Audio)
+        .map(|s| s.index())
+        .ok_or_else(|| AppError::ExportFailed {
+            reason: "未找到音频流".to_string(),
+        })?;
+
+    let stream = ictx
+        .stream(audio_stream_index)
+        .ok_or_else(|| AppError::ExportFailed {
+            reason: "无法获取音频流".to_string(),
+        })?;
+
+    let codecpar = stream.parameters();
+    let decoder =
+        ffmpeg_next::codec::context::Context::from_parameters(codecpar).map_err(|e| {
+            AppError::ExportFailed {
+                reason: format!("创建音频解码器失败: {e}"),
+            }
+        })?;
+
+    let mut decoder = decoder.decoder().audio().map_err(|e| AppError::ExportFailed {
+        reason: format!("打开音频解码器失败: {e}"),
+    })?;
+
+    let mut sample_count: u64 = 0;
+    let mut sum_squares: f64 = 0.0;
+    let mut peak: f32 = 0.0;
+
+    /// Processes a decoded audio frame, accumulating RMS and peak stats.
+    fn process_audio_frame(
+        frame: &ffmpeg_next::frame::Audio,
+        sample_count: &mut u64,
+        sum_squares: &mut f64,
+        peak: &mut f32,
+    ) {
+        let num_channels = frame.channels() as usize;
+        let num_samples = frame.samples();
+        for ch in 0..num_channels {
+            let plane = frame.plane::<f32>(ch);
+            for &sample in &plane[..num_samples] {
+                let abs = sample.abs();
+                if abs > *peak {
+                    *peak = abs;
+                }
+                *sum_squares += (sample as f64) * (sample as f64);
+                *sample_count += 1;
+            }
+        }
+    }
+
+    let mut packet_iter = ictx.packets();
+    loop {
+        match packet_iter.next() {
+            Some((stream, packet)) => {
+                if stream.index() != audio_stream_index {
+                    continue;
+                }
+                decoder.send_packet(&packet).map_err(|e| {
+                    AppError::ExportFailed {
+                        reason: format!("发送音频包到解码器失败: {e}"),
+                    }
+                })?;
+
+                let mut decoded = ffmpeg_next::frame::Audio::empty();
+                while decoder.receive_frame(&mut decoded).is_ok() {
+                    process_audio_frame(&decoded, &mut sample_count, &mut sum_squares, &mut peak);
+                }
+            }
+            None => break,
+        }
+    }
+
+    // Flush decoder.
+    decoder.send_eof().ok();
+    let mut decoded = ffmpeg_next::frame::Audio::empty();
+    while decoder.receive_frame(&mut decoded).is_ok() {
+        process_audio_frame(&decoded, &mut sample_count, &mut sum_squares, &mut peak);
+    }
+
+    let rms = if sample_count > 0 {
+        (sum_squares / sample_count as f64).sqrt()
+    } else {
+        0.0
+    };
+
+    Ok(AudioStats {
+        sample_count,
+        rms,
+        peak,
+        sample_rate: decoder.rate(),
+        channels: decoder.channels(),
+    })
+}
+
+/// Opens the media file at `path` with FFmpeg and returns stream metadata
+/// including decoded audio statistics (RMS, peak, sample count).
+///
+/// This function always decodes the audio stream to compute statistics,
+/// unlike `inspect_media_artifact` which only decodes when audio stream exists.
+/// Use this when you need to verify audio content (e.g., not silent).
+pub fn inspect_media_artifact_with_audio_stats(
+    path: &std::path::Path,
+) -> AppResult<MediaArtifactInspection> {
+    let mut inspection = inspect_media_artifact(path)?;
+
+    // If we already have audio stats, return as-is.
+    if inspection.audio_rms.is_some() {
+        return Ok(inspection);
+    }
+
+    // Otherwise, try to decode audio stats.
+    if inspection.has_audio_stream {
+        match decode_audio_stats(path) {
+            Ok(stats) => {
+                inspection.audio_sample_count = Some(stats.sample_count);
+                inspection.audio_rms = Some(stats.rms);
+                inspection.audio_peak = Some(stats.peak);
+            }
+            Err(e) => {
+                eprintln!("警告: 解码音频统计信息失败: {e}");
+            }
+        }
+    }
+
+    Ok(inspection)
 }
 
 /// Validates that an export artifact is playable:
@@ -276,6 +494,105 @@ pub fn validate_source_artifact(path: &std::path::Path) -> AppResult<MediaArtifa
     Ok(inspection)
 }
 
+/// Validates a source artifact with an audio content contract.
+///
+/// When the contract specifies that audio was requested (system and/or mic),
+/// this function decodes the audio stream and verifies that the decoded
+/// RMS/peak exceed the contract thresholds. This catches the case where
+/// an AAC track exists but contains silence (BUG-005).
+///
+/// When no audio was requested, a silent AAC track is allowed but the
+/// returned inspection will have `audio_rms ≈ 0`.
+pub fn validate_source_artifact_with_audio_contract(
+    path: &std::path::Path,
+    contract: &RequestedAudioContract,
+) -> AppResult<MediaArtifactInspection> {
+    let inspection = validate_source_artifact(path)?;
+
+    // Only enforce audio content contract when audio was actually requested.
+    if !contract.any_audio_requested() {
+        return Ok(inspection);
+    }
+
+    // Audio was requested — verify decoded content is non-silent.
+    if !inspection.has_audio_stream {
+        return Err(AppError::RecordingWriteFailed {
+            reason: "请求了音频录制但文件缺少音频流".to_string(),
+        });
+    }
+
+    let rms = inspection.audio_rms.unwrap_or(0.0);
+    let peak = inspection.audio_peak.unwrap_or(0.0);
+    let sample_count = inspection.audio_sample_count.unwrap_or(0);
+
+    if sample_count == 0 {
+        return Err(AppError::RecordingWriteFailed {
+            reason: format!(
+                "请求了音频录制但解码后无音频样本（system={}, mic={})",
+                contract.requested_system_audio, contract.requested_microphone,
+            ),
+        });
+    }
+
+    if rms < contract.min_rms && peak < contract.min_peak {
+        return Err(AppError::RecordingWriteFailed {
+            reason: format!(
+                "请求了音频录制但解码后音频近乎静音（RMS={:.6} < {:.6}，peak={:.6} < {:.6}，system={}, mic={}）",
+                rms, contract.min_rms, peak, contract.min_peak,
+                contract.requested_system_audio, contract.requested_microphone,
+            ),
+        });
+    }
+
+    Ok(inspection)
+}
+
+/// Validates an export artifact with an audio content contract.
+///
+/// Similar to `validate_source_artifact_with_audio_contract` but for the
+/// export output. Checks dimensions, duration drift, and audio content.
+pub fn validate_export_artifact_with_audio_contract(
+    path: &std::path::Path,
+    expected_width: u32,
+    expected_height: u32,
+    contract: &RequestedAudioContract,
+) -> AppResult<()> {
+    // Run the standard export validation first.
+    validate_export_artifact(path, expected_width, expected_height)?;
+
+    // Only enforce audio content contract when audio was actually requested.
+    if !contract.any_audio_requested() {
+        return Ok(());
+    }
+
+    // Decode and check audio content.
+    let inspection = inspect_media_artifact_with_audio_stats(path)?;
+
+    let rms = inspection.audio_rms.unwrap_or(0.0);
+    let peak = inspection.audio_peak.unwrap_or(0.0);
+    let sample_count = inspection.audio_sample_count.unwrap_or(0);
+
+    if sample_count == 0 {
+        return Err(AppError::ExportFailed {
+            reason: format!(
+                "导出文件请求了音频但解码后无音频样本（system={}, mic={}）",
+                contract.requested_system_audio, contract.requested_microphone,
+            ),
+        });
+    }
+
+    if rms < contract.min_rms && peak < contract.min_peak {
+        return Err(AppError::ExportFailed {
+            reason: format!(
+                "导出文件请求了音频但解码后近乎静音（RMS={:.6} < {:.6}，peak={:.6} < {:.6}）",
+                rms, contract.min_rms, peak, contract.min_peak,
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Maps an FFmpeg error to a user-facing `AppError`.
 ///
 /// Handles common FFmpeg error codes with precise Chinese messages:
@@ -379,5 +696,215 @@ mod tests {
     fn nanos_to_time_base_zero_numerator_returns_error() {
         let tb = Rational(0, 30);
         assert!(nanos_to_time_base_units(100, tb).is_err());
+    }
+
+    #[test]
+    fn inspect_media_artifact_reports_nonzero_audio_rms() {
+        use crate::test_support::ffmpeg_helpers::{
+            create_synthetic_source_artifact_strict, unique_media_path,
+        };
+
+        let path = unique_media_path("audio-rms-test", "mp4");
+        create_synthetic_source_artifact_strict(&path, 64, 48, 2_000_000_000).unwrap();
+
+        let inspection = inspect_media_artifact(&path).unwrap();
+
+        assert!(inspection.has_audio_stream);
+        assert!(inspection.audio_rms.is_some());
+        let rms = inspection.audio_rms.unwrap();
+        assert!(
+            rms > 0.01,
+            "expected non-zero audio RMS for synthetic artifact, got {rms}"
+        );
+        assert!(inspection.audio_peak.is_some());
+        assert!(inspection.audio_peak.unwrap() > 0.01);
+        assert!(inspection.audio_sample_count.is_some());
+        assert!(inspection.audio_sample_count.unwrap() > 0);
+        assert!(inspection.audio_sample_rate.is_some());
+        assert_eq!(inspection.audio_sample_rate.unwrap(), 48_000);
+        assert!(inspection.audio_channels.is_some());
+        assert_eq!(inspection.audio_channels.unwrap(), 2);
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn inspect_media_artifact_with_audio_stats_returns_stats() {
+        use crate::test_support::ffmpeg_helpers::{
+            create_synthetic_source_artifact_strict, unique_media_path,
+        };
+
+        let path = unique_media_path("audio-stats-test", "mp4");
+        create_synthetic_source_artifact_strict(&path, 64, 48, 1_000_000_000).unwrap();
+
+        let inspection = inspect_media_artifact_with_audio_stats(&path).unwrap();
+
+        assert!(inspection.audio_rms.is_some());
+        assert!(inspection.audio_rms.unwrap() > 0.01);
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- RequestedAudioContract tests ---
+
+    #[test]
+    fn validate_source_artifact_allows_silent_track_when_no_audio_requested() {
+        use crate::test_support::ffmpeg_helpers::{
+            create_synthetic_source_artifact_strict, unique_media_path,
+        };
+
+        let path = unique_media_path("contract-no-audio", "mp4");
+        // Create artifact with audio (non-silent).
+        create_synthetic_source_artifact_strict(&path, 64, 48, 1_000_000_000).unwrap();
+
+        let contract = RequestedAudioContract {
+            requested_system_audio: false,
+            requested_microphone: false,
+            ..Default::default()
+        };
+
+        // Should succeed — no audio requested, so contract is trivially satisfied.
+        let result = validate_source_artifact_with_audio_contract(&path, &contract);
+        assert!(result.is_ok(), "should allow silent when no audio requested");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_source_artifact_rejects_silent_audio_when_audio_requested() {
+        use crate::media::recording_writer::RecordingWriter;
+        use crate::test_support::ffmpeg_helpers::unique_media_path;
+
+        let path = unique_media_path("contract-silent-reject", "mp4");
+        // Create a video-only artifact (no audio stream at all).
+        {
+            use crate::media::ffmpeg_writer::FfmpegRecordingWriter;
+            use crate::test_support::ffmpeg_helpers::test_video_frame_at;
+            let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
+            writer.push_video(test_video_frame_at(0)).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let contract = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            ..Default::default()
+        };
+
+        // Should fail — audio was requested but artifact has only silent track.
+        let result = validate_source_artifact_with_audio_contract(&path, &contract);
+        assert!(result.is_err(), "should reject silent audio when audio requested");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("静音") || err_msg.contains("音频"),
+            "error should mention silent audio: {err_msg}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_source_artifact_accepts_non_silent_audio_when_requested() {
+        use crate::test_support::ffmpeg_helpers::{
+            create_synthetic_source_artifact_strict, unique_media_path,
+        };
+
+        let path = unique_media_path("contract-non-silent", "mp4");
+        // Create artifact with non-silent audio.
+        create_synthetic_source_artifact_strict(&path, 64, 48, 2_000_000_000).unwrap();
+
+        let contract = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            min_rms: 0.001,
+            min_peak: 0.01,
+            ..Default::default()
+        };
+
+        let result = validate_source_artifact_with_audio_contract(&path, &contract);
+        assert!(result.is_ok(), "should accept non-silent audio: {:?}", result.err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_export_artifact_rejects_silent_audio_when_audio_requested() {
+        use crate::media::recording_writer::RecordingWriter;
+        use crate::test_support::ffmpeg_helpers::unique_media_path;
+
+        let path = unique_media_path("contract-export-silent", "mp4");
+        // Create a minimal artifact with video and silent audio.
+        {
+            use crate::media::ffmpeg_writer::FfmpegRecordingWriter;
+            use crate::test_support::ffmpeg_helpers::test_video_frame_at;
+            let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
+            for i in 0..3 {
+                writer.push_video(test_video_frame_at(i * 33_333_333)).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let contract = RequestedAudioContract {
+            requested_system_audio: false,
+            requested_microphone: true,
+            ..Default::default()
+        };
+
+        // Export validation should also enforce the contract.
+        let result = validate_export_artifact_with_audio_contract(
+            &path,
+            1920,
+            1080,
+            &contract,
+        );
+        assert!(result.is_err(), "should reject silent export when audio requested");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn requested_audio_contract_any_audio_requested() {
+        let c1 = RequestedAudioContract {
+            requested_system_audio: false,
+            requested_microphone: false,
+            ..Default::default()
+        };
+        assert!(!c1.any_audio_requested());
+
+        let c2 = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            ..Default::default()
+        };
+        assert!(c2.any_audio_requested());
+
+        let c3 = RequestedAudioContract {
+            requested_system_audio: false,
+            requested_microphone: true,
+            ..Default::default()
+        };
+        assert!(c3.any_audio_requested());
+    }
+
+    #[test]
+    fn synthetic_source_helper_strict_produces_valid_artifact() {
+        // R5: Verify that the strict helper produces a valid artifact
+        // when all pushes succeed (short duration to avoid queue overflow).
+        use crate::test_support::ffmpeg_helpers::{
+            create_synthetic_source_artifact_strict, unique_media_path,
+        };
+
+        let path = unique_media_path("strict-helper", "mp4");
+        let result = create_synthetic_source_artifact_strict(&path, 64, 48, 500_000_000);
+        assert!(result.is_ok(), "strict helper should succeed: {:?}", result.err());
+
+        let inspection = inspect_media_artifact(&path).unwrap();
+        assert!(inspection.has_video_stream);
+        assert!(inspection.has_audio_stream);
+        assert!(inspection.audio_rms.unwrap() > 0.01, "audio should be non-silent");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

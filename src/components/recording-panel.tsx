@@ -1,4 +1,5 @@
-import { Monitor, AppWindow, Square, Volume2, Mic, Circle } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Monitor, AppWindow, Square, Volume2, Mic, Circle, AlertTriangle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -9,6 +10,7 @@ import {
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { motion } from 'framer-motion'
+import { listMicrophoneDevices, type MicrophoneDeviceInfo } from '@/lib/tauri'
 
 interface ResolutionOption {
   width: number
@@ -31,6 +33,8 @@ interface RecordingPanelProps {
   setSystemAudioEnabled: (enabled: boolean) => void
   micEnabled: boolean
   setMicEnabled: (enabled: boolean) => void
+  micDevice: string | null
+  setMicDevice: (device: string | null) => void
   micVolume: number
   onStartRecording: () => void
   resolution: ResolutionOption
@@ -46,6 +50,8 @@ export function RecordingPanel({
   setSystemAudioEnabled,
   micEnabled,
   setMicEnabled,
+  micDevice,
+  setMicDevice,
   micVolume,
   onStartRecording,
   resolution,
@@ -53,6 +59,22 @@ export function RecordingPanel({
   fps,
   setFps,
 }: RecordingPanelProps) {
+  const [micDevices, setMicDevices] = useState<MicrophoneDeviceInfo[]>([])
+
+  // Load microphone devices when mic is enabled.
+  useEffect(() => {
+    if (micEnabled) {
+      listMicrophoneDevices()
+        .then(setMicDevices)
+        .catch(() => setMicDevices([]))
+    }
+  }, [micEnabled])
+
+  // Find the selected device to check if it's Bluetooth.
+  const selectedDevice = micDevices.find((d) => d.name === micDevice)
+  const isBluetoothMic = selectedDevice?.isBluetooth ?? false
+  const hasBluetoothDevice = micDevices.some((d) => d.isBluetooth)
+
   const modes = [
     { id: 'fullscreen' as const, icon: Monitor, label: '全屏' },
     { id: 'window' as const, icon: AppWindow, label: '窗口' },
@@ -194,6 +216,50 @@ export function RecordingPanel({
             )}
           </motion.button>
         </div>
+
+        {/* Microphone device selector — shown when mic is enabled */}
+        {micEnabled && micDevices.length > 0 && (
+          <div className="mt-3 space-y-2">
+            <Select
+              value={micDevice ?? 'default'}
+              onValueChange={(value) => setMicDevice(value === 'default' ? null : value)}
+            >
+              <SelectTrigger className="w-full h-9 text-xs">
+                <SelectValue placeholder="选择麦克风设备" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">系统默认麦克风</SelectItem>
+                {micDevices.map((device) => (
+                  <SelectItem key={device.name} value={device.name}>
+                    {device.name}
+                    {device.isBluetooth ? ' 🔵' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            {/* Bluetooth HFP warning */}
+            {isBluetoothMic && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                className="flex items-start gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-600 dark:text-amber-400"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                <span>
+                  蓝牙耳机麦克风可能降低音频输出质量。建议使用内置麦克风录制。
+                </span>
+              </motion.div>
+            )}
+
+            {/* General Bluetooth device hint */}
+            {!isBluetoothMic && hasBluetoothDevice && (
+              <p className="text-[10px] text-muted-foreground">
+                检测到蓝牙音频设备 — 使用内置麦克风可避免音质下降
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Start Recording Button */}

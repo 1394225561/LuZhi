@@ -44,6 +44,11 @@ export type MicLevelPayload = {
   level: number
 }
 
+export type MicrophoneDeviceInfo = {
+  name: string
+  isBluetooth: boolean
+}
+
 export type ExportPreset = 'bilibili' | 'douyin' | 'xiaohongshu'
 
 export type CursorEffectSummary = {
@@ -127,6 +132,10 @@ export async function setCaptureMode(config: CaptureConfig): Promise<void> {
 
 export async function setAudioConfig(config: AudioConfig): Promise<void> {
   return invoke('set_audio_config', { payload: config })
+}
+
+export async function listMicrophoneDevices(): Promise<MicrophoneDeviceInfo[]> {
+  return invoke('list_microphone_devices')
 }
 
 export async function setBeautifyConfig(config: BeautifyConfig): Promise<number> {

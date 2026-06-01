@@ -381,3 +381,95 @@ fn start_of_source_keep_segment() {
     let _ = std::fs::remove_file(&source);
     let _ = std::fs::remove_file(&output);
 }
+
+/// R4: When render_cursor_overlay=false and frames are empty, export succeeds.
+/// This is the "raw cursor already visible" no-op path (BUG-007).
+#[test]
+fn ffmpeg_exporter_accepts_render_cursor_overlay_false_noop_timeline() {
+    let source = create_source("int-cursor-noop", 500_000_000);
+    let output = unique_path("int-cursor-noop-out", "mp4");
+
+    // Write an effect timeline with render_cursor_overlay=false, empty frames.
+    let timeline_path = unique_path("timeline-noop", "json");
+    let timeline_json = r#"{
+        "fps": 30,
+        "durationNanos": 500000000,
+        "frames": [],
+        "clickEffects": [],
+        "rawSystemCursorVisible": true,
+        "renderCursorOverlay": false
+    }"#;
+    std::fs::write(&timeline_path, timeline_json).unwrap();
+
+    let mut exporter = FfmpegTrimExporter;
+    let result = export_recording_with_timeline(
+        &mut exporter,
+        source.clone(),
+        Some(output.clone()),
+        ExportPreset::Bilibili,
+        CutTimeline::empty(500_000_000),
+        Some(timeline_path.clone()),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        1,
+    );
+
+    assert!(
+        result.is_ok(),
+        "render_cursor_overlay=false with empty frames should succeed: {:?}",
+        result.err()
+    );
+    assert!(output.exists());
+
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&timeline_path);
+}
+
+/// R4: When render_cursor_overlay=true but frames are empty, export must fail.
+/// This prevents silent "no cursor, no beautification" exports (BUG-007).
+#[test]
+fn ffmpeg_exporter_rejects_required_overlay_with_empty_timeline() {
+    let source = create_source("int-cursor-required", 500_000_000);
+    let output = unique_path("int-cursor-required-out", "mp4");
+
+    // Write an effect timeline with render_cursor_overlay=true, empty frames.
+    let timeline_path = unique_path("timeline-required", "json");
+    let timeline_json = r#"{
+        "fps": 30,
+        "durationNanos": 500000000,
+        "frames": [],
+        "clickEffects": [],
+        "rawSystemCursorVisible": false,
+        "renderCursorOverlay": true
+    }"#;
+    std::fs::write(&timeline_path, timeline_json).unwrap();
+
+    let mut exporter = FfmpegTrimExporter;
+    let result = export_recording_with_timeline(
+        &mut exporter,
+        source.clone(),
+        Some(output.clone()),
+        ExportPreset::Bilibili,
+        CutTimeline::empty(500_000_000),
+        Some(timeline_path.clone()),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        1,
+    );
+
+    assert!(
+        result.is_err(),
+        "render_cursor_overlay=true with empty frames must fail"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("光标美化") || err_msg.contains("效果时间线"),
+        "error should mention cursor overlay failure: {}",
+        err_msg
+    );
+
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&timeline_path);
+}

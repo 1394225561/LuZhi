@@ -5031,3 +5031,3674 @@ Manual Gates：
 建议本轮整改前统一使用下面口径：
 
 > Phase 6 的 FFmpeg playable export 已修复 BUG-004 的主要 time base 根因，并通过 focused cargo tests 覆盖 cursor overlay、无音频 silent track 和 cut export duration。但第 19 节整改后，真实录制又暴露出新的阻断问题：麦克风开启时 CPAL 输入配置未协商导致采集失败；系统音频为稀疏时间轴时 writer 丢弃 timestamp，导致 audio stream duration 明显短于 video stream；默认美化导出时 cursor overlay 对异常 scale/radius 缺少保护，可能在 debug 构建 panic；此外 auto-trim 后 cursor overlay 仍存在 source time 与 output time 混用风险。因此 Phase 6 仍不能声明完成。下一轮应按 R1 到 R5 优先关闭 BUG.md 中未解决项，再处理 no-FFmpeg gate、terminal progress、backpressure 和 Native Safety/manual gates。
+
+## 21. Phase 6 FFmpeg playable export 第 20 节整改后复审与 BUG-005 新根因定位（2026-06-01，HEAD `014d28c` + dirty `BUG.md`）
+
+### 21.1 审查范围与结论
+
+本节基于 `HEAD 014d28cdcc4b8f869ae4a496e12c266bfc4eda07` 加当前 dirty `BUG.md`，复审第 20 节整改后的 Phase 6 FFmpeg playable export 相关代码。重点范围：
+
+- `BUG.md` 未解决区 BUG-005 的新现象：CPAL 配置协商后可开始录制，但停止录制时报 `视频 10033ms，音频 53397ms，偏差 43363ms`。
+- `src-tauri/src/platform/macos/cpal_microphone.rs`
+- `src-tauri/src/media/audio_mixer.rs`
+- `src-tauri/src/media/audio_synchronizer.rs`
+- `src-tauri/src/media/ffmpeg_writer.rs`
+- `src-tauri/src/media/cursor_overlay.rs`
+- `src-tauri/src/media/trim_exporter.rs`
+- `src-tauri/src/lib.rs`
+- `src-tauri/tests/ffmpeg_export.rs`
+- `HANDOFF.md`
+
+总体结论：不建议合并，不建议声明 Phase 6 完成。
+
+第 20 节的若干方向性整改已经推进：
+
+- CPAL 麦克风采集不再把前端请求的 `48kHz/2ch` 直接作为硬件 stream config，而是使用 `device.default_input_config()` 打开真实设备配置。
+- FFmpeg writer/exporter 仍保持 Rust 侧媒体处理，未发现视频帧或音频流进入 React。
+- BUG-004 的预防方向基本保留：writer 视频 PTS 基于真实 timestamp，mux packet 使用 `write_header()` 后的真实 stream time base rescale，artifact validation 检查 stream-level A/V duration drift。
+- cursor compositor 已接入 `FfmpegTrimExporter`，trim 后 overlay 查询也已经从 output PTS 改为 source timestamp。
+
+但 BUG-005 仍未修复。当前症状已经从“麦克风输入流打开失败”演进为“麦克风可打开，但 writer 生成的 audio stream duration 远长于 video stream duration”。本轮定位的最可能根因是 writer 的音频时间轴合并逻辑仍不满足第 20 节要求：它没有正确处理首个非零时间戳 chunk、重叠 chunk、乱序 chunk 和多源混音后重复覆盖的 chunk。
+
+此外，本轮发现 3 个 Critical 和 3 个 Important：
+
+1. **Critical**：`ffmpeg_writer.rs` 的音频 timestamp/silence padding 仍会让重叠或乱序音频膨胀，是 BUG-005 当前最可能根因。
+2. **Critical**：`cursor_overlay.rs` 对映射后的巨大有限坐标没有 range clamp，BUG-008 数值安全未完全闭环。
+3. **Critical**：raw cursor 已经可见且不需要 overlay 的素材，可能因为传入 `render_cursor_overlay=false` 的 effect timeline path 被 exporter 误判为 fatal，导致基础导出失败。
+4. **Important**：no-FFmpeg early gate 的 `Ok(output_path: None)` 不会发 terminal `export-progress`，UI 可能残留 `cancellable=true`。
+5. **Important**：`audio_mixer.rs::to_stereo()` 对 `src_channels > 2` 标注为 stereo 但直接返回全部样本，未来多声道设备会导致 writer duration 计算错误。
+6. **Important**：测试尚未覆盖 BUG-005/BUG-008 的真实失败形态，当前通过的 focused tests 不能证明这些 bug 已修复。
+
+### 21.2 已验证命令
+
+本轮审查执行了以下命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg cursor_overlay
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg --test ffmpeg_export
+```
+
+结果：
+
+- `ffmpeg_writer` focused tests：10 passed。
+- `cursor_overlay` focused tests：7 passed。
+- `ffmpeg_export` integration tests：8 passed。
+- 仍有既有 macOS FFI / private interface warnings。
+
+说明：
+
+- 上述测试只能证明当前 happy path 与已有局部测试通过。
+- 上述测试没有覆盖：首个音频 chunk 起始时间非 0、重叠/乱序音频 chunk、系统音频与麦克风混合后重复时间段、巨大有限 cursor 坐标、`render_cursor_overlay=false` 的 no-op export、no-FFmpeg terminal progress。
+- 因此，不能用这些通过结果声明 BUG-005、BUG-008 或 Phase 6 完成。
+
+### 21.3 Positive Findings
+
+1. `cpal_microphone.rs` 的第一阶段修复方向正确。
+   - `cpal_microphone.rs:93-104` 使用 `device.default_input_config()` 得到实际 `StreamConfig`。
+   - `cpal_microphone.rs:106-118` 打印 requested 与 actual 配置差异。
+   - `cpal_microphone.rs:251-258` 生成的 `AudioChunk` 保留实际 `sample_rate` / `channels`。
+   - 这符合 BUG-005 的第一层预防规则：硬件采集层不能把 UI 目标格式当成设备 stream config。
+
+2. `AudioMixer` 已经负责统一到 `48kHz/2ch`。
+   - `audio_mixer.rs:57-68` passthrough 会 resample 到 48kHz 并转 stereo。
+   - 这意味着日志中的 `设备实际 24000Hz/1ch` 本身不应导致 10 秒录制变成 53 秒音频。理论上 24kHz mono 经 mixer 后应该仍是接近真实时长的 48kHz stereo。
+
+3. `trim_exporter.rs` 的 cursor source-time 修复方向正确。
+   - `trim_exporter.rs:878-890` 传给 `overlay.draw_on_frame()` 的是 `raw_pts` 转换后的 source nanos，而不是裁剪后的 output PTS。
+   - `cursor_overlay.rs:170-180` 也明确注释该参数是 original source timeline。
+
+4. `lib.rs` 不再从 service 读取可能过期的 effect timeline path。
+   - `lib.rs:726-739` 改为使用当前 `build_cursor_effect_timeline()` 的结果作为 export request 的 `effect_timeline_path`。
+   - 这降低了跨录制 session 误用旧 timeline 的风险。
+
+### 21.4 Critical 1：writer 音频时间轴仍会膨胀，导致 BUG-005
+
+现象对应 `BUG.md` 未解决区 BUG-005：
+
+```text
+麦克风配置协商: 请求 48000Hz/2ch, 设备实际 24000Hz/1ch
+录制写入器完成失败: 写入录制文件失败：录制视频/音频时长偏差过大：视频 10033ms，音频 53397ms，偏差 43363ms
+```
+
+#### 21.4.1 当前证据链
+
+1. CPAL 已经不再失败。
+   - 日志中出现“设备实际 24000Hz/1ch”，说明设备 stream 已打开，BUG-005 的第一阶段 unsupported config 问题已有推进。
+
+2. `AudioMixer` 会把 `24000Hz/1ch` 转成 `48000Hz/2ch`。
+   - `audio_mixer.rs:59-67` 会 resample、to_stereo、clamp，然后输出 `sample_rate=48000`、`channels=2`。
+   - 所以“设备是 24kHz mono”不是 53 秒音频的充分原因。
+
+3. writer 的 audio timeline cursor 逻辑仍有缺口。
+   - `ffmpeg_writer.rs:391-394` 把 chunk timestamp 转成 48kHz sample position。
+   - `ffmpeg_writer.rs:398-403` 只有 `target_sample > audio_timeline_cursor && audio_timeline_cursor > 0` 才补 gap。
+   - `ffmpeg_writer.rs:404` 无条件 `audio_timeline_cursor = target_sample`。
+   - `ffmpeg_writer.rs:406-410` 无条件 append 全量 samples，并按 `samples.len() / 2` 推进 cursor。
+   - `ffmpeg_writer.rs:425-426` AAC PTS 仍按连续 `audio_pts += 1024` 生成。
+
+4. 这表示 writer 没有真正处理以下真实输入：
+   - 首个 audio chunk 的 `timestamp_nanos > 0`：不会补前导静音。
+   - 下一个 chunk 的 `target_sample < audio_timeline_cursor`：cursor 会倒退，但 samples 仍全量 append。
+   - 系统音频和麦克风经 synchronizer age-out 后可能产生重叠时间段：writer 会把已覆盖时间段再次写成新增音频。
+   - capture/channel 调度导致轻微乱序：writer 也会重复 append。
+
+#### 21.4.2 根因判断
+
+BUG-005 当前最可能根因不是 CPAL 配置协商，而是 `FfmpegRecordingWriter` 的“timestamp-aware audio writing”只做了 gap padding 的一半，没有做 overlap/out-of-order 裁剪，也没有处理首个非零时间戳 chunk。
+
+换句话说，writer 维护了一个 `audio_timeline_cursor`，但编码层的 `audio_pts` 仍表示“已经连续写入多少 AAC samples”。当一个 chunk 的 timestamp 落在已经写过的时间区间内，writer 应该裁掉重叠部分或丢弃整个 chunk；当前实现却把它完整追加到 `audio_sample_buffer`，导致 AAC duration 膨胀。真实麦克风 + 系统音频混合场景里，这种重叠比单源 synthetic tests 更容易出现，因此会表现为 10 秒视频配 53 秒音频。
+
+#### 21.4.3 必须修复的不变量
+
+writer 写入音频时必须满足：
+
+1. `audio_timeline_cursor` 单调不回退。
+2. 编码进 AAC 的 sample 数量必须等于“source timeline 中未被覆盖的新时间段长度 + 必要 silence padding”。
+3. 首个 chunk 的 timestamp 如果晚于 0，必须按 timestamp 补前导静音，除非产品明确决定 source audio timeline 可以从首个音频开始。
+4. `target_sample < audio_timeline_cursor` 时必须裁剪 overlap：
+   - overlap frames = `audio_timeline_cursor - target_sample`
+   - 如果 overlap 覆盖整个 chunk，丢弃该 chunk。
+   - 如果 overlap 覆盖 chunk 前半段，只 append 后半段。
+5. `target_sample > audio_timeline_cursor` 时必须补 silence，包括首个 chunk。
+6. finish 时按 video end 补尾部 silence，建议 video end 使用“最后视频帧 timestamp + 一帧 duration”，而不是只使用最后视频帧 timestamp。
+7. 所有音频 PTS 必须从已经写入的 timeline cursor 派生，不能让 cursor 和 AAC `audio_pts` 表达两个互相脱钩的时间轴。
+
+#### 21.4.4 建议实现口径
+
+建议在 worker 内抽出一个小的纯函数/小结构，例如 `AudioTimelineWriter` 或 `append_timeline_audio_chunk()`，避免把逻辑散在 match 分支里。
+
+伪代码：
+
+```rust
+struct AudioTimelineState {
+    cursor_frames: i64,
+    started: bool,
+}
+
+fn append_chunk(
+    state: &mut AudioTimelineState,
+    buffer: &mut Vec<f32>,
+    timestamp_nanos: u64,
+    samples: &[f32],
+) {
+    let target = nanos_to_48k_frames(timestamp_nanos);
+    let frames = samples.len() / 2;
+
+    if target > state.cursor_frames {
+        let gap = target - state.cursor_frames;
+        buffer.extend(repeat(0.0).take(gap as usize * 2));
+        state.cursor_frames = target;
+    }
+
+    if target < state.cursor_frames {
+        let overlap = (state.cursor_frames - target) as usize;
+        if overlap >= frames {
+            return;
+        }
+        let start = overlap * 2;
+        buffer.extend_from_slice(&samples[start..]);
+        state.cursor_frames += (frames - overlap) as i64;
+        return;
+    }
+
+    buffer.extend_from_slice(samples);
+    state.cursor_frames += frames as i64;
+    state.started = true;
+}
+```
+
+注意：
+
+- 如果当前设计不想补首个音频前导静音，也必须显式写入产品决策和测试；但这会让 source audio stream duration 可能短于 video stream，不符合当前 `validate_source_artifact()` 的 drift 防线。
+- `state.started` 可以保留用于诊断，但不应再用 `audio_timeline_cursor > 0` 来判断是否补 gap，因为“cursor 为 0”既可能表示未开始，也可能表示首个 chunk 就在 0。
+
+### 21.5 Critical 2：cursor overlay 对巨大有限坐标仍可能 panic，BUG-008 未完全闭环
+
+证据：
+
+- `cursor_overlay.rs:193-199` 只检查了 timeline source `x/y/scale` 是否 finite。
+- `cursor_overlay.rs:204-207` 映射后的 `out_x/out_y` 没有再次 finite check 或 range clamp。
+- `cursor_overlay.rs:269-277` 将 `cx/cy` cast 到 `i32` 后，计算 `cx_i - radius`、`cx_i + radius`、`cy_i - radius`、`cy_i + radius`。
+
+风险：
+
+- Rust 浮点转整数会 saturate 到边界值。若 `out_x` 是巨大有限值，`cx_i` 可能成为 `i32::MAX` 或 `i32::MIN`。
+- Debug 构建下，`cx_i + radius` 或 `cx_i - radius` 仍可能 overflow panic。
+- 这违反 BUG-008 预防规则：“cursor/effect timeline 来自外部输入，所有 `x/y/scale/timestamp` 参与 rasterization 前必须 finite check 和范围 clamp；overlay 距离计算不得依赖 debug/release 不同行为”。
+
+建议修复：
+
+1. 在 mapper 输出后立即检查：
+   - `out_x.is_finite() && out_y.is_finite()`
+2. 将 `out_x/out_y` 限制到合理绘制范围：
+   - 可选择完全 outside viewport 时 return。
+   - 或允许少量 margin，例如 `[-max_radius, width + max_radius]`。
+3. bounding box 计算使用 `i64`：
+   - `let cx_i = out_x.round() as i64`
+   - `let y_start = (cy_i - radius as i64).max(0)`
+   - 转成 `usize/u32` 前确认范围。
+4. 增加测试：
+   - `cursor_overlay_skips_huge_finite_coordinates_without_panic`
+   - `cursor_overlay_skips_mapped_infinite_coordinates`
+   - `cursor_overlay_bounds_are_saturating_for_extreme_coordinates`
+
+### 21.6 Critical 3：raw cursor visible 的 no-op timeline 会阻断基础导出
+
+证据：
+
+- `lib.rs:423-463` 中，raw cursor 已可见、当前不需要 overlay 时，也会构造一个 `render_cursor_overlay=false` 的 `EffectTimeline`。
+- `build_cursor_effect_timeline()` 总会写出 timeline 文件，并在 `lib.rs:609-613` 返回 `effect_timeline_path: Some(...)`。
+- `export_video()` 在 `lib.rs:739` 将该 path 传给 exporter。
+- `trim_exporter.rs:418-430` 加载 timeline 后，如果 `render_cursor_overlay=false`，`CursorOverlayRenderer::new()` 返回 `None`。
+- `trim_exporter.rs:437-443` 只要 request 里有 `effect_timeline_path` 且 `cursor_overlay.is_none()` 就 fatal。
+
+这会导致一个合法场景失败：
+
+- 用户关闭 cursor magnification / smoothing，或素材中 raw system cursor 已可见。
+- exporter 不需要 overlay，应该直接导出 source video。
+- 当前代码可能把“无需 overlay”误判为“美化开启但 timeline 无法渲染”。
+
+建议修复方案二选一：
+
+1. **推荐方案 A：在 `export_video()` 侧过滤 no-op timeline。**
+   - 只有当 timeline 的 `render_cursor_overlay=true` 时才传 `effect_timeline_path`。
+   - `CursorEffectSummaryPayload` 可继续用于 UI summary，但 export request 不传 no-op path。
+2. **方案 B：在 exporter 侧区分 no-op 与 fatal。**
+   - `load_effect_timeline()` 后，如果 `render_cursor_overlay=false`，认为 overlay 不需要，继续导出。
+   - 只有当 raw cursor hidden / overlay required 且 renderer 无法创建时才失败。
+
+建议测试：
+
+- `export_with_raw_cursor_visible_no_overlay_succeeds`
+- `export_with_render_cursor_overlay_false_timeline_is_noop`
+- `export_requires_overlay_when_raw_cursor_hidden_and_timeline_empty`
+
+### 21.7 Important 1：no-FFmpeg gate 缺少 terminal progress
+
+证据：
+
+- `lib.rs:683-693` export 开始时 emit `progress=0, cancellable=true`。
+- `lib.rs:741-757` 在非 FFmpeg 构建且没有 source artifact 时直接 `Ok(ExportSummaryPayload { output_path: None })`。
+- `lib.rs:902-920` 只在 `Err` 时发 terminal `export-progress`，因此上述 `Ok(output_path: None)` 不会发 `cancellable=false`。
+
+风险：
+
+- 默认构建下 UI 可能停留在 exporting/cancellable 状态。
+- 第 20 节 R6 要求 no-FFmpeg gate 和 terminal progress 收口，这里只完成了一半。
+
+建议修复：
+
+1. 统一 terminal progress emission：
+   - `Ok(output_path=Some)`：`progress=100, cancellable=false, output_path=Some`
+   - `Ok(output_path=None)`：`progress=0 或 100, cancellable=false, output_path=None, error=Some(gate message)`，或引入明确 gate payload
+   - `Err`：`progress=0, cancellable=false, error=Some(...)`
+2. 或者 no-FFmpeg gate 直接返回结构化 `Err(AppError::ExportFailed { reason: ... })`，复用现有 failure terminal event。
+3. 增加前端/后端测试：
+   - `export_video_non_ffmpeg_emits_terminal_progress`
+   - `no_ffmpeg_gate_does_not_leave_cancel_button_enabled`
+
+### 21.8 Important 2：`to_stereo()` 对多声道输入会错误标注为 stereo
+
+证据：
+
+- `audio_mixer.rs:189-193` 中 `src_channels >= 2` 时直接 `return samples.to_vec()`。
+- 注释写的是“take first 2 channels”，但实现没有按 frame 截取前两个 channel。
+- `MixedAudioChunk` 随后被标为 `channels=2`。
+
+风险：
+
+- 如果未来某个输入设备报告 `4ch/8ch`，writer 会把 N-channel interleaved samples 当成 stereo 解释。
+- `ffmpeg_writer.rs:409` 用 `samples.len() / 2` 推进 cursor，会把真实 duration 放大为 `src_channels / 2` 倍。
+- 当前 BUG-005 日志是 `1ch`，所以这不是本次 53s 的直接证据，但它属于同类“格式元数据与样本布局不一致”风险。
+
+建议修复：
+
+```rust
+fn to_stereo(samples: &[f32], src_channels: u16) -> Vec<f32> {
+    match src_channels {
+        0 => Vec::new(),
+        1 => samples.iter().flat_map(|s| [*s, *s]).collect(),
+        2 => samples.to_vec(),
+        n => {
+            let n = n as usize;
+            let frames = samples.len() / n;
+            let mut out = Vec::with_capacity(frames * 2);
+            for frame in 0..frames {
+                out.push(samples[frame * n]);
+                out.push(samples[frame * n + 1]);
+            }
+            out
+        }
+    }
+}
+```
+
+建议测试：
+
+- `to_stereo_truncates_four_channel_input_to_two_channels`
+- `to_stereo_rejects_or_handles_zero_channels`
+- `mixed_output_sample_len_matches_declared_stereo_channels`
+
+### 21.9 Important 3：测试没有覆盖真实失败形态
+
+当前通过的测试主要覆盖：
+
+- writer 基础编码、无音频 silent track、padded stride。
+- cursor overlay 基础映射和 click ring。
+- exporter 三种 preset、cut duration happy path、cancel before start、missing source。
+
+缺失的关键测试：
+
+- writer 首个 audio chunk 在 5s 时开始，应补 5s 前导静音。
+- writer 收到两个 timestamp 重叠的 audio chunks，应裁剪第二个 chunk 的重叠前缀。
+- writer 收到乱序 audio chunks，不应让 audio duration 膨胀。
+- system + mic 混音后输出的 overlapping chunks 不应重复追加。
+- cursor overlay 的巨大有限坐标不应 panic。
+- `render_cursor_overlay=false` 的 effect timeline 不应阻断 export。
+- no-FFmpeg gate 应发 terminal progress。
+
+建议按 TDD 先补这些失败测试，再做实现修复。
+
+### 21.10 BUG.md 预防规则复核
+
+本轮按项目约定额外复核 `BUG.md` 中的预防规则：
+
+1. BUG-004 预防规则：
+   - muxer 写包使用真实 output stream time base：基本符合。
+   - artifact validation 检查 per-stream duration：符合。
+   - writer video PTS 不再只用 frame count：基本符合。
+   - playable export manual gate 仍需真实 1080p/10min 验证。
+
+2. BUG-006 预防规则：
+   - “writer 必须尊重 mixed audio timestamp；对前导 gap、中间 gap、尾部 gap 写入 silence”：**未完全符合**。
+   - 当前只处理部分中间 gap 和尾部 gap，未处理首个前导 gap，也未处理 overlap/out-of-order。
+
+3. BUG-007 预防规则：
+   - exporter 已实际读取并应用 effect timeline：部分符合。
+   - raw system cursor hidden 时无 overlay 应失败：方向符合。
+   - raw cursor visible / overlay disabled 的 no-op path 被误判 fatal：需要修复，否则会损害基础导出。
+
+4. BUG-008 预防规则：
+   - source `x/y/scale` finite check：部分符合。
+   - mapped coordinates range clamp：缺失。
+   - bounding box arithmetic 不依赖 debug/release 行为：未完全符合。
+
+5. BUG-005 当前未解决：
+   - 建议 BUG-005 修复后新增预防规则：
+     - 麦克风设备 stream config 必须来自设备 default/supported config，UI 目标格式只能作为 mixer output target。
+     - writer 对音频 timestamp 的处理必须同时覆盖 first-gap、middle-gap、tail-gap、overlap、out-of-order。
+     - `MixedAudioChunk.samples` 的布局必须与 `channels` 元数据一致；任何 downmix/truncate/resample 后都必须用测试验证 sample length 与 duration。
+
+### 21.11 建议整改 Phase
+
+#### R1：文档状态与 BUG-005 口径收口
+
+任务：
+
+1. 更新 `HANDOFF.md`，删除“BUG-005 已修复”的 overclaim。
+2. 在 `BUG.md` 保留 BUG-005 为未解决，并补充本轮根因定位：
+   - CPAL 配置协商已推进。
+   - 当前阻断是 writer audio timeline overlap/out-of-order 导致音频时长膨胀。
+3. 在本 review 文件后续整改记录中使用同一口径。
+
+验证：
+
+- `HANDOFF.md`、`BUG.md`、review 文档对 BUG-005 状态一致。
+
+#### R2：补 writer audio timeline 失败测试
+
+任务：
+
+1. `ffmpeg_writer_pads_first_audio_gap_for_mic_start_offset`
+2. `ffmpeg_writer_crops_overlapping_audio_chunk`
+3. `ffmpeg_writer_drops_fully_overlapped_audio_chunk`
+4. `ffmpeg_writer_preserves_duration_with_out_of_order_audio`
+5. `ffmpeg_writer_preserves_av_duration_with_mic_24khz_mono_after_mixer`
+
+验证：
+
+- 新测试在当前实现下至少有关键用例失败，能复现 BUG-005 风险。
+
+#### R3：修 writer audio timeline merge
+
+任务：
+
+1. 抽出 `AudioTimelineState` 或等价 helper。
+2. 首个 chunk 也按 `target_sample` 补前导静音。
+3. `target_sample > cursor` 时补 silence。
+4. `target_sample == cursor` 时直接 append。
+5. `target_sample < cursor` 时裁剪 overlap 或丢弃完全重叠 chunk。
+6. `audio_timeline_cursor` 和 `audio_pts` 统一表达已写入的 48kHz frame 数，不能相互脱钩。
+7. finish 按 video end 补尾部 silence。
+
+验证：
+
+- R2 测试通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer` 通过。
+- 真实设备 manual gate：开启麦克风，当前 `24000Hz/1ch` 设备录制 10 秒，停止录制不再出现 `audio 53s` drift。
+
+#### R4：修 `AudioMixer::to_stereo()` 多声道语义
+
+任务：
+
+1. 对 `src_channels == 1` duplicate。
+2. 对 `src_channels == 2` passthrough。
+3. 对 `src_channels > 2` 按 frame 取前两个 channel，或做明确 downmix。
+4. 对 `src_channels == 0` 返回错误或空输出，不能 panic。
+
+验证：
+
+- 多声道 unit tests 通过。
+- `MixedAudioChunk.samples.len() / channels / sample_rate` 与真实 duration 一致。
+
+#### R5：修 cursor overlay mapped coordinate safety
+
+任务：
+
+1. 对 `out_x/out_y` 做 finite check。
+2. 对 `out_x/out_y` 做 viewport/margin clamp 或 outside return。
+3. bounding box 用 `i64` 或 saturating arithmetic。
+4. 不允许 cursor overlay 因单帧异常 panic；应 skip 异常 frame 或返回结构化错误。
+
+验证：
+
+- `cursor_overlay_skips_huge_finite_coordinates_without_panic`
+- `cursor_overlay_handles_extreme_negative_coordinates_without_panic`
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg cursor_overlay`
+
+#### R6：修 raw cursor visible no-op export
+
+任务：
+
+1. `render_cursor_overlay=false` 的 timeline 不应导致 exporter fatal。
+2. 只有 raw cursor hidden 且 overlay required 但无法渲染时才失败。
+3. 建议 export request 增加更明确的字段，例如 `cursor_overlay_required: bool`，避免只靠 `effect_timeline_path.is_some()` 推断。
+
+验证：
+
+- `export_with_raw_cursor_visible_no_overlay_succeeds`
+- `export_with_render_cursor_overlay_false_timeline_is_noop`
+- `export_requires_overlay_when_raw_cursor_hidden_and_timeline_empty`
+
+#### R7：修 no-FFmpeg terminal progress
+
+任务：
+
+1. no-FFmpeg gate 返回 `Err` 或统一 `Ok(None)` terminal progress。
+2. UI 收到 terminal event 后 `cancellable=false`。
+3. 文案继续明确“当前构建未启用 FFmpeg，无法生成可播放文件”。
+
+验证：
+
+- 默认构建点击导出不显示成功文件路径。
+- 取消按钮/导出中状态不会残留。
+
+#### R8：完整回归验证
+
+自动化：
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg
+cargo clippy --manifest-path src-tauri/Cargo.toml --features ffmpeg --all-targets
+npm test -- --run
+npm run build
+```
+
+Manual Gate：
+
+1. `npm run tauri:dev:ffmpeg`，开启麦克风，在当前 `24000Hz/1ch` 设备录制 10 秒，停止录制成功。
+2. 麦克风 + 系统音频同时开启，录制 10 秒，source artifact video/audio duration drift <= 1s。
+3. 只开系统音频，延迟播放/中途暂停/尾部无声，source artifact 不触发 drift。
+4. 默认美化开启，导出后 cursor 可见，不 panic。
+5. raw cursor 已可见或关闭美化时，基础 export 不因 no-op timeline 失败。
+6. no-FFmpeg 默认构建点击导出只显示 gate，不残留 exporting/cancellable。
+7. 1080p 10 分钟压力录制，source/export 可播放，stream-level duration/fps 在阈值内。
+
+### 21.12 当前建议对外状态表述
+
+建议后续整改前使用下面口径：
+
+> Phase 6 FFmpeg playable export 的若干基础能力已经推进：CPAL 麦克风配置协商可使用设备默认输入配置，writer/exporter 基本可产出 FFmpeg artifact，cursor compositor 已接入，trim 后 cursor 查询已改为 source time。但当前 Phase 6 仍不能声明完成：BUG-005 在真实麦克风录制中仍复现，最新证据指向 writer audio timeline 对 overlap/out-of-order chunk 处理不正确，导致 audio stream duration 膨胀；BUG-008 的 mapped coordinate 数值安全仍未完全闭环；raw cursor visible 的 no-op timeline 还可能误阻断基础导出；no-FFmpeg terminal progress 也未完全收口。下一轮应优先按 R2-R3 用测试锁定并修复 writer audio timeline，再处理 cursor overlay 数值边界、raw cursor no-op export 和 no-FFmpeg UI 收口。
+
+## 22. Phase 6 FFmpeg playable export 第 21 节整改后复审（2026-06-01，HEAD `014d28c` + dirty worktree）
+
+本节基于用户反馈“已完成 `## 21. Phase 6 FFmpeg playable export 第 20 节整改后复审与 BUG-005 新根因定位` 章节的整改任务，且修复了 BUG-005，已记录在 `BUG.md`”后的当前 dirty worktree 进行复审。
+
+本节是**代码审查记录追加**，不代表业务代码已再次整改。当前结论用于指导下一轮编码工作。
+
+### 22.1 审查输入与范围
+
+审查输入：
+
+- `docs/architecture/project-architecture-and-overall-planning.md`
+- `docs/superpowers/plans/2026-05-29-phase-6-export-presets-local-license.md`
+- `docs/superpowers/plans/2026-05-30-phase-6-ffmpeg-playable-export.md`
+- `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 第 20、21 节
+- `BUG.md`
+- `.codex/rules/0-global.md`
+- `.codex/rules/1-coding-style.md`
+- `.codex/rules/2-testing.md`
+- `.codex/rules/3-git-commit.md`
+- `.codex/rules/4-security.md`
+- `.codex/rules/5-docs.md`
+
+实际审查对象：
+
+- Base：`014d28cdcc4b8f869ae4a496e12c266bfc4eda07`
+- Head：当前 dirty worktree
+- 当前 dirty 文件：
+  - `BUG.md`
+  - `HANDOFF.md`
+  - `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md`
+  - `src-tauri/src/lib.rs`
+  - `src-tauri/src/media/audio_mixer.rs`
+  - `src-tauri/src/media/cursor_overlay.rs`
+  - `src-tauri/src/media/ffmpeg_writer.rs`
+  - `src-tauri/src/media/trim_exporter.rs`
+
+重点审查范围：
+
+1. 第 21 节 R1-R7 整改是否真正关闭：
+   - writer audio timeline merge / BUG-005
+   - `AudioMixer::to_stereo()` 多声道处理
+   - cursor overlay mapped coordinate 数值安全 / BUG-008
+   - raw cursor visible no-op export
+   - no-FFmpeg terminal progress
+2. `BUG.md` 中 BUG-005/006/007/008 预防规则是否被代码和测试实际约束。
+3. Phase 6 计划中关于 capture 主链路、FFmpeg writer queue、Native Safety、manual gates 的剩余风险。
+4. 自动化测试是否覆盖真实失败形态，而不是只覆盖 happy path。
+
+### 22.2 本轮复审结论
+
+结论：**不建议合并为 Phase 6 完成态，也不建议将 BUG-005 标记为已关闭。**
+
+第 21 节整改方向整体正确：
+
+- CPAL 配置协商问题已在前一轮推进，`BUG.md` 对 BUG-005 改为“部分修复，待真实设备验证”，口径比“已修复”更稳健。
+- `ffmpeg_writer.rs` 已开始处理 leading gap、overlap trim/discard、audio timeline cursor 与 encoder PTS 分离。
+- `cursor_overlay.rs` 已对 source frame 值、mapped coordinates、scale/radius、drawing arithmetic 做进一步保护，BUG-008 的主要 panic class 已大幅收口。
+- `trim_exporter.rs` 已区分 `render_cursor_overlay=false` no-op timeline 与 overlay required fatal failure。
+- `lib.rs` 已对 `Ok(output_path=None)` 发 terminal `export-progress`，方向符合 no-FFmpeg gate 的 UI 收口目标。
+
+但本轮发现一个新的 Critical 级实现问题：
+
+- `ffmpeg_writer.rs` 的 partial-overlap 音频分支在 append 裁剪后的 samples 后直接 `continue`，跳过了正常 AAC frame drain loop。短测试不一定失败，但长录制会把大量音频累积到 finish 阶段才写入，带来内存、mux interleaving、录制链路压力风险。
+
+此外还有若干 Important 级问题：
+
+- `AudioMixer::to_stereo(..., 0)` 的防护没有覆盖公开 mixer path，`resample()` 会先除以 `channels`，仍可能 panic。
+- 新增 overlap 测试缺少 duration/non-inflation 断言，也没有 out-of-order 覆盖。
+- raw cursor no-op export 和 no-FFmpeg terminal progress 缺少对应测试。
+- writer queue 仍是 count-bounded + blocking `send()`，不是 Phase 6 计划要求的 byte-budgeted + nonblocking backpressure 策略。
+
+### 22.3 自动化验证证据
+
+本轮主 reviewer 运行：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_audio_duration_not_inflated_by_multiple_chunks
+```
+
+结果：
+
+- 通过：`1 passed`
+- 同时出现既有 macOS FFI / visibility warnings，不是本轮新增阻塞。
+
+子 reviewer reported targeted verification：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer
+cargo test --manifest-path src-tauri/Cargo.toml audio_mixer
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg cursor_overlay
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg --test ffmpeg_export
+```
+
+reported result：
+
+- `ffmpeg_writer`：15 tests passed
+- `audio_mixer`：11 tests passed
+- `cursor_overlay`：10 tests passed
+- `ffmpeg_export`：8 integration tests passed
+
+注意：
+
+- 这些 targeted tests 证明当前已有测试仍可通过。
+- 这些 tests **不能证明 BUG-005 已关闭**，因为现有 overlap tests 的关键断言不足，且缺少 out-of-order、partial-overlap drain、真实 24kHz/1ch 设备 manual gate。
+
+### 22.4 Strengths
+
+1. 第 21 节的整改目标基本对齐第 20/21 节问题。
+   - `BUG.md` 已把 BUG-005 从“已修复”收口为“部分修复，待真实设备验证”。
+   - `HANDOFF.md` 也同步了 BUG-005 当前状态。
+
+2. writer audio timeline 修复方向正确。
+   - `src-tauri/src/media/ffmpeg_writer.rs:409-433` 已处理：
+     - `target_sample > audio_timeline_cursor`：补 gap silence。
+     - `target_sample == audio_timeline_cursor`：append full chunk。
+     - `target_sample < audio_timeline_cursor`：尝试 trim/discard overlap。
+   - 这比第 21 节审查时“只会 gap padding，不会 overlap trim”的状态明显前进。
+
+3. cursor overlay 数值安全明显加强。
+   - `src-tauri/src/media/cursor_overlay.rs:193-214` 对 `x/y/scale` 和 mapped `out_x/out_y` 做 finite check。
+   - `src-tauri/src/media/cursor_overlay.rs:230-240` 对 radius 和 mapped coordinates 做 clamp。
+   - `src-tauri/src/media/cursor_overlay.rs:305-379` 绘制函数改为 `i64` 坐标与距离计算。
+   - 新增巨大有限坐标、极端负坐标、infinite 坐标测试。
+
+4. raw cursor visible no-op export 语义修复合理。
+   - `src-tauri/src/media/trim_exporter.rs:424-449` 现在会读取 timeline 的 `render_cursor_overlay`。
+   - `render_cursor_overlay=false` 时 `CursorOverlayRenderer::new()` 返回 `None` 不再被当作 fatal。
+   - `render_cursor_overlay=true` 且 renderer 无法创建时仍会失败，符合 BUG-007 的“raw cursor hidden 时不能静默导出无光标视频”预防规则。
+
+5. no-FFmpeg terminal progress 修复方向正确。
+   - `src-tauri/src/lib.rs:905-937` 对 `Err` 和 `Ok(output_path=None)` 都发 terminal `export-progress`。
+   - 这可以避免 UI 长时间停留在 exporting/cancellable 状态。
+
+### 22.5 Critical 1：partial-overlap audio chunk 跳过 AAC drain，长录制可能累积大量音频 buffer
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_writer.rs:415-428`
+- `src-tauri/src/media/ffmpeg_writer.rs:438-476`
+
+当前实现关键片段：
+
+```rust
+} else if target_sample < audio_timeline_cursor {
+    let overlap_mono = (audio_timeline_cursor - target_sample) as usize;
+    if overlap_mono >= chunk_mono_frames as usize {
+        continue;
+    }
+    let skip_interleaved = overlap_mono * 2;
+    let remaining = &samples[skip_interleaved..];
+    audio_sample_buffer.extend_from_slice(remaining);
+    let appended_mono = (remaining.len() / 2) as i64;
+    audio_timeline_cursor += appended_mono;
+    continue;
+}
+
+audio_sample_buffer.extend_from_slice(&samples);
+audio_timeline_cursor += chunk_mono_frames;
+
+while audio_sample_buffer.len() >= interleaved_frame_size {
+    ...
+}
+```
+
+问题：
+
+- 完全重叠 chunk 丢弃后 `continue` 是合理的。
+- 但**部分重叠** chunk append `remaining` 后也 `continue`，导致不会进入后面的 `while audio_sample_buffer.len() >= interleaved_frame_size`。
+- 如果真实音频 chunk 存在轻微 overlap，例如 20ms callback 但每个 chunk 约 1024 frames（约 21.33ms），那么每个 chunk 都可能走 partial-overlap 分支。
+- 这些 trimmed suffix 会持续堆在 `audio_sample_buffer`，直到：
+  - 后续某个非 overlap chunk 触发 drain；
+  - 或录制结束进入 flush。
+
+为什么重要：
+
+1. **长录制内存风险**：
+   - 10 分钟音频若长期走 partial-overlap 分支，会把大量 f32 samples 留在 `audio_sample_buffer`。
+   - 即使最终 artifact duration 可能通过 flush 被写出，录制期内存和延迟都不受控。
+
+2. **mux interleaving 风险**：
+   - 视频 packet 已在录制期间持续写出。
+   - 大量早期音频 packet 到 finish 阶段才写，可能让 MP4 muxer/interleaver 处理压力集中在尾部。
+
+3. **违反 Phase 6 writer 安全门禁**：
+   - `docs/superpowers/plans/2026-05-30-phase-6-ffmpeg-playable-export.md` 要求 writer 使用 bounded queue，避免编码压力阻塞/反推 capture 主链路。
+   - 当前问题会把压力从 per-chunk drain 延后到 finish，录制结束阶段可能出现明显卡顿或内存峰值。
+
+4. **测试不容易捕获**：
+   - 当前 `ffmpeg_writer_audio_duration_not_inflated_by_multiple_chunks` 通过，因为它只验证同 timestamp fully-overlap 场景。
+   - `ffmpeg_writer_crops_overlapping_audio_chunk` 和 `ffmpeg_writer_drops_fully_overlapped_audio_chunk` 没有 duration/non-inflation 断言。
+
+建议修复：
+
+1. 将 append 和 drain 抽成共享 helper，确保 gap/contiguous/partial-overlap 追加 samples 后都执行相同 drain。
+2. 只有 fully-overlapped chunk 可以提前 `continue`。
+3. 推荐结构：
+
+```rust
+fn drain_audio_frames(...) -> AppResult<()> {
+    while audio_sample_buffer.len() >= interleaved_frame_size {
+        // interleaved -> planar
+        // send frame
+        // receive/write packets
+        // advance audio_pts
+    }
+    Ok(())
+}
+
+// partial overlap:
+audio_sample_buffer.extend_from_slice(remaining);
+audio_timeline_cursor += appended_mono;
+drain_audio_frames(...)?;
+continue;
+```
+
+建议测试：
+
+- `ffmpeg_writer_drains_partial_overlap_audio_before_finish`
+  - 构造多个轻微 overlap chunks。
+  - 验证中途不会把所有 samples 留到 finish。
+  - 如果内部 buffer 不暴露，可先抽纯 helper 测 `AudioTimelineState`。
+- `ffmpeg_writer_partial_overlap_does_not_inflate_or_delay_audio`
+  - 构造 10s video + 10s audio，chunk timestamp 间隔 20ms，但每 chunk 1024 frames。
+  - 验证 audio/video stream duration drift <= 1s。
+
+### 22.6 Important 1：`AudioMixer::to_stereo(0ch)` 防护没有覆盖公开 mixer path
+
+位置：
+
+- `src-tauri/src/media/audio_mixer.rs:58-60`
+- `src-tauri/src/media/audio_mixer.rs:148-160`
+- `src-tauri/src/media/audio_mixer.rs:195-220`
+
+当前整改：
+
+- `to_stereo(samples, 0)` 会返回空 Vec。
+
+问题：
+
+- `SimpleAudioMixer::mix()` 的 single-source path 是：
+
+```rust
+fn passthrough(chunk: &AudioChunk) -> AppResult<MixedAudioChunk> {
+    let resampled = resample(chunk, MIXED_SAMPLE_RATE);
+    let stereo = to_stereo(&resampled, chunk.channels);
+    ...
+}
+```
+
+- `resample()` 内部先执行：
+
+```rust
+let channels = chunk.channels as usize;
+let src_frames = chunk.samples.len() / channels;
+```
+
+- 因此当 `chunk.channels == 0` 时，会在 `to_stereo()` 有机会处理前 panic。
+
+为什么重要：
+
+- `BUG.md` 的 BUG-005 预防规则要求：`MixedAudioChunk.samples` 布局必须与 `channels` 元数据一致。
+- 音频 chunk 来自平台底层和设备驱动，不应完全信任 metadata。
+- 即使真实 BUG-005 日志是 `24000Hz/1ch`，0ch 是同类“元数据异常导致时间轴/长度错误”的防御边界。
+
+建议修复：
+
+1. 将 `resample()` 改成 `AppResult<Vec<f32>>`，在入口校验：
+   - `chunk.sample_rate > 0`
+   - `chunk.channels > 0`
+   - `chunk.samples.len().is_multiple_of(chunk.channels as usize)`
+2. 或在 `passthrough()` / `mix_two()` 调用 `resample()` 前统一 `validate_audio_chunk(chunk)`。
+3. 错误类型用 `AppError::AudioMixFailed`，不要 panic。
+
+建议测试：
+
+- `simple_mixer_rejects_zero_channel_input_without_panic`
+- `simple_mixer_rejects_zero_sample_rate_input_without_panic`
+- `simple_mixer_rejects_sample_len_not_multiple_of_channels`
+
+### 22.7 Important 2：BUG-005 新测试断言不足，无法证明 overlap/out-of-order 已被锁住
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_writer.rs:975-1007`
+- `src-tauri/src/media/ffmpeg_writer.rs:1011-1034`
+- `src-tauri/src/media/ffmpeg_writer.rs:1084-1121`
+
+当前问题：
+
+1. `ffmpeg_writer_crops_overlapping_audio_chunk`
+   - 只检查 `inspection.has_audio_stream`。
+   - 注释写“should NOT be 3x”，但没有 assert。
+
+2. `ffmpeg_writer_drops_fully_overlapped_audio_chunk`
+   - 只检查 `inspection.has_audio_stream`。
+   - 注释写“not 2048+1024”，但没有 assert。
+
+3. `ffmpeg_writer_audio_duration_not_inflated_by_multiple_chunks`
+   - 只覆盖多个 chunk 同 timestamp 的 fully-overlap 场景。
+   - 没覆盖轻微 partial overlap。
+   - 没覆盖 out-of-order chunks。
+
+4. BUG.md 预防规则明确要求覆盖：
+   - first-gap
+   - middle-gap
+   - tail-gap
+   - overlap
+   - out-of-order
+
+为什么重要：
+
+- 这些测试目前即使 overlap trim 逻辑部分失效，也可能仍然通过。
+- 对 BUG-005 这种真实设备复现问题，测试必须尽量锁住时间轴语义，而不是只验证文件可打开。
+
+建议修复：
+
+1. 抽纯函数/小状态机测试音频时间轴合并：
+
+```rust
+struct AudioTimelineState {
+    cursor_frames: i64,
+    appended_frames: i64,
+}
+
+fn append_chunk(&mut self, timestamp_nanos: u64, frames: usize) -> AppendDecision
+```
+
+2. 对纯 helper 做 exact assertions：
+   - first chunk at 200ms => appended silence frames = 9600。
+   - fully overlap => appended frames = 0。
+   - partial overlap => appended frames = chunk_frames - overlap。
+   - out-of-order older chunk => fully discard 或 partial trim。
+   - middle gap => gap silence frames 精确等于 gap。
+
+3. artifact-level tests 继续保留，但增加 duration/drift 断言：
+   - `inspection.audio_duration_nanos`
+   - `inspection.video_duration_nanos`
+   - drift threshold。
+
+### 22.8 Important 3：raw cursor no-op export 和 no-FFmpeg terminal progress 缺少测试
+
+位置：
+
+- `src-tauri/src/media/trim_exporter.rs:424-449`
+- `src-tauri/src/lib.rs:905-937`
+- `src/App.test.tsx:1835-1881`
+
+当前实现方向正确，但缺少覆盖：
+
+1. `src-tauri/tests/ffmpeg_export.rs` 当前主要传 `effect_timeline_path: None`。
+2. 没有测试带 `render_cursor_overlay=false` 的 effect timeline path 时 exporter 成功。
+3. 没有测试 `render_cursor_overlay=true` 但 frames 为空时 exporter fatal。
+4. 默认构建下 `Ok(output_path=None)` terminal progress 没有 command-level 或前端 event test。
+
+为什么重要：
+
+- 第 21 节明确把 raw cursor no-op export 和 no-FFmpeg terminal progress 列为整改项。
+- 缺少测试意味着后续重构 cursor/export command 时容易回退。
+
+建议测试：
+
+1. FFmpeg exporter integration：
+   - `ffmpeg_exporter_accepts_render_cursor_overlay_false_noop_timeline`
+   - `ffmpeg_exporter_rejects_required_overlay_with_empty_timeline`
+
+2. Rust command/helper 层：
+   - 如果 `export_video()` 难以直接单测事件，可拆 `terminal_progress_for_export_result(...)` helper。
+   - 测 `Ok(ExportSummaryPayload { output_path: None, ... })` 生成 `cancellable=false` terminal payload。
+
+3. Frontend：
+   - mock `onExportProgress` 推送 `{ cancellable: false, outputPath: null, error: '当前构建未启用 FFmpeg...' }`。
+   - 验证取消按钮消失、导出中状态清除、不会显示成功文件路径。
+
+### 22.9 Important 4：writer queue 仍不满足 Phase 6 nonblocking / byte-budgeted 计划
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_writer.rs:9-12`
+- `src-tauri/src/media/ffmpeg_writer.rs:53`
+- `src-tauri/src/media/ffmpeg_writer.rs:99-115`
+- `src-tauri/src/media/ffmpeg_writer.rs:153-160`
+
+当前行为：
+
+- writer 使用 `mpsc::sync_channel::<EncoderMessage>(ENCODER_QUEUE_CAPACITY)`。
+- `push_video()` 会先复制视频帧到 `Vec<u8>`，再调用 blocking `send()`。
+- `push_audio()` 也调用 blocking `send()`。
+- queue 只限制 message count，不限制 queued bytes。
+
+为什么重要：
+
+- Phase 6 FFmpeg playable export plan 明确要求：
+  - `push_video()` / `push_audio()` 使用 `try_send`。
+  - queue 使用 byte budget。
+  - queue full 时返回结构化 fatal writer error 或明确 drop policy。
+  - 不要让 FFmpeg 编码压力长时间阻塞 capture consumer。
+
+当前状态比早期同步编码已有改善，但仍不满足 Phase 6 完成口径。
+
+建议修复：
+
+1. 引入 queued bytes counter：
+   - 1080p BGRA frame 约 8MB。
+   - 4K frame 约 33MB。
+   - message-count 25 对不同分辨率的内存含义差异太大。
+2. 使用 `try_send`：
+   - `Full` => 返回 `RecordingWriteFailed { reason: "FFmpeg 写入队列已满..." }`。
+   - `Disconnected` => 返回 writer closed error。
+3. worker 消费后释放 queued bytes。
+4. `RecordingResult` 或 trim metadata 记录 queue full / dropped / late frame telemetry。
+5. 如果选择 drop policy，必须在 BUG.md / HANDOFF / checklist 中明确，而不是静默 drop。
+
+建议测试：
+
+- `ffmpeg_writer_push_video_returns_error_when_queue_full`
+- `ffmpeg_writer_queue_is_byte_budgeted_for_1080p_frames`
+- `ffmpeg_writer_releases_queued_bytes_after_worker_consumes`
+
+### 22.10 Minor 1：FFmpeg synthetic artifact helper 没有自证输出路径和 artifact contract
+
+位置：
+
+- `src-tauri/src/test_support/ffmpeg_helpers.rs:63-84`
+
+当前实现：
+
+```rust
+let mut writer = crate::media::ffmpeg_writer::FfmpegRecordingWriter::new(path.to_path_buf())?;
+...
+writer.finish()?;
+Ok(())
+```
+
+问题：
+
+- helper 没有检查 `writer.finish()?.output_path` 是否等于目标 `path`。
+- helper 没有调用 `inspect_media_artifact(path)` 自证 video/audio stream、duration、file size。
+
+为什么重要：
+
+- Phase 6 plan 要求 test helper 不能掩盖 writer/exporter artifact contract。
+- 当前 writer `finish()` 内部已做 source validation，风险不高，所以降级为 Minor。
+
+建议修复：
+
+```rust
+let result = writer.finish()?;
+if result.output_path.as_deref() != Some(path.to_string_lossy().as_ref()) {
+    return Err(AppError::RecordingWriteFailed { ... });
+}
+let inspected = inspect_media_artifact(path)?;
+if !inspected.has_video_stream || !inspected.has_audio_stream || inspected.duration_nanos == 0 {
+    return Err(AppError::RecordingWriteFailed { ... });
+}
+```
+
+### 22.11 BUG.md 预防规则复核
+
+#### BUG-004：导出视频无法播放 / time base
+
+当前状态：基本符合。
+
+- muxer packet 使用 `write_header()` 后真实 stream time base：符合。
+- artifact validation 检查 per-stream duration：符合。
+- writer video PTS 基于 frame timestamp：符合。
+- 仍需 manual gate：1080p 10 分钟 stream-level duration/fps 检查。
+
+#### BUG-005：音频捕获失败 / 麦克风 53s audio drift
+
+当前状态：部分符合，不能关闭。
+
+已符合：
+
+- 麦克风设备 stream config 改为设备 default config。
+- writer 开始处理 first-gap、overlap、tail padding。
+- `AudioMixer::to_stereo()` 已修正 `>2ch` 截取前两个 channel。
+
+未完全符合：
+
+- partial-overlap 分支跳过 AAC drain，长录制存在 buffer 延迟/内存风险。
+- out-of-order 没有测试覆盖。
+- `channels == 0` 仍可能在 `resample()` panic。
+- 缺少真实 `24000Hz/1ch` 设备 manual gate。
+
+建议 BUG.md 状态继续保持：
+
+> 部分修复，待真实设备验证。
+
+不建议改为：
+
+> 已解决。
+
+#### BUG-006：系统音频稀疏时间轴
+
+当前状态：大体符合，但依赖 BUG-005 writer timeline 后续修正。
+
+- middle gap 和 tail gap 已有实现方向。
+- 但 audio timeline helper 尚未抽出，first-gap/middle-gap/tail-gap/overlap/out-of-order 的统一测试矩阵不足。
+
+#### BUG-007：导出视频没有美化 / raw cursor hidden contract
+
+当前状态：核心方向符合。
+
+- raw cursor hidden 且 overlay required 时，renderer 无法创建会 fatal。
+- exporter 已实际读取 effect timeline 并调用 overlay。
+- raw cursor visible no-op 已修为不 fatal。
+
+缺口：
+
+- 缺少 `render_cursor_overlay=false` no-op exporter integration test。
+- 缺少 raw hidden + empty required timeline fatal integration test。
+
+#### BUG-008：cursor overlay scale/radius 溢出 panic
+
+当前状态：主要实现已符合。
+
+- source `x/y/scale` finite check：符合。
+- mapped coordinates finite check：符合。
+- mapped coordinate clamp：符合。
+- distance arithmetic 使用 `i64`：符合。
+
+缺口：
+
+- 如果后续 overlay 逻辑增加 UV plane 或其他 rasterization，必须沿用同样的 finite/clamp/i64 规则。
+
+### 22.12 建议整改 Phase
+
+#### R1：修 partial-overlap drain bug（最高优先级）
+
+目标：
+
+- partial-overlap chunk append 后必须立即走正常 AAC drain loop。
+
+建议步骤：
+
+1. 抽出 `drain_audio_sample_buffer(...)` helper，复用当前 while drain 逻辑。
+2. fully-overlap chunk 仍 `continue`。
+3. partial-overlap chunk：
+   - append remaining samples。
+   - update `audio_timeline_cursor`。
+   - 调用 `drain_audio_sample_buffer(...)`。
+   - 再 `continue`。
+4. 保持 `audio_pts` 只在真正 send AAC frame 时递增。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer
+```
+
+新增测试建议：
+
+- `ffmpeg_writer_drains_partial_overlap_audio_before_finish`
+- `ffmpeg_writer_partial_overlap_does_not_inflate_or_delay_audio`
+
+#### R2：补强 BUG-005 测试矩阵
+
+目标：
+
+- 让测试真正锁住 BUG.md 预防规则。
+
+建议步骤：
+
+1. 抽 pure `AudioTimelineState` 或 `append_audio_chunk_to_timeline()` helper。
+2. 对以下情况做 exact unit tests：
+   - first-gap
+   - middle-gap
+   - tail-gap
+   - fully-overlap discard
+   - partial-overlap trim
+   - out-of-order discard/trim
+3. 对 artifact-level tests 增加 duration/drift assert。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_partial_overlap
+```
+
+#### R3：修 audio mixer 输入 metadata 防御
+
+目标：
+
+- 不信任底层 audio chunk metadata。
+- `channels == 0`、`sample_rate == 0`、sample length 不匹配时返回结构化错误，不 panic。
+
+建议步骤：
+
+1. 新增 `validate_audio_chunk(chunk: &AudioChunk) -> AppResult<()>`。
+2. `passthrough()`、`mix_two()` 入口先 validate。
+3. `resample()` 改为只接收已验证 chunk，或返回 `AppResult<Vec<f32>>`。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml audio_mixer
+```
+
+新增测试：
+
+- `simple_mixer_rejects_zero_channel_input_without_panic`
+- `simple_mixer_rejects_zero_sample_rate_input_without_panic`
+- `simple_mixer_rejects_sample_len_not_multiple_of_channels`
+
+#### R4：补 raw cursor no-op / required overlay integration tests
+
+目标：
+
+- 防止 exporter 语义回退。
+
+建议步骤：
+
+1. 在 FFmpeg exporter integration tests 中写临时 `EffectTimeline` JSON。
+2. Case A：`render_cursor_overlay=false`，frames empty，导出成功。
+3. Case B：`render_cursor_overlay=true`，frames empty，导出失败。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_exporter_accepts_render_cursor_overlay_false_noop_timeline
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_exporter_rejects_required_overlay_with_empty_timeline
+```
+
+#### R5：补 no-FFmpeg terminal progress 测试
+
+目标：
+
+- 默认构建 no-FFmpeg gate 不残留 exporting/cancellable。
+
+建议步骤：
+
+1. 如果直接测 Tauri command event 较难，先拆 helper：
+
+```rust
+fn terminal_progress_for_result(
+    preset: &'static str,
+    result: &Result<ExportSummaryPayload, String>,
+) -> Option<ExportProgressPayload>
+```
+
+2. 测 `Ok(output_path=None)` 返回 `cancellable=false`。
+3. 前端补监听 event 后 UI 收尾测试。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml export_progress
+npm test -- --run
+```
+
+#### R6：writer queue backpressure 收口
+
+目标：
+
+- Phase 6 完成前必须明确 writer queue 策略。
+
+建议步骤：
+
+1. 引入 byte budget。
+2. `send()` 改 `try_send()`。
+3. queue full 返回 writer error 或有记录地 drop。
+4. RecordingResult / metadata 记录 queue 统计。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_queue
+```
+
+#### R7：真实设备 manual gate
+
+目标：
+
+- BUG-005 不能只靠 synthetic tests 关闭。
+
+必须验证：
+
+1. `npm run tauri:dev:ffmpeg`
+2. 开启麦克风，真实设备为 `24000Hz/1ch` 或等价非 48kHz/stereo 输入。
+3. 录制 10 秒。
+4. 停止录制不再出现：
+
+```text
+录制视频/音频时长偏差过大：视频 10033ms，音频 53397ms，偏差 43363ms
+```
+
+5. source artifact：
+   - QuickTime/IINA/VLC 可播放。
+   - video/audio stream duration drift <= 1s。
+
+建议把 evidence 记录到：
+
+- `BUG.md` BUG-005
+- `HANDOFF.md`
+- `tests/phase-6-w11-w12-checklist.md`
+
+### 22.13 Ready To Merge 判断
+
+Ready to merge：**No**
+
+原因：
+
+1. `ffmpeg_writer.rs` partial-overlap drain bug 是真实 correctness/performance 风险。
+2. BUG-005 测试矩阵不足，不能证明真实 10s video / 53s audio drift 已关闭。
+3. `AudioMixer` 对异常 metadata 仍可能 panic。
+4. raw cursor no-op export、no-FFmpeg terminal progress 缺少测试。
+5. writer queue 仍未满足 Phase 6 nonblocking / byte-budgeted 计划。
+6. Native Safety Gate 和 1080p 10 分钟压力 Gate 仍未完成。
+
+### 22.14 建议对外状态表述
+
+建议后续整改前使用下面口径：
+
+> Phase 6 第 21 节整改方向正确，cursor overlay 数值安全、raw cursor no-op export 和 no-FFmpeg terminal progress 均有实质推进；BUG-005 也已从 CPAL 配置协商问题推进到 writer audio timeline 层面的修复。但本轮复审发现 writer partial-overlap 音频分支跳过 AAC drain，长录制可能累积大量音频 buffer，且现有 overlap/out-of-order 测试不足以证明真实 `24000Hz/1ch` 麦克风录制问题已关闭。因此 BUG-005 仍应保持“部分修复，待真实设备验证”，Phase 6 仍不能声明完成。下一轮应优先修 partial-overlap drain、补强 BUG-005 测试矩阵，再补 raw cursor/no-FFmpeg 覆盖和 writer queue backpressure。
+
+## 23. Phase 6 FFmpeg playable export 第 22 节整改后复审与 BUG-005 新无声问题定位（2026-06-01，HEAD `014d28c` + dirty worktree）
+
+本节基于用户反馈“已完成第 22 节整改任务，并人工验证 BUG-005 旧的 10s video / 53s audio duration drift 已不再出现，但出现新的无声和耳机回放劣化问题”后的当前 dirty worktree 进行复审。
+
+本节是**代码审查记录追加**，用于指导下一轮编码工作；不代表业务代码已经完成新的修复。
+
+### 23.1 审查输入与范围
+
+审查输入：
+
+- `docs/architecture/project-architecture-and-overall-planning.md`
+- `docs/superpowers/plans/2026-05-29-phase-6-export-presets-local-license.md`
+- `docs/superpowers/plans/2026-05-30-phase-6-ffmpeg-playable-export.md`
+- `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 第 22 节
+- `BUG.md` 中 BUG-005 的新验证结果
+- `HANDOFF.md`
+- `.codex/rules/0-global.md`、`.codex/rules/1-coding-style.md`、`.codex/rules/2-testing.md`、`.codex/rules/4-security.md`、`.codex/rules/5-docs.md`
+- `docs/platform-diff/macos-compatibility.md`
+
+实际审查对象：
+
+- Base：`014d28cdcc4b8f869ae4a496e12c266bfc4eda07`
+- Head：当前 dirty worktree
+- 重点文件：
+  - `src-tauri/src/media/ffmpeg_writer.rs`
+  - `src-tauri/src/media/audio_mixer.rs`
+  - `src-tauri/src/media/audio_synchronizer.rs`
+  - `src-tauri/src/platform/macos_service.rs`
+  - `src-tauri/src/platform/macos/screen_capture_kit.rs`
+  - `src-tauri/src/platform/macos/cpal_microphone.rs`
+  - `src-tauri/src/media/ffmpeg_common.rs`
+  - `src-tauri/src/test_support/ffmpeg_helpers.rs`
+  - `src-tauri/tests/ffmpeg_export.rs`
+  - `src/App.test.tsx`
+
+用户新反馈现象：
+
+1. 旧问题“停止录制时报 `视频 10033ms，音频 53397ms` duration drift”人工验证后不再复现。
+2. 新问题 A：录制的 source video 和导出 video 播放时都听不见系统音频和麦克风声音。
+3. 新问题 A 在两种场景下都存在：
+   - 只录制系统音频。
+   - 同时录制系统音频和麦克风。
+4. 新问题 B：同时开启系统音频和麦克风录制时，录制期间从耳机听到的系统输出音质变差、断断续续；结束录制后恢复正常。
+5. 录制过程中顶部胶囊状态栏有麦克风波动反馈。
+
+### 23.2 总体结论
+
+结论：**不建议合并为 Phase 6 完成态；不建议关闭 BUG-005。**
+
+第 22 节要求的整改大体已经完成：
+
+- `ffmpeg_writer.rs` 已抽出 `drain_audio_sample_buffer(...)`，partial-overlap append 后会进入 AAC drain helper。
+- `AudioMixer` 已在公开 mix path 入口校验 `channels > 0`、`sample_rate > 0`、`samples.len() % channels == 0`。
+- `ffmpeg_export.rs` 已补 `render_cursor_overlay=false` no-op timeline 和 required overlay empty timeline 两个 integration tests。
+- 前端已补 terminal progress `cancellable=false` 清理 exporting 状态测试。
+- synthetic FFmpeg helper 已校验 `finish().output_path` 和 artifact video/audio/duration contract。
+
+但新 BUG 不是上一轮的“音频时间轴膨胀”同一个问题。当前证据指向两类根因：
+
+1. **音频交付/内容验证问题**：有麦克风 UI 电平不等于有麦克风音频进入最终 mixed audio writer；有 AAC audio stream 不等于其中包含用户请求录制的真实音频内容。
+2. **macOS 蓝牙耳机输入/输出 profile 切换问题**：打开蓝牙耳机麦克风时，macOS 常见行为是切到双向通话链路，导致耳机回放质量下降或断续；录制停止后输入流关闭，回放恢复。
+
+因此，下一轮修复重点不应继续只围绕 writer duration drift，而应把“requested audio source 是否真实到达 writer、是否非静音、是否被 synchronizer/writer 丢弃或遮蔽”作为新的验收主线。
+
+### 23.3 自动化验证证据
+
+本轮主 reviewer 运行：
+
+```bash
+git diff --check 014d28cdcc4b8f869ae4a496e12c266bfc4eda07 --
+cargo test --manifest-path src-tauri/Cargo.toml audio_mixer
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_drains_partial_overlap_audio_before_finish
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_handles_out_of_order_audio_chunks
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg --test ffmpeg_export
+npm test -- --run
+```
+
+结果：
+
+- `git diff --check`：通过。
+- `audio_mixer`：15 tests passed。
+- `ffmpeg_writer_drains_partial_overlap_audio_before_finish`：1 passed。
+- `ffmpeg_writer_handles_out_of_order_audio_chunks`：1 passed。
+- `ffmpeg_export` integration：10 tests passed。
+- 前端 Vitest：52 tests passed。
+- Rust 仍有既有 macOS FFI/style warnings，包括 `unused_unsafe`、`private_interfaces`、FFI struct `non_snake_case` 等；这些不是本轮新 bug 的直接证据，但 Phase 6 收尾前仍应整理或显式记录为既有 warning。
+
+子 reviewer 运行：
+
+```bash
+git status --short
+git diff --name-status 014d28cdcc4b8f869ae4a496e12c266bfc4eda07 --
+git diff --check 014d28cdcc4b8f869ae4a496e12c266bfc4eda07 --
+cargo test --manifest-path src-tauri/Cargo.toml audio_synchronizer
+cargo test --manifest-path src-tauri/Cargo.toml audio_mixer
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_drains_partial_overlap_audio_before_finish
+npm test -- --run src/App.test.tsx
+```
+
+reported result：
+
+- `git diff --check` 通过。
+- `audio_synchronizer` 通过。
+- `audio_mixer` 通过。
+- `ffmpeg_writer_drains_partial_overlap_audio_before_finish` 通过。
+- 前端测试 52 passed。
+
+注意：
+
+- 这些测试能证明第 22 节的部分整改没有破坏既有自动化。
+- 这些测试不能证明新 BUG 已定位完毕或已修复，因为当前测试没有验证真实音频内容/RMS，也没有覆盖 system+mic 双源在 synchronizer 中的稀疏、错位、静音遮蔽场景。
+
+### 23.4 Strengths
+
+1. **第 22 节 Critical 1 已按方向修复**
+   - `src-tauri/src/media/ffmpeg_writer.rs:181-234` 新增 `drain_audio_sample_buffer(...)`。
+   - `src-tauri/src/media/ffmpeg_writer.rs:475-503` 中 partial-overlap append 后不再提前 `continue`，而是进入共享 drain helper。
+   - `src-tauri/src/media/ffmpeg_writer.rs:559-568` flush 阶段也复用同一个 helper，避免剩余多帧 buffer 只处理一帧。
+
+2. **AudioMixer metadata 防御已经覆盖公开 mixer path**
+   - `src-tauri/src/media/audio_mixer.rs:61-82` 新增 `validate_audio_chunk(...)`。
+   - `src-tauri/src/media/audio_mixer.rs:85-97` 的 `passthrough(...)` 入口先 validate。
+   - `src-tauri/src/media/audio_mixer.rs:107-115` 的 `mix_two(...)` 对 system 和 mic 都 validate。
+   - 新增测试覆盖 0ch、0Hz、sample length 不匹配，以及双源 mix 中 mic metadata 异常。
+
+3. **cursor overlay no-op / required failure contract 已有 integration tests**
+   - `src-tauri/tests/ffmpeg_export.rs:385-427` 覆盖 `render_cursor_overlay=false` + empty frames 导出成功。
+   - `src-tauri/tests/ffmpeg_export.rs:429-475` 覆盖 `render_cursor_overlay=true` + empty frames 导出失败。
+
+4. **test helper contract 更严格**
+   - `src-tauri/src/test_support/ffmpeg_helpers.rs:83-103` 校验 writer 返回的 output path 与目标 path 一致，并自证 artifact has video/audio stream + non-zero duration。
+
+这些都是有价值的推进；本轮不建议回退。
+
+### 23.5 Critical 1：requested audio 可以静默失败后被 silent AAC track 掩盖成“有效录制”
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_writer.rs:608-648`
+- `src-tauri/src/media/ffmpeg_common.rs:156-223`
+- `src-tauri/src/media/ffmpeg_common.rs:230-276`
+- `src-tauri/src/platform/macos/screen_capture_kit.rs:247-270`
+- `src-tauri/src/platform/macos/screen_capture_kit.rs:383-385`
+
+当前行为：
+
+- 当 `mixed_audio_chunk_count == 0` 时，writer 会自动生成 silent AAC track：
+
+```rust
+if mixed_audio_chunk_count == 0 {
+    let video_duration_secs = video_duration_nanos as f64 / 1_000_000_000.0;
+    let total_audio_frames = (video_duration_secs * 48000.0).ceil() as u64;
+    let num_silent_packets = (total_audio_frames / 1024).max(1);
+    ...
+}
+```
+
+- `validate_source_artifact(...)` 和 `validate_export_artifact(...)` 只检查：
+  - 文件非空。
+  - 有 video stream。
+  - 有 audio stream。
+  - duration 非零。
+  - video/audio duration drift 在阈值内。
+- 它们不检查：
+  - 用户是否请求了系统音频或麦克风。
+  - 请求的 source 是否产生过 chunk。
+  - chunk 是否成功进入 synchronizer。
+  - mixed audio 是否成功进入 writer。
+  - AAC track RMS 是否大于静音阈值。
+  - audio chunk / media channel 是否发生过 drop。
+
+为什么这能解释新 BUG：
+
+- 如果系统音频 extraction 失败、产生全零样本、或发送到 channel 时被 drop，writer 最终仍可能生成一个有 audio stream 的 MP4。
+- 当前 validation 会把这个 silent AAC artifact 当成“有效 source/export artifact”。
+- 用户会看到“录制/导出成功，文件可播放”，但听不到系统音频。
+- 如果麦克风也没有最终进入 mixed writer，或者被后续时间轴逻辑丢弃，同样会被 silent AAC / duration validation 掩盖。
+
+系统音频 capture 层的风险点：
+
+- `screen_capture_kit.rs` 的 `handle_audio_chunk(...)` 中有多处静默 `return`：
+  - 获取 format description 失败。
+  - ASBD 字段异常。
+  - PCM 格式不支持。
+  - `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(...)` 失败。
+  - `samples_f32.is_empty()`。
+- `screen_capture_kit.rs:383-385` 对 `sink.try_send_drop_newest(chunk)` 的返回值没有记录或上报。
+- `core/media_channel.rs:47-55` 虽然有 dropped counter，但 `MacRecordingService` 当前没有把 `system_audio_rx.dropped_count()` / `mic_rx.dropped_count()` 纳入 `RecordingResult`、trim metadata、日志或错误。
+
+违反的预防规则：
+
+- BUG-005：音频输入 chunk 必须携带真实 sample_rate/channels/timestamp，并且 writer 必须尊重 mixed audio timestamp。现在缺少“请求了音频但无有效 chunk”的错误闭环。
+- BUG-006：不能把稀疏音频压缩成连续短音轨；同理，也不能把“音频缺失”伪装成成功静音音轨。
+- Phase 6 成功标准：source/export artifact 必须可播放且满足录制意图；当前“有音轨”不等价于“录到了用户请求的音频”。
+
+建议修复方向：
+
+1. 在录制会话开始时记录 `requested_system_audio` / `requested_microphone`。
+2. 在 capture/consumer/writer 链路记录 source-aware metrics：
+   - `system_chunks_received`
+   - `mic_chunks_received`
+   - `system_chunks_dropped`
+   - `mic_chunks_dropped`
+   - `mixed_chunks_written`
+   - `system_rms_max` / `mic_rms_max` / `mixed_rms_max`
+   - `generated_silent_track`
+3. `RecordingResult` 或 trim metadata 中追加 diagnostics，至少先写入 sidecar 或终端日志。
+4. 当用户请求了某个 audio source，但该 source：
+   - 没有 chunk；
+   - 或 chunk 全部被 drop；
+   - 或最终 mixed RMS 低于阈值；
+   应返回明确 warning/error，不要只产出 silent AAC 后成功。
+5. `validate_source_artifact(...)` / `validate_export_artifact(...)` 增加可选 audio-content validation：
+   - 对 artifact decode audio stream，计算 RMS / peak。
+   - 区分“无音频请求时允许 silent AAC track”和“有音频请求时 silent track 是失败或警告”。
+
+建议测试：
+
+- `writer_without_requested_audio_allows_silent_track`
+- `writer_with_requested_audio_rejects_generated_silent_track`
+- `source_artifact_validation_rejects_silent_audio_when_audio_requested`
+- `screen_capture_audio_drop_count_is_reported`
+- `system_audio_requested_but_no_chunks_records_diagnostic_error`
+
+### 23.6 Critical 2：mic level UI 只能证明麦克风被采集，不能证明麦克风被写入文件
+
+位置：
+
+- `src-tauri/src/platform/macos_service.rs:478-487`
+- `src-tauri/src/platform/macos_service.rs:490-518`
+- `src-tauri/src/platform/macos_service.rs:553-588`
+- `src-tauri/src/media/audio_synchronizer.rs:71-88`
+- `src-tauri/src/media/audio_synchronizer.rs:97-125`
+- `src-tauri/src/media/ffmpeg_writer.rs:475-503`
+
+当前数据流：
+
+```text
+cpal mic callback
+  -> mic_rx
+  -> macos_service consume_frames
+     -> MicLevelDetector::push_samples(&chunk.samples)  // UI 胶囊波动来自这里
+     -> synchronizer.push_mic(chunk)
+     -> synchronizer.drain_mixed()
+     -> writer.push_audio(mixed)
+     -> ffmpeg_writer overlap/gap/tail timeline merge
+```
+
+关键事实：
+
+- `macos_service.rs:480-484` 先计算 mic level，再 `synchronizer.push_mic(chunk)`。
+- 因此“胶囊有波动”只证明 cpal callback 到达了 consumer thread，并且 chunk samples 不是全静音。
+- 它不能证明：
+  - mic chunk 成功被 synchronizer 输出；
+  - mic chunk 与 system chunk 正确混合；
+  - mixed chunk 成功被 writer 接收；
+  - writer 没有因 overlap/time cursor 将其裁掉；
+  - encoded AAC 里有非静音 mic 内容。
+
+当前 synchronizer 的高风险行为：
+
+```rust
+while let Some(system) = self.system_queue.pop_front() {
+    ...
+    let mic = best_idx.map(|idx| self.mic_queue.remove(idx).unwrap());
+    results.push(self.mixer.mix(Some(&system), mic.as_ref()));
+}
+```
+
+- 每个 system chunk 会立即输出一个 mixed result。
+- 如果当时没有在 `PAIR_WINDOW_NANOS` 内找到 mic chunk，则输出 system-only chunk。
+- 当 mic chunk 稍后到达并 aged out 时，`audio_synchronizer.rs:118-120` 会输出 mic-only chunk。
+- 这两个 chunk 可能覆盖同一时间段。
+- writer 的 `audio_timeline_cursor` 是单一输出时间轴；较晚到达但 timestamp 更早的 mic-only chunk 会进入 overlap path。
+- 如果 overlap 已被 system-only chunk 占满，mic-only chunk 会被完整丢弃。
+
+为什么这能解释“mic UI 有波动但录制无麦克风声音”：
+
+1. 系统音频和麦克风同时开启。
+2. system chunk 先被 synchronizer 输出，可能是静音或低电平。
+3. writer 推进 `audio_timeline_cursor`。
+4. mic chunk 后到或与 system chunk 错过 10ms pairing window。
+5. mic chunk aged out 后以更早 timestamp 输出。
+6. writer 认为它和已写入 timeline 重叠，裁剪或丢弃。
+7. 最终文件里留下 system-only 静音/低电平内容，mic 被“时间轴占位”吞掉。
+
+为什么这也可能影响“只录系统音频无声”：
+
+- 只录系统音频时没有 mic path，问题更可能在 ScreenCaptureKit audio extraction、system audio source 本身全零、capture 权限/系统版本支持、或 audio channel drop。
+- 当前 artifact validation 不检查 content RMS，所以只录系统音频无声也会被当成成功。
+
+建议修复方向：
+
+1. `AudioSynchronizer` 增加 source-aware output，不要只输出 `MixedAudioChunk`：
+
+```rust
+struct SynchronizedAudioChunk {
+    mixed: MixedAudioChunk,
+    has_system: bool,
+    has_mic: bool,
+    system_rms: f32,
+    mic_rms: f32,
+}
+```
+
+2. 增加 `drain_final()`：
+   - 停止录制时不要继续按 `MAX_HOLD_NANOS` hold 逻辑保留 mic chunk。
+   - final drain 必须 flush all remaining system/mic chunks。
+   - 对 remaining chunks 输出明确 diagnostics：unpaired system / unpaired mic / dropped due overlap。
+3. 更根本的修法：不要让 system-only chunk 先占住 writer timeline 后再让 mic-only overlap 被丢弃。应在 synchronizer 内用按时间排序的小窗口聚合：
+   - 以 timestamp bucket / sample timeline 为单位合并两路。
+   - 缺的一路补 0。
+   - 输出单一、单调、source-aware mixed timeline。
+4. writer 层保留 overlap trim 规则，但不能用它来“解决”双源同步器产生的同时间段多 chunk。双源对齐必须在 synchronizer/mixer 层完成。
+
+建议测试：
+
+- `synchronizer_final_drain_flushes_remaining_mic_chunks`
+- `synchronizer_does_not_drop_late_mic_after_system_only_chunk`
+- `system_and_mic_misaligned_chunks_preserve_mic_rms`
+- `consumer_mic_level_chunk_reaches_writer_when_system_audio_enabled`
+- `consumer_reports_requested_mic_chunks_not_written`
+
+### 23.7 Important 1：live capture path 仍可能被 FFmpeg writer blocking backpressure 放大音频丢包
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_writer.rs:9-12`
+- `src-tauri/src/media/ffmpeg_writer.rs:53`
+- `src-tauri/src/media/ffmpeg_writer.rs:113-124`
+- `src-tauri/src/media/ffmpeg_writer.rs:153-160`
+- `src-tauri/src/platform/macos_service.rs:439-521`
+- `src-tauri/src/core/media_channel.rs:47-55`
+- `src-tauri/src/media/ffmpeg_writer.rs:903-923`
+
+当前行为：
+
+- `FfmpegRecordingWriter` 使用 `mpsc::sync_channel::<EncoderMessage>(25)`。
+- `push_video()` 和 `push_audio()` 都是 blocking `send()`。
+- `macos_service::consume_frames(...)` 的 live loop 顺序是：
+  1. drain all video frames，并调用 `writer.push_video(frame)`；
+  2. drain system audio；
+  3. drain mic audio；
+  4. `synchronizer.drain_mixed()`；
+  5. `writer.push_audio(mixed)`；
+  6. sleep 10ms。
+- 如果 FFmpeg worker 编码慢，`writer.push_video(...)` 可能阻塞 consumer thread。
+- consumer thread 一旦阻塞，native callback 侧的 bounded media channel 会满。
+- `MediaSender::try_send_drop_newest(...)` 会 drop newest 并只递增 dropped counter，不返回到业务错误。
+- 当前没有把 drop count 接入 recording result / BUG diagnostics。
+
+为什么重要：
+
+- 这违反 Phase 6 writer 计划中“byte-budgeted + nonblocking backpressure”的目标。
+- 视频帧 BGRA 很大，message-count capacity 25 对 1080p/4K 的内存含义差异极大。
+- 音频 callback 本应轻量可靠；被 video writer backpressure 间接拖垮后，用户会看到：
+  - 录制 UI 还在动；
+  - 结束时文件有音轨；
+  - 但音频内容缺失或严重稀疏。
+- 这也可能加剧“系统音频 + 麦克风同时开启时音质/回放断续”的主观体验，虽然耳机 profile 切换是更直接的解释。
+
+额外问题：
+
+- `ffmpeg_writer_queue_backpressure_blocks_producer` 测试当前事实上把 blocking producer 当成期望行为，这与 Phase 6 计划冲突。这个测试应在下一轮改写。
+
+建议修复方向：
+
+1. `FfmpegRecordingWriter` 改为 byte-budgeted queue：
+   - video message 按 `buffer.len()` 计入 bytes。
+   - audio message 按 `samples.len() * size_of::<f32>()` 计入 bytes。
+2. `send()` 改为 `try_send()`：
+   - `Full` 返回结构化 `RecordingWriteFailed { reason: "FFmpeg 写入队列已满..." }`。
+   - 或选择有记录的 drop policy，但必须写入 diagnostics，不能静默 drop。
+3. consumer thread 不应无限先 drain video。建议每轮按 bounded batch 交替处理 video/system/mic：
+   - 例如最多处理 N 个 video frame 后必须处理 audio queues。
+   - 或使用 select/poll-like 策略，避免 audio starvation。
+4. 将 `video_rx.dropped_count()`、`system_audio_rx.dropped_count()`、`mic_rx.dropped_count()` 记录到 result/metadata。
+5. 如果 live FFmpeg writer 还未通过 Native Safety + 1080p 10min gate，可以考虑临时回退为轻量 writer 或降低实时编码压力，避免把 Phase 6 exporter 验证和 capture 主链路稳定性绑死。
+
+建议测试：
+
+- `ffmpeg_writer_push_video_returns_error_when_queue_full`
+- `ffmpeg_writer_queue_is_byte_budgeted_for_1080p_frames`
+- `consume_frames_reports_system_audio_drop_count`
+- `consume_frames_processes_audio_even_when_video_queue_is_busy`
+- `ffmpeg_writer_queue_backpressure_does_not_block_capture_consumer`
+
+### 23.8 Important 2：蓝牙耳机麦克风会触发 macOS 输入/输出 profile 切换，需作为平台兼容问题处理
+
+位置：
+
+- `src-tauri/src/platform/macos/cpal_microphone.rs:70-85`
+- `src-tauri/src/platform/macos/cpal_microphone.rs:93-118`
+- `src-tauri/src/platform/macos/cpal_microphone.rs:163-168`
+- `docs/platform-diff/macos-compatibility.md`
+
+当前行为：
+
+- 麦克风 capture 默认使用 `host.default_input_device()`。
+- 如果用户当前默认输入设备是蓝牙耳机麦克风，`stream.play()` 会打开该输入流。
+- macOS 对许多蓝牙耳机的常见行为是：当同一蓝牙设备同时承担输出和麦克风输入时，系统从高质量播放 profile 切换到双向通话 profile。
+- 结果表现为：
+  - 耳机输出音质明显变差。
+  - 回放断续或压缩感增强。
+  - 关闭麦克风输入流后恢复。
+
+为什么这与新 BUG 匹配：
+
+- 用户反馈“同时开启系统音频、麦克风录制，录制过程中从耳机里听到的电脑输出音频音质变差，断断续续；结束录制后恢复正常”。
+- 这个现象与蓝牙耳机 profile 切换高度一致。
+- 这不一定是 FFmpeg writer 的根因，也不一定意味着录制文件中的系统音频必然损坏；它是平台设备选择/用户提示/兼容策略问题。
+
+建议修复方向：
+
+1. 增加麦克风设备选择 UI：
+   - 允许用户在“内置麦克风 / 蓝牙耳机麦克风 / USB 麦克风”等输入设备间选择。
+2. 当检测到默认 input device 名称与常见蓝牙耳机/output device 相关时，提示用户：
+   - “使用蓝牙耳机麦克风可能导致耳机播放音质下降，建议选择内置麦克风并保留蓝牙耳机作为输出。”
+3. 更稳健的实现需要查询当前 output device 与 input device 是否同一蓝牙设备；如果短期做不到，至少在 `macos-compatibility.md` 和 UI 文案中列为已知限制。
+4. Manual Gate 必须拆分验证：
+   - 蓝牙耳机输出 + 内置麦克风输入。
+   - 蓝牙耳机输出 + 蓝牙耳机麦克风输入。
+   - 内置扬声器输出 + 内置麦克风输入。
+
+建议测试/验证：
+
+- 自动化可覆盖 device selection payload，不建议 mock CoreAudio profile 切换。
+- 手动 Gate：
+  1. 连接蓝牙耳机。
+  2. 设置输入为蓝牙耳机麦克风，开始录制，记录回放是否降质。
+  3. 设置输入为内置麦克风，蓝牙耳机仅输出，开始录制，确认回放不降质或明显改善。
+  4. 两种情况下分别检查 source artifact 是否有非静音 audio RMS。
+
+### 23.9 Important 3：第 22 节 BUG-005 测试仍没有证明真实 24kHz/1ch mic path 和 audio content
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_writer.rs:1051-1095`
+- `src-tauri/src/test_support/ffmpeg_helpers.rs:37-45`
+- `src-tauri/src/media/audio_mixer.rs:178-214`
+
+问题：
+
+- `ffmpeg_writer_preserves_av_duration_with_mic_24khz_mono_after_mixer` 的注释说模拟真实 `24kHz/1ch` 麦克风经 mixer 后进入 writer。
+- 但测试实际推入的是 `test_audio_chunk_at(ts)`。
+- `test_audio_chunk_at(...)` 已经是：
+
+```rust
+MixedAudioChunk {
+    sample_rate: 48_000,
+    channels: 2,
+    samples: vec![0.5f32; 2048],
+}
+```
+
+- 因此该测试没有覆盖：
+  - `AudioChunk { sample_rate: 24000, channels: 1 }`
+  - `SimpleAudioMixer::mix(None, Some(&mic_24k_mono))`
+  - mono -> stereo 的 sample layout。
+  - 24k -> 48k linear resample 后 duration 是否正确。
+  - mixer 输出是否非静音。
+
+另外：
+
+- artifact-level tests 只检查 stream presence/duration。
+- 没有 decode AAC 后计算 RMS 或 peak。
+- 这会继续漏掉“文件可播放但无声”的真实失败形态。
+
+建议修复方向：
+
+1. 增加真实 mixer -> writer integration test：
+
+```rust
+let mic = AudioChunk {
+    timestamp: MediaTimestamp::from_nanos(ts),
+    sample_rate: 24_000,
+    channels: 1,
+    samples: Arc::from(vec![0.5; 480].into_boxed_slice()), // 20ms @ 24k mono
+};
+let mixed = SimpleAudioMixer::new().mix(None, Some(&mic)).unwrap();
+writer.push_audio(mixed).unwrap();
+```
+
+2. 对 `mixed` 做 exact assertion：
+   - `sample_rate == 48000`
+   - `channels == 2`
+   - `samples.len()` 对应约 20ms stereo。
+   - RMS 大于阈值。
+3. 对输出 artifact decode audio stream 计算 RMS：
+   - `audio_rms > 0.01` 或依据测试样本幅度设置阈值。
+4. 把测试名称改准确，避免注释和真实路径不一致。
+
+建议测试：
+
+- `audio_mixer_resamples_24khz_mono_to_non_silent_48khz_stereo`
+- `ffmpeg_writer_records_non_silent_mixed_24khz_mono_mic`
+- `ffmpeg_export_preserves_non_silent_audio_rms`
+- `source_artifact_inspection_reports_audio_rms`
+
+### 23.10 Important 4：source/export artifact validation 缺少 audio RMS / peak 维度
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_common.rs:8-20`
+- `src-tauri/src/media/ffmpeg_common.rs:58-148`
+- `src-tauri/src/media/ffmpeg_common.rs:156-223`
+- `src-tauri/src/media/ffmpeg_common.rs:230-276`
+
+当前 `MediaArtifactInspection` 包含：
+
+- file size
+- width/height
+- duration
+- video/audio stream duration
+- video frame count / avg fps
+- has video stream
+- has audio stream
+
+缺少：
+
+- decoded audio sample count。
+- audio RMS。
+- audio peak。
+- audio stream sample rate / channels。
+- 是否全静音。
+
+为什么重要：
+
+- BUG-004/006 的 duration drift 已经需要 stream duration validation。
+- BUG-005 新问题则需要 content validation。
+- “has_audio_stream=true 且 audio_duration_nanos > 0” 对新 BUG 没有足够鉴别力。
+
+建议修复方向：
+
+1. `MediaArtifactInspection` 增加：
+
+```rust
+pub audio_sample_count: Option<u64>,
+pub audio_rms: Option<f64>,
+pub audio_peak: Option<f32>,
+pub audio_sample_rate: Option<u32>,
+pub audio_channels: Option<u16>,
+```
+
+2. 新增可选 decode helper：
+
+```rust
+pub fn inspect_media_artifact_with_audio_stats(path: &Path) -> AppResult<MediaArtifactInspection>
+```
+
+3. 如果担心常规 validation 变慢，可以分两层：
+   - 快速 validation：stream/duration/dimensions。
+   - audio requested validation：decode audio RMS。
+4. 阈值建议：
+   - 测试合成样本可使用较高阈值，例如 `rms > 0.05`。
+   - 产品真实录制可先只记录 diagnostics，不立即硬失败；后续再根据人工 gate 调整阈值。
+
+建议测试：
+
+- `inspect_media_artifact_reports_nonzero_audio_rms`
+- `inspect_media_artifact_reports_zero_rms_for_silent_track`
+- `validate_requested_audio_rejects_silent_aac`
+
+### 23.11 BUG.md 预防规则复核
+
+#### BUG-004：导出视频无法播放 / time base
+
+当前状态：本轮未发现新回退。
+
+- `ffmpeg_writer.rs` 和 `trim_exporter.rs` 仍基于真实 stream time base 做 packet rescale。
+- `ffmpeg_common.rs` 仍检查 stream-level duration。
+- 本轮新问题不是 video PTS 被压缩，而是 audio content 缺失。
+
+#### BUG-005：音频捕获失败 / 新无声问题
+
+当前状态：**未关闭，仍属于未解决。**
+
+已符合：
+
+- CPAL 使用 device default config。
+- writer 处理 first-gap、middle/tail gap、overlap、out-of-order。
+- partial-overlap drain bug 已修。
+- AudioMixer metadata 防御已补。
+
+未符合：
+
+- 请求了系统音频/麦克风时，缺少 source-aware delivery metrics。
+- 有 mic UI level 不代表 mic 进入 writer。
+- system-only chunk 可能先占住 writer timeline，late mic-only chunk 被 overlap 丢弃。
+- source/export validation 不检查 audio RMS/peak。
+- silent AAC fallback 会掩盖 requested audio capture failure。
+- drop count 没有进入错误、结果或 metadata。
+- 真实 24kHz/1ch mixer -> writer path 自动化测试不足。
+
+建议给 BUG-005 新增预防规则：
+
+- “请求录制音频源”必须和“实际写入非静音音频内容”建立可验证 contract；不能只检查 audio stream 是否存在。
+- 麦克风 UI 电平只能作为 capture-side indicator，不能作为 recording artifact 成功证据。
+- system/mic synchronizer 必须 source-aware，不能让先到的静音单源 chunk 占用时间轴并吞掉后到的另一源。
+- capture channel drop count 必须进入 diagnostics；音频 drop 不能完全静默。
+- silent AAC track 只能用于“没有请求音频”的录屏兼容；用户请求音频时 silent track 必须触发 warning/error。
+
+#### BUG-006：系统音频稀疏时间轴
+
+当前状态：duration drift 方向大体符合，但新无声问题暴露了另一个缺口。
+
+- 稀疏系统音频需要 padding silence，但 padding 不能掩盖“用户正在播放系统音频但 capture 没有非静音内容”。
+- 稀疏音频处理应记录 system source RMS 和 chunk count，帮助区分：
+  - 用户确实没有播放声音。
+  - 系统音频 capture 没有拿到数据。
+  - 拿到全零数据。
+  - 拿到数据但被 writer/synchronizer 丢弃。
+
+#### BUG-007：导出视频没有美化 / raw cursor hidden contract
+
+当前状态：本轮未发现新回退。
+
+- `render_cursor_overlay=false` no-op timeline 已有 integration test。
+- `render_cursor_overlay=true` 但 empty frames 会失败。
+- 本轮新问题主要是 audio pipeline。
+
+#### BUG-008：cursor overlay scale/radius 数值溢出 panic
+
+当前状态：本轮未发现新回退。
+
+- cursor overlay finite/clamp/i64 arithmetic 仍在。
+- 新问题不涉及 cursor rasterization。
+
+### 23.12 建议整改 Phase
+
+#### R1：先加 audio diagnostics 和 requested-audio contract
+
+目标：
+
+- 先让下一轮真实设备验证能回答“音频在哪一层丢了”，避免继续猜。
+
+建议步骤：
+
+1. 在 `MacRecordingService::start(...)` 捕获：
+   - `requested_system_audio`
+   - `requested_microphone`
+   - selected microphone device name/config。
+2. 在 consumer thread 增加 diagnostics：
+   - system chunks received / dropped。
+   - mic chunks received / dropped。
+   - mixed chunks written。
+   - writer push_audio failures。
+   - system/mic/mixed RMS max。
+   - generated silent track。
+3. 将 diagnostics 写入：
+   - `RecordingResult`（若不想改前端 API，可先写 sidecar metadata）。
+   - `TrimMetadata` 或新增 recording diagnostics JSON。
+   - terminal log。
+4. 当 requested source 无 chunk 或全 drop 时，返回明确错误或 warning。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml audio_diagnostics
+cargo test --manifest-path src-tauri/Cargo.toml macos_service
+```
+
+建议新增测试：
+
+- `consumer_records_system_audio_chunk_count`
+- `consumer_records_mic_chunk_count_before_and_after_synchronizer`
+- `consumer_reports_requested_mic_without_written_audio`
+- `consumer_reports_audio_channel_drop_counts`
+
+#### R2：修 AudioSynchronizer final drain 和 late mic 被 overlap 吞掉的问题
+
+目标：
+
+- 麦克风 UI 有输入时，不能在 system+mic 场景中被 synchronizer/writer 丢弃。
+
+建议步骤：
+
+1. 新增 `drain_final()`，停止录制时 flush all remaining system/mic chunks。
+2. 将 synchronizer output 改为 source-aware。
+3. 对 late mic / sparse system / misaligned chunks 做测试。
+4. 如发现 system-only 先占位导致 mic 被 writer overlap 丢弃，重构为 timeline bucket mixer：
+   - 对同一时间窗口内的 system/mic 先合成。
+   - 缺源补 0。
+   - 只输出一个单调 mixed timeline。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml audio_synchronizer
+cargo test --manifest-path src-tauri/Cargo.toml macos_service
+```
+
+建议新增测试：
+
+- `synchronizer_final_drain_flushes_remaining_mic_chunks`
+- `synchronizer_late_mic_is_not_lost_after_system_only_output`
+- `synchronizer_preserves_mic_rms_when_system_audio_is_silent`
+- `consumer_system_and_mic_recording_writes_non_silent_mixed_audio`
+
+#### R3：给 FFmpeg artifact 增加 audio RMS / peak inspection
+
+目标：
+
+- 自动化测试能区分“有音轨”和“录到了声音”。
+
+建议步骤：
+
+1. 扩展 `MediaArtifactInspection`，增加 audio stats 字段。
+2. 用 FFmpeg decoder 解 AAC，计算 RMS/peak。
+3. 在 tests 中对 synthetic non-silent audio 做 RMS assertion。
+4. 对 silent fallback 做独立测试，明确只在 no-audio-request 场景允许。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_common
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_records_non_silent
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg --test ffmpeg_export
+```
+
+#### R4：补真实 24kHz/1ch mixer -> writer integration test
+
+目标：
+
+- 让 BUG-005 的“设备实际 24000Hz/1ch”场景进入自动化，而不是只测已经格式化好的 `MixedAudioChunk`。
+
+建议步骤：
+
+1. 构造 `AudioChunk { sample_rate: 24000, channels: 1 }`。
+2. 走 `SimpleAudioMixer::mix(None, Some(&mic))`。
+3. 将 `MixedAudioChunk` 推给 writer。
+4. 检查：
+   - mixed sample layout。
+   - source artifact A/V drift。
+   - decoded audio RMS。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_records_non_silent_mixed_24khz_mono_mic
+```
+
+#### R5：修 writer queue backpressure 和 audio starvation
+
+目标：
+
+- 避免 FFmpeg 编码压力导致音频 capture queue drop，并满足 Phase 6 nonblocking / byte-budgeted 计划。
+
+建议步骤：
+
+1. `FfmpegRecordingWriter` queue 改 byte budget。
+2. `send()` 改 `try_send()`。
+3. queue full 返回结构化错误或有记录 drop。
+4. consumer loop 不再无限先 drain video；改 bounded batch 或交替 drain。
+5. drop count 进入 diagnostics。
+6. 修改/删除 `ffmpeg_writer_queue_backpressure_blocks_producer`，不要把 blocking producer 当成长期正确行为。
+
+验证：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_queue
+cargo test --manifest-path src-tauri/Cargo.toml macos_service
+```
+
+#### R6：处理蓝牙耳机麦克风兼容性
+
+目标：
+
+- 把“录制时耳机回放变差”从代码 bug 和平台行为中拆清楚，给用户可操作的设备选择。
+
+建议步骤：
+
+1. UI 支持 microphone device selection。
+2. macOS service 保留所选 device name，不再总是 `None`。
+3. 对疑似蓝牙耳机麦克风显示提示：
+   - 建议使用内置麦克风。
+   - 蓝牙耳机只作为输出。
+4. 更新 `docs/platform-diff/macos-compatibility.md`：
+   - 增加 Bluetooth headset profile 限制。
+   - 增加手动验证矩阵。
+
+验证：
+
+```bash
+npm test -- --run
+cargo test --manifest-path src-tauri/Cargo.toml cpal_microphone
+```
+
+手动 Gate：
+
+1. 蓝牙耳机输出 + 蓝牙耳机麦克风输入：记录是否降质。
+2. 蓝牙耳机输出 + 内置麦克风输入：确认回放是否改善。
+3. 两种组合下检查 source artifact audio RMS。
+
+#### R7：真实设备 manual gate 收口
+
+目标：
+
+- BUG-005 不能靠 synthetic tests 关闭。
+
+必须验证：
+
+1. `npm run tauri:dev:ffmpeg`
+2. 场景 A：只开启系统音频，播放音乐或视频 10 秒。
+3. 场景 B：只开启麦克风，真实设备为 `24000Hz/1ch` 或等价非 48kHz/stereo 输入，说话 10 秒。
+4. 场景 C：同时开启系统音频和麦克风，系统播放音乐，麦克风说话 10 秒。
+5. 场景 D：蓝牙耳机输出 + 蓝牙耳机麦克风输入。
+6. 场景 E：蓝牙耳机输出 + 内置麦克风输入。
+7. 每个场景验证：
+   - source artifact 可播放。
+   - export artifact 可播放。
+   - video/audio duration drift <= 1s。
+   - decoded audio RMS > 阈值（有音频请求时）。
+   - diagnostics 中 source chunk count、mixed chunk count、drop count 符合预期。
+
+建议记录 evidence 到：
+
+- `BUG.md` BUG-005
+- `HANDOFF.md`
+- `tests/phase-6-w11-w12-checklist.md`
+- `docs/platform-diff/macos-compatibility.md`
+
+### 23.13 Ready To Merge 判断
+
+Ready to merge：**No**
+
+原因：
+
+1. 新 BUG 证明 BUG-005 仍未关闭：旧 duration drift 修复后，音频内容仍可能缺失。
+2. 当前 validation 只证明“有音轨”，不能证明“录到了请求的系统音频/麦克风”。
+3. mic level UI 计算点位于 synchronizer 之前，不能作为 artifact 成功证据。
+4. synchronizer 可能输出重叠的 system-only / mic-only chunks，后到 mic 被 writer overlap 规则丢弃。
+5. live FFmpeg writer 仍是 blocking backpressure，capture/audio queue drop 没有进入诊断闭环。
+6. 蓝牙耳机麦克风 profile 切换需要产品和平台兼容策略，不能只当作 writer bug。
+7. Native Safety Gate 和 1080p 10 分钟压力 Gate 仍未完成。
+
+### 23.14 建议对外状态表述
+
+建议后续整改前使用下面口径：
+
+> Phase 6 第 22 节整改已实质推进：partial-overlap AAC drain、AudioMixer metadata 防御、cursor overlay no-op/required tests、terminal progress test 和 synthetic helper artifact contract 均已补齐，旧的 10s video / 53s audio duration drift 已经在人工验证中不再出现。但 BUG-005 不能关闭：新的真实设备验证显示 source/export artifact 仍可能无系统音频和麦克风声音。当前证据指向 audio source delivery/content validation 缺口，而不是单纯的 writer duration inflation：mic level 只证明 capture-side 有输入，不证明 mic 被 synchronizer/writer 写入；silent AAC fallback 和 artifact stream validation 会掩盖 requested audio capture failure；system+mic 场景还可能因 synchronizer 输出重叠单源 chunk 导致 late mic 被 writer overlap 丢弃。下一轮应优先增加 audio diagnostics 与 requested-audio contract，修复 synchronizer final drain/source-aware mixing，增加 audio RMS/peak artifact validation，再处理 writer byte-budgeted nonblocking queue 和蓝牙耳机麦克风兼容策略。
+
+## 24. Phase 6 FFmpeg playable export 第 23 节整改后复审与 BUG-005 新无声/蓝牙问题定位（2026-06-01，HEAD `014d28c` + dirty worktree）
+
+### 24.1 审查输入与范围
+
+本节是对第 23 节整改后的复审，重点审查 Phase 6 相关代码改动是否真正关闭 BUG-005，并定位 `BUG.md` 新记录的两个真实设备问题。
+
+输入文件：
+
+- `BUG.md`
+  - BUG-005 新验证结果：源视频和导出视频播放时听不见系统音频/麦克风声音。
+  - BUG-005 新验证结果：同时开启系统音频和麦克风录制时，耳机里的系统输出音质变差、断断续续，结束录制后恢复。
+  - 关键日志：
+    - system+mic：`system_chunks_received=778`, `mic_chunks_received=770`, `mixed_chunks_written=1548`, `system_rms_max=0.015429106`, `mic_rms_max=0.24477473`, `mixed_rms_max=0.23828194`。
+    - system-only：`system_chunks_received=650`, `mic_chunks_received=0`, `mixed_chunks_written=650`, `system_rms_max=0.0105706565`, `mixed_rms_max=0.0105706565`。
+- `HANDOFF.md`
+  - Phase 6 第 23 节整改记录。
+  - 当前状态仍写明真实设备 manual gate 待完成。
+- `docs/architecture/project-architecture-and-overall-planning.md`
+  - Rust 侧音视频闭环、前端不得接触帧流、系统音频 + 麦克风为 MVP Must Have。
+- `docs/superpowers/plans/2026-05-29-phase-6-export-presets-local-license.md`
+- `docs/superpowers/plans/2026-05-30-phase-6-ffmpeg-playable-export.md`
+- `docs/platform-diff/macos-compatibility.md`
+- Phase 6 相关代码：
+  - `src-tauri/src/media/audio_synchronizer.rs`
+  - `src-tauri/src/media/audio_mixer.rs`
+  - `src-tauri/src/media/ffmpeg_writer.rs`
+  - `src-tauri/src/media/ffmpeg_common.rs`
+  - `src-tauri/src/media/trim_exporter.rs`
+  - `src-tauri/src/media/recording_writer.rs`
+  - `src-tauri/src/platform/macos_service.rs`
+  - `src-tauri/src/platform/macos/screen_capture_kit.rs`
+  - `src-tauri/src/platform/macos/cpal_microphone.rs`
+  - `src-tauri/src/test_support/ffmpeg_helpers.rs`
+  - `src-tauri/tests/ffmpeg_export.rs`
+  - `src/App.tsx`
+  - `src/App.test.tsx`
+
+审查重点：
+
+1. Phase 6 第 23 节整改是否完整满足上一轮 review 和 `BUG.md` 预防规则。
+2. BUG-005 新无声问题是否有明确数据流证据链。
+3. 蓝牙耳机录制时输出音质变差是否属于 writer bug、capture bug，还是 macOS 设备 profile 限制。
+4. 下一轮编码应优先处理哪些 root cause，避免继续围绕症状补丁打转。
+
+### 24.2 总体结论
+
+Ready to merge：**No**
+
+BUG-005 当前状态：**仍未关闭**。
+
+第 23 节整改有实质价值，但只能证明若一个 `MixedAudioChunk` 已经正确到达 writer，writer/mixer 的若干 synthetic 路径可以写出非静音 AAC。它没有证明真实录制中的 requested audio source 最终进入 source/export artifact，也没有覆盖当前人工验证暴露的 live system+mic 时序。
+
+本轮判断：
+
+1. 旧问题 `10s video / 53s audio` duration drift 已经被前几轮整改明显缓解，`BUG.md` 新日志没有再出现该 drift 报错。
+2. 新问题是更严格的内容正确性问题：source/export artifact 可以完成生成，但播放无系统音频、无麦克风声音。
+3. 当前 diagnostics 显示 capture/consumer 侧收到了音频 chunk，RMS 也非零，但 validation 没有用 artifact decoded RMS/peak 建立 requested-audio contract。
+4. system+mic 场景中 `mixed_chunks_written = system_chunks_received + mic_chunks_received` 是关键异常信号：这不像真正混合后的 chunk 数，更像 system-only chunk 和 mic-only chunk 被分别写入同一条 writer timeline。
+5. `AudioSynchronizer::drain_final()` 只处理停止录制时残留队列，不解决录制过程中 live drain 先发 system-only、后发 mic-only 的时间线占用问题。
+6. `FfmpegRecordingWriter` 的 overlap 逻辑会丢弃已经被 `audio_timeline_cursor` 覆盖的 late chunk；如果 synchronizer 先输出 system-only，后到 mic 就可能被 writer 当作 fully overlapped chunk 丢掉。
+7. 蓝牙耳机录制时输出音质变差高度符合 macOS Bluetooth headset HFP/profile 切换行为，应作为平台兼容和设备选择问题处理，不应仅按 FFmpeg writer bug 修。
+
+### 24.3 自动化验证证据
+
+本轮复审运行过以下 focused verification：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg audio_synchronizer -- --nocapture
+```
+
+结果：
+
+- 12 个 `audio_synchronizer` 相关测试通过。
+- 该结果只证明现有同步器单测绿，不证明真实 live pairing 问题不存在。
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_records_non_silent_mixed_24khz_mono_mic -- --nocapture
+```
+
+结果：
+
+- `ffmpeg_writer_records_non_silent_mixed_24khz_mono_mic` 通过。
+- 该测试证明 24kHz/1ch mic chunk 经 mixer 后，单源 mixed chunk 写入 writer 可以得到非静音 artifact。
+- 它没有覆盖 system+mic 双源 live drain 时序，也没有覆盖真实 source/export artifact requested-audio contract。
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg inspect_media_artifact_reports_nonzero_audio_rms -- --nocapture
+```
+
+结果：
+
+- `inspect_media_artifact_reports_nonzero_audio_rms` 通过。
+- 该测试证明 `ffmpeg_common` 已具备解码 audio RMS/peak 的能力。
+- 当前缺口是 validation 没有把这项能力用于 requested-audio 成功判定。
+
+测试输出中的既有 warnings：
+
+- `unused_unsafe`
+- `private_interfaces`
+- macOS FFI struct naming / dead code warnings
+
+这些 warnings 本轮未作为 BUG-005 根因处理，但 `private_interfaces` 后续可以顺手修正为可见性一致，避免 review 噪音。
+
+### 24.4 已完成整改的有效部分
+
+第 23 节整改中，下列方向是正确且有保留价值的：
+
+1. `RecordingDiagnostics` 增加了 requested source、chunk count、drop count、RMS max、silent track 等字段。
+2. `macos_service.rs` consumer loop 现在将 video drain 限制为 bounded batch，避免无限 drain video 饿死音频。
+3. `FfmpegRecordingWriter::push_video()` / `push_audio()` 已改为 non-blocking `try_send()`，比 blocking `send()` 更符合录制主链路安全要求。
+4. `ffmpeg_common.rs` 已能解码 AAC 并计算 `audio_sample_count` / `audio_rms` / `audio_peak` / `audio_sample_rate` / `audio_channels`。
+5. `ffmpeg_writer_records_non_silent_mixed_24khz_mono_mic` 把 `24000Hz/1ch` 麦克风设备形态纳入了 synthetic integration test。
+6. `AudioSynchronizer::drain_final()` 对停止录制时剩余队列有帮助，能避免最后一批未配对 chunk 永久滞留。
+
+但这些整改没有覆盖 `BUG.md` 新验证暴露的主路径：真实录制过程中 system/mic 的 live chunk 时序、writer timeline overlap、以及 source/export artifact decoded content validation。
+
+### 24.5 Critical 1：BUG-005 仍没有 requested-audio artifact contract
+
+证据：
+
+- `ffmpeg_common.rs` 已在 `inspect_media_artifact()` 中尝试 decode audio stats。
+- `MediaArtifactInspection` 已有 `audio_rms` / `audio_peak`。
+- 但 `validate_source_artifact()` 仍只检查：
+  - file size
+  - video stream
+  - audio stream
+  - duration
+  - video/audio duration drift
+- `validate_export_artifact()` 仍只检查：
+  - file size
+  - video stream
+  - audio stream
+  - dimensions
+  - duration
+  - video/audio duration drift
+- Tauri export 成功后只调用 `validate_export_artifact(output, width, height)`，没有传入本次录制是否请求过 system/mic。
+
+影响：
+
+- 用户请求系统音频或麦克风时，最终 MP4 只要有 AAC stream、duration 不漂移，就可能被判定为成功。
+- source/export artifact 可能是“有音轨但听不见”的假成功。
+- `BUG.md` 预防规则没有被满足：
+  - “请求录制音频源”必须和“实际写入非静音音频内容”建立可验证 contract。
+  - silent AAC track 只能用于没有请求音频的录屏兼容。
+  - artifact validation 必须包含 audio RMS/peak 检查。
+
+根因判断：
+
+这是一个 contract 缺失，而不是单个 codec API 调用错误。当前代码已经具备计算 decoded RMS/peak 的基础设施，但没有把“requested audio source”作为 validation 输入，因此无法区分：
+
+- 用户没有请求音频，生成 silent AAC 是预期行为。
+- 用户请求了系统音频/麦克风，但 artifact 仍然静音，这是失败。
+
+建议修复：
+
+1. 新增 source 侧 requested-audio validation：
+
+   ```rust
+   pub struct RequestedAudioContract {
+       pub requested_system_audio: bool,
+       pub requested_microphone: bool,
+       pub allow_silent_when_no_audio_requested: bool,
+       pub min_rms: f64,
+       pub min_peak: f32,
+   }
+   ```
+
+2. 新增或扩展 validation API：
+
+   ```rust
+   pub fn validate_source_artifact_with_audio_contract(
+       path: &Path,
+       contract: RequestedAudioContract,
+   ) -> AppResult<MediaArtifactInspection>
+   ```
+
+3. export 侧也要有等价 contract：
+
+   ```rust
+   pub fn validate_export_artifact_with_audio_contract(
+       path: &Path,
+       expected_width: u32,
+       expected_height: u32,
+       contract: RequestedAudioContract,
+   ) -> AppResult<()>
+   ```
+
+4. 当 `requested_system_audio || requested_microphone` 为 true 时，至少要求：
+   - audio stream exists。
+   - decoded `audio_sample_count > 0`。
+   - `audio_rms >= min_rms` 或 `audio_peak >= min_peak`。
+   - 若 chunk count/RMS diagnostics 与 artifact RMS 冲突，记录为 hard warning 或 error。
+
+5. 当没有请求任何音频源时：
+   - silent AAC track 可以继续作为兼容性设计存在。
+   - 但 diagnostics/result 需要明确标记 generated silent track，而不是把它和 requested audio success 混为一谈。
+
+建议测试：
+
+- `validate_source_artifact_rejects_silent_audio_when_audio_requested`
+- `validate_export_artifact_rejects_silent_audio_when_audio_requested`
+- `validate_source_artifact_allows_silent_track_when_no_audio_requested`
+- `validate_export_artifact_preserves_non_silent_audio_rms`
+- `recording_result_marks_generated_silent_track_only_when_no_audio_requested`
+
+### 24.6 Critical 2：`AudioSynchronizer::drain_mixed()` 仍会把 system/mic 拆成两条单源 timeline
+
+关键证据：
+
+`BUG.md` system+mic 日志：
+
+```text
+system_chunks_received: 778
+mic_chunks_received: 770
+mixed_chunks_written: 1548
+```
+
+`1548 = 778 + 770`。
+
+这不是正常双源混音的形态。若 system 和 mic 大多按同一录制时钟持续到达，真正 source-aware mixed timeline 的 chunk 数应接近两者中的较大值，或接近按固定窗口输出的 bucket 数，而不应该等于两路输入简单相加。
+
+相关代码：
+
+- `macos_service.rs`
+  - 先 drain system audio 到 synchronizer。
+  - 再 drain mic audio 到 synchronizer。
+  - 然后调用 `synchronizer.drain_mixed()`。
+- `audio_synchronizer.rs`
+  - `drain_mixed()` 对每个 system chunk 立即查找 mic queue 中已存在的近邻 chunk。
+  - 没有找到就立刻 `self.mixer.mix(Some(&system), None)` 输出 system-only。
+  - mic 若稍后才到，会变成 mic-only 或被 held/age-out。
+- `ffmpeg_writer.rs`
+  - writer 用 `audio_timeline_cursor` 表示已经写过的 48kHz timeline。
+  - late chunk 若 `target_sample < audio_timeline_cursor` 且完全落入已写范围，直接 `continue` 丢弃。
+
+影响：
+
+- system 先到时，system-only chunk 先占据 writer audio timeline。
+- mic 后到时，即使 capture 侧 RMS 很高，也可能因为 timestamp 已被 system-only 占据，被 writer overlap 逻辑丢掉。
+- 顶部胶囊 mic level 是在 `synchronizer.push_mic(chunk)` 前后计算的 capture-side indicator，只证明麦克风回调有输入，不证明 mic 被写进 artifact。
+
+根因判断：
+
+当前架构把“配对混音”和“写入时间线”拆在两个层面，但没有保证同一时间窗口只输出一个 mixed chunk。`drain_final()` 只是最终排空补丁，无法修复录制期间已经写入 writer 的错误单源 timeline。
+
+建议修复：
+
+1. 不再让 `drain_mixed()` 按“system chunk 到达即输出”工作。
+2. 将 `AudioSynchronizer` 改为 timeline window / bucket merger：
+   - 以 10ms 或 20ms 为统一输出窗口。
+   - system/mic chunk 按 timestamp 切入窗口。
+   - 每个窗口最多输出一个 `SynchronizedAudioChunk`。
+   - 缺失源用 0 填充，而不是输出另一条重叠单源 chunk。
+   - 输出 chunk 携带 `has_system` / `has_mic` / `system_rms` / `mic_rms` / `mixed_rms` / `window_start` / `window_end`。
+3. live drain 需要 watermark：
+   - 只有当窗口结束时间早于 `min(latest_system_ts, latest_mic_ts) - hold_window`，或其中一路未启用时，才输出该窗口。
+   - hold window 可以从 20ms 起步，避免 10ms callback jitter 导致大量拆流。
+4. 停止录制时 `drain_final()` 输出所有剩余窗口，但仍保持“一窗口一 mixed chunk”的规则。
+5. writer 继续保留 gap/overlap 防御，但不再承担 system/mic 配对职责。
+
+建议测试：
+
+- `synchronizer_outputs_one_chunk_per_window_for_system_and_mic`
+- `synchronizer_late_mic_within_hold_window_is_mixed_not_dropped`
+- `synchronizer_system_first_then_mic_preserves_mic_rms`
+- `synchronizer_system_silent_mic_nonzero_outputs_nonzero_mixed`
+- `synchronizer_reports_system_only_and_mic_only_window_counts`
+- `writer_does_not_drop_late_mic_after_synchronizer_window_merge`
+- `consumer_system_and_mic_realistic_interleaving_writes_non_silent_artifact`
+
+### 24.7 Critical 3：diagnostics 仍无法证明音频实际被编码进 artifact
+
+现状：
+
+- `RecordingDiagnostics::mixed_chunks_written` 在 `writer.push_audio(mixed)` 返回 `Ok` 后递增。
+- `FfmpegRecordingWriter::push_audio()` 的 `Ok` 只代表 message 成功进入 encoder queue。
+- 真正的编码和 timeline overlap 处理发生在 worker thread 的 `EncoderMessage::Audio` 分支。
+- worker 中 fully-overlapped chunk 会被 `continue` 丢弃，但不会反馈到 `RecordingDiagnostics`。
+
+影响：
+
+- 日志中 `mixed_chunks_written > 0` 不能证明 AAC 里有对应音频。
+- `mixed_rms_max > 0` 只证明 consumer 准备推给 writer 的 samples 非零，不证明 worker 最终编码进文件。
+- 当前 diagnostics 可能给出“看起来有音频”的假阳性，和用户播放无声现象冲突。
+
+建议修复：
+
+1. 重命名现有字段：
+   - `mixed_chunks_written` -> `mixed_chunks_queued`
+2. 增加 writer/worker 侧 counters：
+   - `audio_chunks_received_by_worker`
+   - `audio_chunks_appended`
+   - `audio_chunks_discarded_full_overlap`
+   - `audio_chunks_trimmed_partial_overlap`
+   - `audio_gap_silence_frames_inserted`
+   - `aac_frames_encoded`
+   - `artifact_audio_rms`
+   - `artifact_audio_peak`
+3. worker 返回 `RecordingResult` 时携带 writer diagnostics。
+4. `RecordingDiagnostics` 与 `RecordingResult` 做合并，最终写入 terminal log 和 sidecar metadata。
+
+建议测试：
+
+- `writer_reports_fully_overlapped_audio_discard_count`
+- `writer_reports_encoded_aac_frame_count`
+- `recording_diagnostics_distinguishes_queued_from_encoded_audio`
+- `requested_audio_with_all_chunks_discarded_fails_validation`
+
+### 24.8 Important 1：system-only 无声问题不能只看 `system_rms_max`
+
+`BUG.md` system-only 日志显示：
+
+```text
+requested_system_audio: true
+requested_microphone: false
+system_chunks_received: 650
+mixed_chunks_written: 650
+system_rms_max: 0.0105706565
+mixed_rms_max: 0.0105706565
+generated_silent_track: false
+```
+
+这说明 ScreenCaptureKit audio callback 至少产生了 samples，且 consumer 侧 RMS 非零。用户仍听不见系统音频，可能有几类原因：
+
+1. system audio RMS 太低，低于真实可听阈值或播放器音量很小。
+2. ScreenCaptureKit 捕获到了近似静音/环境噪声级别的系统音频，而不是用户预期的应用输出。
+3. writer worker 实际编码时因 overlap、queue、flush 或 sample format 问题导致 artifact RMS 低/零。
+4. export 阶段重新编码时丢失或衰减了 source audio。
+
+当前代码无法区分这些原因，因为日志没有 artifact decoded RMS，也没有 source/export 分别的 audio stats。
+
+建议修复：
+
+1. 每次录制结束后记录 source artifact：
+   - decoded RMS
+   - decoded peak
+   - sample count
+   - audio stream duration
+   - audio sample rate/channels
+2. 每次导出结束后记录 export artifact 同样字段。
+3. 对 requested audio 场景给出阈值：
+   - 初始建议 `min_peak >= 0.02` 或 `min_rms >= 0.003`，阈值先偏保守。
+   - synthetic tests 可以用更高阈值，例如 `rms > 0.01`。
+4. 如果 capture-side RMS 非零但 artifact RMS 低于阈值，错误信息应明确指向 writer/export path。
+5. 如果 capture-side RMS 本身低于阈值，错误信息应提示系统音频捕获输入过低或未捕获到有效输出。
+
+建议测试：
+
+- `system_only_source_artifact_reports_nonzero_rms`
+- `system_only_export_preserves_nonzero_rms`
+- `capture_rms_nonzero_but_artifact_silent_is_reported`
+- `silent_system_audio_when_requested_returns_warning_or_error`
+
+### 24.9 Important 2：`FfmpegRecordingWriter::finish()` 仍有 blocking flush 风险
+
+第 23 节整改把 `push_video()` 和 `push_audio()` 改成了 `try_send()`，这是正确方向。但 `finish()` 仍然调用：
+
+```rust
+self.tx.send(EncoderMessage::Flush)
+```
+
+影响：
+
+- 如果 encoder queue 已满，或者 worker 因 FFmpeg/muxer 卡住，停止录制路径仍可能阻塞。
+- 这不一定是当前无声问题的直接根因，但仍违反“录制主链路不能被编码压力阻塞”的安全目标。
+- queue 仍按 message count bounded，而不是按 byte budget bounded。高分辨率 video frame 和小 audio chunk 的内存成本差异很大，单纯 `64 messages` 不能表示真实内存压力。
+
+建议修复：
+
+1. `finish()` 使用 bounded wait 策略：
+   - 尝试 `try_send(Flush)`。
+   - 若 full，则短暂 drain/wait 或返回结构化错误。
+   - join worker 设置 timeout 或通过 worker state 监测。
+2. queue 改为 byte-budgeted：
+   - video message 按 buffer bytes 计入。
+   - audio message 按 samples bytes 计入。
+   - 超预算时优先丢 video 或返回可诊断错误，不能无声吞掉音频。
+3. diagnostics 记录 queue full：
+   - video queue full count
+   - audio queue full count
+   - flush enqueue wait duration
+
+建议测试：
+
+- `ffmpeg_writer_finish_does_not_block_forever_when_queue_full`
+- `ffmpeg_writer_reports_audio_queue_full`
+- `ffmpeg_writer_byte_budget_counts_video_buffer_size`
+
+### 24.10 Important 3：测试 helper 仍会掩盖 queue/backpressure 问题
+
+`create_synthetic_source_artifact()` 当前对 writer push errors 使用：
+
+```rust
+let _ = writer.push_video(frame);
+let _ = writer.push_audio(chunk);
+```
+
+影响：
+
+- integration tests 可能在 queue full 时丢掉部分帧/音频，但仍进入 `finish()`。
+- 这会让测试产物不代表“所有计划输入均被接受”。
+- 对 artifact playability smoke test 可以容忍，但对证明音频 contract 不够严格。
+
+建议修复：
+
+1. helper 增加 strict 模式：
+   - `create_synthetic_source_artifact_strict(...)`
+   - 任一 push error 立即返回 Err。
+2. 对需要模拟实时推送的测试，显式 sleep 或按 real-time pacing 发送。
+3. 对 queue pressure 测试，单独断言 drop/error 行为，不混入 artifact correctness helper。
+
+建议测试：
+
+- `synthetic_source_helper_strict_fails_on_push_error`
+- `synthetic_source_helper_reports_audio_push_failures`
+
+### 24.11 Important 4：蓝牙耳机录制时输出音质变差属于 macOS 设备 profile 限制
+
+现象：
+
+- 同时开启系统音频和麦克风录制时，耳机里听到的系统输出音质变差、断断续续。
+- 结束录制后恢复。
+- 日志显示麦克风实际配置为 `24000Hz/1ch`，这高度符合蓝牙耳机 HFP/Hands-Free 输入 profile。
+
+相关代码：
+
+- `src/App.tsx`
+  - 当前 `setAudioConfig()` 固定传 `microphoneDevice: null`。
+  - 后端使用系统默认输入设备。
+- `cpal_microphone.rs`
+  - `microphone_device == None` 时使用 `host.default_input_device()`。
+  - 若默认输入是蓝牙耳机麦克风，打开 input stream 后 macOS 通常会把同一蓝牙设备切到双向通话 profile。
+
+根因判断：
+
+这不是 FFmpeg writer 写文件导致的回放质量问题，而是录制期间打开蓝牙耳机麦克风导致 macOS/Bluetooth profile 切换。它会影响用户正在听到的系统输出，但结束录制关闭 input stream 后恢复。
+
+建议修复：
+
+1. UI 增加麦克风设备选择。
+2. macOS 默认策略：
+   - 如果用户使用蓝牙耳机作为输出，建议麦克风选择内置麦克风。
+   - 不要默认强制使用蓝牙耳机麦克风。
+3. 设备列表中识别常见蓝牙关键词时给提示：
+   - Bluetooth
+   - AirPods
+   - Headset
+   - Hands-Free
+4. 更新 `docs/platform-diff/macos-compatibility.md`：
+   - 蓝牙耳机输入可能触发低带宽通话 profile。
+   - 推荐组合是“蓝牙耳机输出 + 内置麦克风输入”。
+5. manual gate 增加：
+   - 蓝牙耳机输出 + 蓝牙耳机麦克风输入。
+   - 蓝牙耳机输出 + 内置麦克风输入。
+   - 内置扬声器 + 内置麦克风。
+
+建议测试：
+
+- `App` 传递 selected microphone device，而不是固定 `null`。
+- `setAudioConfig` 保存 device name。
+- `cpal_microphone` 按 device name 查找并打开指定输入设备。
+- UI 对疑似蓝牙麦克风展示兼容性提示。
+
+### 24.12 BUG.md 预防规则复核
+
+本轮逐条复核 BUG-005 相关预防规则，结论如下：
+
+1. “麦克风设备 stream config 必须来自设备 default/supported config”
+   - 当前基本满足：`cpal_microphone.rs` 使用 `default_input_config()`。
+2. “writer 对音频 timestamp 的处理必须覆盖 first-gap/middle-gap/tail-gap/overlap/out-of-order”
+   - writer 层基本有覆盖，但与 synchronizer 单源拆流组合后仍会吞掉 late source。
+3. “MixedAudioChunk.samples 布局必须与 channels 元数据一致”
+   - mixer 和 writer synthetic tests 有覆盖，但真实 dual-source live path 仍缺测试。
+4. “writer audio_pts 必须作为单调递增编码器 PTS”
+   - 当前方向正确。
+5. “partial-overlap append 后必须进入 AAC drain loop”
+   - 当前已修。
+6. “AudioMixer 入口必须校验 metadata”
+   - 当前已修。
+7. “请求录制音频源必须和实际写入非静音音频内容建立可验证 contract”
+   - **未满足**。这是本轮 Critical。
+8. “麦克风 UI 电平只能作为 capture-side indicator”
+   - 文档有记录，但代码/诊断仍容易让人误读为 artifact 成功证据。
+9. “system/mic synchronizer 必须 source-aware”
+   - **部分满足**。`drain_final()` source-aware，但 live `drain_mixed()` 输出仍不是 source-aware timeline merger。
+10. “capture channel drop count 必须进入 diagnostics”
+    - 已部分满足，media channel drop count 进入 diagnostics。
+11. “silent AAC track 只能用于没有请求音频”
+    - **未满足**。validation 仍无法知道 requested audio intent。
+12. “artifact validation 必须包含 audio RMS/peak”
+    - **未满足**。inspection 有 RMS/peak，validation 未使用。
+13. “FFmpeg writer queue 必须使用 non-blocking send”
+    - 部分满足：push path non-blocking，finish flush 仍 blocking。
+14. “consumer loop 必须使用 bounded batch 处理视频帧”
+    - 当前已修。
+
+### 24.13 建议整改 Phase
+
+#### R1：先建立 requested-audio artifact contract
+
+目标：
+
+- 把“有音轨”升级为“用户请求音频时，source/export artifact 有可测非静音内容”。
+
+步骤：
+
+1. 在 recording result 或 sidecar metadata 中保存 audio intent：
+   - `requested_system_audio`
+   - `requested_microphone`
+   - `microphone_device`
+2. 扩展 source validation，接收 audio intent。
+3. 扩展 export validation，接收 audio intent。
+4. 对 requested audio 场景检查 decoded RMS/peak。
+5. 没有请求音频时继续允许 silent AAC track，但必须显式标记。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_common
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg validate_source_artifact
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg validate_export_artifact
+```
+
+#### R2：重构 AudioSynchronizer 为 window merger
+
+目标：
+
+- 同一时间窗口只输出一个 mixed chunk，避免 system-only/mic-only 双写同一 timeline。
+
+步骤：
+
+1. 定义 fixed window，例如 10ms 或 20ms。
+2. system/mic chunk 按 timestamp 切片进入 window。
+3. 每个 window 做 source-aware mix。
+4. 缺源补 0。
+5. live drain 通过 watermark 决定可输出窗口。
+6. final drain 输出剩余窗口。
+7. diagnostics 记录 paired/source-only window 数。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml audio_synchronizer
+cargo test --manifest-path src-tauri/Cargo.toml macos_service
+```
+
+#### R3：把 writer worker diagnostics 回传到 RecordingDiagnostics
+
+目标：
+
+- 区分 queued、appended、discarded、encoded。
+
+步骤：
+
+1. worker 统计 audio append/discard/trim/AAC frame counters。
+2. `RecordingResult` 增加 writer diagnostics 或 sidecar diagnostics。
+3. `macos_service.rs` 合并 consumer diagnostics 与 writer diagnostics。
+4. terminal log 输出 artifact decoded RMS/peak。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer
+cargo test --manifest-path src-tauri/Cargo.toml macos_service
+```
+
+#### R4：修 finish blocking 和 byte-budgeted queue
+
+目标：
+
+- 完整满足录制主链路 non-blocking/backpressure 规则。
+
+步骤：
+
+1. `finish()` 不再无限 blocking `send(Flush)`。
+2. queue 从 message-count 改为 byte-budgeted。
+3. queue full diagnostics 区分 video/audio。
+4. 测试覆盖 full queue + finish。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_queue
+```
+
+#### R5：严格化 synthetic artifact helper
+
+目标：
+
+- 让 artifact tests 不再吞掉 push errors。
+
+步骤：
+
+1. 新增 strict helper。
+2. 音频内容相关测试全部使用 strict helper。
+3. backpressure 测试单独保留 tolerant 行为。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_helpers
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg --test ffmpeg_export
+```
+
+#### R6：补麦克风设备选择和蓝牙兼容提示
+
+目标：
+
+- 给用户避开 Bluetooth HFP profile 限制的操作路径。
+
+步骤：
+
+1. 后端暴露 microphone device list。
+2. 前端 UI 选择 device。
+3. `setAudioConfig()` 传递 device name。
+4. 对疑似蓝牙麦克风展示提示。
+5. 文档和 manual gate 更新。
+
+验证命令：
+
+```bash
+npm test -- --run
+cargo test --manifest-path src-tauri/Cargo.toml cpal_microphone
+```
+
+### 24.14 下一轮建议新增测试清单
+
+必须新增的回归测试：
+
+1. `validate_source_artifact_rejects_silent_audio_when_audio_requested`
+2. `validate_export_artifact_rejects_silent_audio_when_audio_requested`
+3. `validate_source_artifact_allows_silent_track_when_no_audio_requested`
+4. `synchronizer_outputs_one_chunk_per_window_for_system_and_mic`
+5. `synchronizer_late_mic_within_hold_window_is_mixed_not_dropped`
+6. `synchronizer_system_first_then_mic_preserves_mic_rms`
+7. `synchronizer_system_silent_mic_nonzero_outputs_nonzero_mixed`
+8. `writer_reports_fully_overlapped_audio_discard_count`
+9. `recording_diagnostics_distinguishes_queued_from_encoded_audio`
+10. `system_only_export_preserves_nonzero_rms`
+11. `synthetic_source_helper_strict_fails_on_push_error`
+12. `app_passes_selected_microphone_device_to_backend`
+
+必须新增的 manual gates：
+
+1. system-only：播放音乐 10 秒，检查 source/export decoded RMS/peak。
+2. mic-only：使用 `24000Hz/1ch` 或等价非 48kHz/stereo 麦克风，说话 10 秒。
+3. system+mic：系统播放音乐，麦克风说话 10 秒，确认二者都可听。
+4. Bluetooth output + Bluetooth mic：记录输出降质是否复现。
+5. Bluetooth output + built-in mic：确认输出质量是否恢复。
+6. 内置扬声器 + 内置麦克风：作为 macOS baseline。
+
+### 24.15 建议编码顺序
+
+推荐按下面顺序整改，避免继续修症状：
+
+1. **先做 validation contract**：让无声 artifact 立刻失败，否则后续改动仍可能被假成功掩盖。
+2. **再做 synchronizer window merger**：解决 system/mic 双源时间线拆流和 late source 被 overlap 吞掉。
+3. **补 writer diagnostics**：让 queued/appended/discarded/encoded 可观测。
+4. **修 finish/backpressure**：消除停止路径 blocking 和 message-count queue 风险。
+5. **严格化 tests helper**：让后续 integration tests 更可信。
+6. **做蓝牙设备选择 UI**：把 macOS 设备限制转化为用户可操作的配置。
+7. **最后跑真实设备 manual gate**：用 `BUG.md` 记录 source/export artifact stats 和主观播放结果。
+
+### 24.16 建议对外状态表述
+
+建议后续整改前使用下面口径：
+
+> Phase 6 第 23 节整改补齐了 diagnostics、RMS inspection、24kHz/1ch synthetic mixer->writer test 和部分 non-blocking writer queue，但 BUG-005 仍不能关闭。真实设备验证显示 source/export artifact 仍可能在请求系统音频或麦克风后播放无声。当前最强证据是 system+mic 日志中 `mixed_chunks_written` 恰好等于 system 与 mic 输入 chunk 总和，说明 live synchronizer 很可能把两个源拆成重叠单源 timeline；后到源再被 writer overlap 逻辑吞掉。另一个耳机音质变差问题高度符合 macOS 蓝牙耳机麦克风触发 HFP/profile 切换，应通过麦克风设备选择和兼容提示处理。下一轮必须先建立 requested-audio artifact RMS/peak contract，再重构 synchronizer 为 source-aware window merger，并补 writer worker diagnostics，之后才能重新做真实设备验收。
+
+## 25. Phase 6 FFmpeg playable export 第 24 节整改后复审与 BUG-009 定位（2026-06-01，HEAD `014d28c` + dirty worktree）
+
+### 25.1 审查背景
+
+本轮复审针对第 24 节整改后的 Phase 6 代码。
+
+输入材料：
+
+1. `docs/architecture/project-architecture-and-overall-planning.md`
+2. `docs/superpowers/plans/2026-05-29-phase-6-export-presets-local-license.md`
+3. `docs/superpowers/plans/2026-05-30-phase-6-ffmpeg-playable-export.md`
+4. `docs/superpowers/reviews/2026-05-30-phase-6-code-review.md` 第 24 节
+5. `BUG.md` 中 `BUG-009`
+6. 当前 dirty worktree 中 Phase 6 相关代码：
+   - `src-tauri/src/media/ffmpeg_writer.rs`
+   - `src-tauri/src/media/audio_synchronizer.rs`
+   - `src-tauri/src/media/audio_mixer.rs`
+   - `src-tauri/src/media/ffmpeg_common.rs`
+   - `src-tauri/src/media/recording_writer.rs`
+   - `src-tauri/src/platform/macos_service.rs`
+   - `src-tauri/src/platform/macos/cpal_microphone.rs`
+   - `src-tauri/src/platform/macos/screen_capture_kit.rs`
+   - `src-tauri/src/test_support/ffmpeg_helpers.rs`
+   - `src/App.tsx`
+   - `src/components/recording-panel.tsx`
+   - `src/lib/tauri.ts`
+
+本轮人工验证新增问题：
+
+- 选择 `系统默认麦克风` 或 `MacBook Pro麦克风` 后，开始录制正常，停止录制时报错。
+- 日志显示采集侧和混音侧 RMS 均非零：
+  - `system_rms_max: 0.014195202`
+  - `mic_rms_max: 0.25784352`
+  - `mixed_rms_max: 0.08818353`
+- writer 侧也显示音频已经进入 worker 并编码：
+  - `audio_chunks_received: 593`
+  - `audio_chunks_appended: 593`
+  - `aac_frames_encoded: 564`
+- 但 artifact contract 解码结果为全静音：
+  - `RMS=0.000000 < 0.003000`
+  - `peak=0.000000 < 0.020000`
+
+### 25.2 总体结论
+
+结论：**不建议合并。BUG-009 是真实代码缺陷，不是麦克风设备不可用，也不是 artifact contract 误报。**
+
+本轮最关键发现：
+
+1. 第 24 节 R1 requested-audio contract 生效了，成功把“采集侧看起来有声、artifact 实际无声”的问题暴露出来。
+2. BUG-009 的主根因在 `FfmpegRecordingWriter` 的音频 timeline gap 分支：遇到 gap 时只补静音，没有追加当前 chunk 的真实 PCM。
+3. 因为真实录制中首个音频 chunk 往往不会从 `0ns` 精确开始，后续 chunk 也经常以 20ms cadence 进入 writer，所以该 bug 会把大量真实音频替换成等长静音。
+4. 当前 writer diagnostics 仍然会把“只补了静音”记录为 `audio_chunks_appended`，导致日志看起来像“真实音频已 append/encoded”，这违反 `BUG.md` 的诊断预防规则。
+5. `AudioSynchronizer` 第 24 节 window merger 仍有重要结构问题：每个 window 只保存一份 `sample_rate/channels`，会把 system/mic 两个 source 的 PCM 套用同一份 metadata。MacBook/default mic 常见 `48kHz/1ch`，system audio 常见 `48kHz/2ch`，这条路径仍可能造成样本布局误判。
+
+Ready to merge：**No**。
+
+BUG-009 状态：**已定位主根因，待按本文方案修复并重新做真实设备 manual gate**。
+
+### 25.3 本轮验证动作与限制
+
+已执行的只读检查：
+
+```bash
+rg -n "RequestedAudioContract|validate_source_artifact|validate_export_artifact|decode_audio_stats|audio_rms|audio_peak|WriterDiagnostics|RecordingDiagnostics|mixed_chunks_queued|paired_window_count|system_only_window_count|mic_only_window_count|drain_mixed|drain_final|AudioSynchronizer|FfmpegRecordingWriter|push_audio|finish\(" src-tauri/src src-tauri/tests
+rg -n "list_microphone_devices|microphone_device|MacBook Pro|default_input_config|build_input_stream|cpal|Bluetooth|蓝牙|HFP|microphone" src-tauri/src src
+sed -n '1,780p' src-tauri/src/media/ffmpeg_writer.rs
+sed -n '1,340p' src-tauri/src/media/audio_synchronizer.rs
+sed -n '400,790p' src-tauri/src/platform/macos_service.rs
+sed -n '1,280p' src-tauri/src/platform/macos/cpal_microphone.rs
+sed -n '1,620p' src-tauri/src/media/ffmpeg_common.rs
+```
+
+未执行自动测试：
+
+- 本轮用户请求是审查、定位和记录方案，没有请求直接修复代码。
+- 因此本节不声称任何测试通过。
+- 后续编码修复时必须先补失败测试，再改实现。
+
+### 25.4 BUG-009 数据流定位
+
+BUG-009 的关键矛盾是：
+
+- capture/consumer 侧确认收到非静音 PCM。
+- writer worker 确认收到 audio chunks，并编码了 AAC frames。
+- artifact 解码后 RMS/peak 为 0。
+
+这说明断点不在麦克风采集入口，也不在 requested-audio contract，而在下面这段链路中：
+
+```text
+非静音 AudioChunk
+  -> AudioSynchronizer / SimpleAudioMixer
+  -> 非静音 MixedAudioChunk
+  -> FfmpegRecordingWriter::push_audio()
+  -> EncoderMessage::Audio
+  -> encoder_worker audio timeline merge
+  -> AAC frame
+  -> MP4 artifact
+```
+
+进一步定位后，断点在 `encoder_worker` 的 `target_sample > audio_timeline_cursor` 分支。
+
+当前逻辑：
+
+```rust
+if target_sample > audio_timeline_cursor {
+    let gap_mono = target_sample - audio_timeline_cursor;
+    let gap_interleaved = (gap_mono * 2) as usize;
+    audio_sample_buffer.extend(std::iter::repeat_n(0.0f32, gap_interleaved));
+    audio_timeline_cursor = target_sample;
+    writer_diag.audio_chunks_appended += 1;
+}
+```
+
+问题：
+
+1. 该分支只向 `audio_sample_buffer` 写入 gap silence。
+2. 没有把当前 `samples` append 进去。
+3. `audio_timeline_cursor` 只推进到 `target_sample`，没有推进到 `target_sample + chunk_mono_frames`。
+4. `audio_chunks_appended` 被递增，但实际 append 的不是当前 chunk PCM，而是静音。
+5. 随后的 `drain_audio_sample_buffer()` 会把这些静音编码成 AAC frame。
+
+这正好解释 BUG-009 日志：
+
+```text
+mixed_rms_max: 0.08818353
+audio_chunks_received: 593
+audio_chunks_appended: 593
+aac_frames_encoded: 564
+artifact decoded RMS=0, peak=0
+```
+
+也就是说：
+
+```text
+consumer mixed_rms_max > 0
+  -> writer.push_audio() 成功
+  -> worker 收到 Audio message
+  -> gap 分支丢掉当前 samples
+  -> 只编码 silence padding
+  -> artifact contract 解码为全静音
+```
+
+### 25.5 为什么选择系统默认麦克风会触发
+
+BUG-009 表现为“选择系统默认麦克风或 MacBook Pro 麦克风后停止录制失败”，但根因不是“默认麦克风无法采集”。
+
+证据：
+
+1. 日志显示 CPAL 成功打开设备：
+
+```text
+麦克风配置协商: 请求 48000Hz/2ch, 设备实际 48000Hz/1ch
+```
+
+2. 日志显示 mic capture 侧 RMS 非零：
+
+```text
+mic_rms_max: 0.25784352
+```
+
+3. 日志显示 mixed chunk RMS 非零：
+
+```text
+mixed_rms_max: 0.08818353
+```
+
+4. 日志显示 writer queue 和 worker 都没有 drop：
+
+```text
+writer_push_audio_failures: 0
+audio_queue_full_count: 0
+audio_chunks_discarded_full_overlap: 0
+audio_chunks_trimmed_partial_overlap: 0
+```
+
+真正触发点是：
+
+- 真实设备音频 chunk 的 timestamp 通常不会全部从 `0ns` 精确开始。
+- 麦克风 timestamp 来自 `AudioSampleClock::with_session_clock()`，首个 chunk 会带录制开始到 CPAL callback 的真实 elapsed offset。
+- `AudioSynchronizer` 输出的 window timestamp 也可能从首个非零 window 开始。
+- 因此 writer 很容易进入 `target_sample > audio_timeline_cursor` 的 gap 分支。
+- 一旦进入该分支，当前实现只补静音，不写真实 PCM。
+
+所以 BUG-009 的准确描述应是：
+
+> 真实设备录制中，只要非静音 audio chunk 前存在 leading gap 或 middle gap，writer 就可能把真实音频替换成静音；第 24 节新增的 requested-audio contract 首次把这个问题稳定暴露为停止录制失败。
+
+### 25.6 Critical 1：writer gap 分支丢弃当前音频 chunk
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_writer.rs`
+- `encoder_worker()`
+- `EncoderMessage::Audio` 分支
+- `if target_sample > audio_timeline_cursor`
+
+当前代码的问题：
+
+```rust
+if target_sample > audio_timeline_cursor {
+    // Gap: pad silence from cursor to target.
+    let gap_mono = target_sample - audio_timeline_cursor;
+    let gap_interleaved = (gap_mono * 2) as usize;
+    audio_sample_buffer.extend(std::iter::repeat_n(0.0f32, gap_interleaved));
+    audio_timeline_cursor = target_sample;
+    writer_diag.audio_chunks_appended += 1;
+}
+```
+
+正确语义应该是：
+
+1. gap 分支先补 `cursor..target_sample` 的静音。
+2. 然后继续 append 当前 chunk 的 `samples`。
+3. cursor 推进到当前 chunk 结束位置。
+
+建议最小修复：
+
+```rust
+if target_sample > audio_timeline_cursor {
+    let gap_mono = target_sample - audio_timeline_cursor;
+    let gap_interleaved = (gap_mono * 2) as usize;
+    audio_sample_buffer.extend(std::iter::repeat_n(0.0f32, gap_interleaved));
+    audio_sample_buffer.extend_from_slice(&samples);
+    audio_timeline_cursor = target_sample + chunk_mono_frames;
+    writer_diag.audio_chunks_appended += 1;
+}
+```
+
+更稳健的实现方式：
+
+1. 抽出 helper，例如 `append_audio_chunk_to_timeline()`。
+2. helper 返回结构化结果：
+   - `silence_frames_padded`
+   - `samples_appended`
+   - `chunk_appended`
+   - `fully_discarded`
+   - `partially_trimmed`
+3. diagnostics 根据 helper 返回结果更新，不在分支里手动散落递增。
+
+建议 helper 伪代码：
+
+```rust
+fn append_audio_chunk_to_timeline(
+    audio_sample_buffer: &mut Vec<f32>,
+    audio_timeline_cursor: &mut i64,
+    target_sample: i64,
+    samples: &[f32],
+) -> TimelineAppendResult {
+    let chunk_mono_frames = (samples.len() / 2) as i64;
+
+    if target_sample > *audio_timeline_cursor {
+        let gap_mono = target_sample - *audio_timeline_cursor;
+        audio_sample_buffer.extend(std::iter::repeat_n(0.0f32, (gap_mono * 2) as usize));
+        audio_sample_buffer.extend_from_slice(samples);
+        *audio_timeline_cursor = target_sample + chunk_mono_frames;
+        return TimelineAppendResult::Appended {
+            silence_frames_padded: gap_mono as u64,
+            appended_frames: chunk_mono_frames as u64,
+        };
+    }
+
+    if target_sample < *audio_timeline_cursor {
+        let overlap_mono = (*audio_timeline_cursor - target_sample) as usize;
+        if overlap_mono >= chunk_mono_frames as usize {
+            return TimelineAppendResult::DiscardedFullOverlap;
+        }
+        let remaining = &samples[overlap_mono * 2..];
+        audio_sample_buffer.extend_from_slice(remaining);
+        let appended_mono = (remaining.len() / 2) as i64;
+        *audio_timeline_cursor += appended_mono;
+        return TimelineAppendResult::TrimmedPartialOverlap {
+            trimmed_frames: overlap_mono as u64,
+            appended_frames: appended_mono as u64,
+        };
+    }
+
+    audio_sample_buffer.extend_from_slice(samples);
+    *audio_timeline_cursor += chunk_mono_frames;
+    TimelineAppendResult::Appended {
+        silence_frames_padded: 0,
+        appended_frames: chunk_mono_frames as u64,
+    }
+}
+```
+
+### 25.7 Important 1：writer diagnostics 的 `audio_chunks_appended` 语义不可信
+
+位置：
+
+- `src-tauri/src/media/recording_writer.rs`
+- `src-tauri/src/media/ffmpeg_writer.rs`
+
+当前定义：
+
+```rust
+pub struct WriterDiagnostics {
+    pub audio_chunks_received: u64,
+    pub audio_chunks_appended: u64,
+    pub audio_chunks_discarded_full_overlap: u64,
+    pub audio_chunks_trimmed_partial_overlap: u64,
+    pub aac_frames_encoded: u64,
+    pub video_queue_full_count: u64,
+    pub audio_queue_full_count: u64,
+}
+```
+
+问题：
+
+- `audio_chunks_appended` 当前在 gap 分支里递增。
+- 但 gap 分支实际只 append 了 silence padding，没有 append 当前 chunk samples。
+- 因此 BUG-009 日志中的 `audio_chunks_appended: 593` 不能证明真实 PCM 被写入。
+- `aac_frames_encoded: 564` 也只能证明 AAC encoder 收到了 frame，不能证明 frame 非静音。
+
+违反的 `BUG.md` 预防规则：
+
+> writer diagnostics 必须区分 queued（进入队列）和 encoded（实际编码进 AAC），不能用 queued 数冒充 encoded 数。
+
+本轮新增认知：
+
+> 即使区分了 queued/appended/encoded，也必须继续区分 “real PCM appended” 与 “silence padding appended”。否则 diagnostics 仍会误导排障。
+
+建议修复：
+
+1. 保留：
+   - `audio_chunks_received`
+   - `audio_chunks_appended`
+   - `audio_chunks_discarded_full_overlap`
+   - `audio_chunks_trimmed_partial_overlap`
+   - `aac_frames_encoded`
+2. 新增：
+   - `audio_real_frames_appended`
+   - `audio_silence_frames_padded`
+   - `audio_real_rms_max_before_encode`
+3. `audio_chunks_appended` 只在当前 chunk 至少有 1 个真实 sample 被 append 时递增。
+4. gap silence padding 只增加 `audio_silence_frames_padded`，不能冒充 chunk append。
+5. `aac_frames_encoded` 文案改为“发送给 AAC encoder 并成功收到 packet 的 frame 数”，不要把它解释为“有声 frame 数”。
+
+### 25.8 Important 2：现有测试只验 duration，没有验 gap 后音频内容
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_writer.rs`
+- `ffmpeg_writer_pads_first_audio_gap_for_mic_start_offset`
+
+当前测试覆盖了 leading gap duration：
+
+```rust
+// First audio chunk at t=200ms
+let audio_ms = inspection.audio_duration_nanos / 1_000_000;
+assert!(audio_ms >= 200);
+```
+
+问题：
+
+- 测试只断言音轨时长包含 leading silence。
+- 没有断言 leading gap 之后的真实音频样本仍然存在。
+- 因此当前实现即使把全部真实 audio chunk 丢掉，只编码静音，也能通过 duration 断言。
+
+这正是 BUG-009 漏测原因。
+
+必须新增失败测试：
+
+```rust
+#[test]
+fn ffmpeg_writer_preserves_non_silent_audio_after_leading_gap() {
+    let path = unique_media_path("writer-leading-gap-rms", "mp4");
+    let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
+
+    for i in 0..90 {
+        writer.push_video(test_video_frame_at(i * 33_333_333)).unwrap();
+    }
+
+    writer.push_audio(audio_chunk_with_frames(200_000_000, 1024)).unwrap();
+    writer.push_audio(audio_chunk_with_frames(
+        200_000_000 + 1024 * 1_000_000_000 / 48_000,
+        1024,
+    )).unwrap();
+
+    writer.finish().unwrap();
+
+    let inspection = inspect_media_artifact_with_audio_stats(&path).unwrap();
+    assert!(inspection.audio_rms.unwrap() > 0.01);
+    assert!(inspection.audio_peak.unwrap() > 0.02);
+}
+```
+
+该测试在当前代码上应该失败，因为 gap 分支只写 silence。
+
+还必须新增 middle gap 测试：
+
+```rust
+#[test]
+fn ffmpeg_writer_preserves_non_silent_audio_after_middle_gap() {
+    // chunk 1: t=0, non-silent
+    // chunk 2: t=500ms, non-silent
+    // 期望：artifact RMS/peak 非零，duration drift 有界
+}
+```
+
+### 25.9 Important 3：AudioSynchronizer window metadata 仍不 source-aware
+
+位置：
+
+- `src-tauri/src/media/audio_synchronizer.rs`
+- `push_system()`
+- `push_mic()`
+- `emit_window()`
+
+当前设计：
+
+```rust
+struct AudioWindow {
+    system_samples: Vec<f32>,
+    mic_samples: Vec<f32>,
+    window_start_nanos: u64,
+    sample_rate: u32,
+    channels: u16,
+}
+```
+
+问题：
+
+1. 每个 window 只有一份 `sample_rate/channels`。
+2. 这份 metadata 来自第一个创建 window 的 source。
+3. 后到 source 的 samples 被 append 到同一个 window，但不会保存自己的 metadata。
+4. `emit_window()` 构造 system/mic `AudioChunk` 时，两路 source 都被套用同一份 metadata。
+
+风险场景：
+
+- system audio：`48000Hz/2ch`
+- MacBook Pro 麦克风：`48000Hz/1ch`
+- 或蓝牙麦克风：`24000Hz/1ch`
+
+如果 system 先到：
+
+- window metadata 为 `48000Hz/2ch`
+- mic mono samples 被当成 stereo samples
+- mic duration 可能被减半，L/R 交错也被误判
+
+如果 mic 先到：
+
+- window metadata 可能为 `24000Hz/1ch` 或 `48000Hz/1ch`
+- system stereo samples 被当成 mono samples
+- resample/to_stereo 的输入布局被破坏
+
+违反的 `BUG.md` 预防规则：
+
+> `MixedAudioChunk.samples` 的布局必须与 `channels` 元数据一致；任何 downmix/truncate/resample 后都必须用测试验证 sample length 与 duration。
+
+建议修复方向：
+
+1. 不要在 `AudioWindow` 上保存单份 metadata。
+2. 改成 source-aware buffer：
+
+```rust
+struct SourceWindowBuffer {
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: u16,
+}
+
+struct AudioWindow {
+    system: Option<SourceWindowBuffer>,
+    mic: Option<SourceWindowBuffer>,
+    window_start_nanos: u64,
+}
+```
+
+3. `push_system()` 只更新 `window.system`。
+4. `push_mic()` 只更新 `window.mic`。
+5. `emit_window()` 分别用 system/mic 自己的 metadata 构造 `AudioChunk`。
+
+更完整的后续改造：
+
+- 当前 window merger 只是按 chunk 起始 timestamp 归桶，没有把跨 window 的 chunk 切片。
+- 如果一个 chunk 长度为 1024 frames（约 21.33ms），但 window 是 20ms，它会跨过下一个 window。
+- 这会让 writer 后续经常看到 partial overlap。
+- 这不是 BUG-009 的主根因，但会增加 writer timeline 复杂度。
+- 后续若要真正做到“每个 20ms window 输出一个稳定 chunk”，应把输入 chunk 按 sample position 切片进入对应 window。
+
+建议拆成两步：
+
+1. 本轮先修 per-source metadata，避免 1ch/2ch 误标。
+2. 后续再做 chunk-to-window sample slicing，降低 overlap/trim 压力。
+
+必须新增测试：
+
+```rust
+#[test]
+fn audio_synchronizer_preserves_mic_mono_metadata_when_system_arrives_first() {
+    // system: 48kHz/2ch
+    // mic: 48kHz/1ch
+    // system 先 push
+    // 期望 mixed output 为 48kHz/2ch，RMS 非零，duration 接近 20ms
+}
+
+#[test]
+fn audio_synchronizer_preserves_system_stereo_metadata_when_mic_arrives_first() {
+    // mic: 24kHz/1ch 或 48kHz/1ch
+    // system: 48kHz/2ch
+    // mic 先 push
+    // 期望 system 不被当成 mono 或 24kHz 误处理
+}
+```
+
+### 25.10 Important 4：`generated_silent_track` 判断仍不可靠
+
+位置：
+
+- `src-tauri/src/platform/macos_service.rs`
+- `diagnostics.generated_silent_track = result.mixed_audio_chunk_count == 0`
+
+问题：
+
+- `ffmpeg_writer.rs` 在没有收到任何 mixed audio chunk 时，会生成 silent AAC track。
+- 生成后会把 `mixed_audio_chunk_count` 设置为 `num_silent_packets`。
+- 因此 `result.mixed_audio_chunk_count == 0` 无法可靠表示“生成了 silent track”。
+
+影响：
+
+- 在“未请求音频”场景，silent track 是容器兼容策略，应该明确记录。
+- 在“请求音频但没有收到音频”场景，silent track 必须成为 warning/error。
+- 当前判断会弱化 diagnostics，违反 `BUG.md` 中 silent track 的预防规则。
+
+建议修复：
+
+1. `RecordingResult` 或 `WriterDiagnostics` 新增：
+   - `generated_silent_track: bool`
+   - `silent_aac_frames_encoded: u64`
+2. writer 在 silent track 分支显式设置。
+3. `macos_service.rs` 不再用 `mixed_audio_chunk_count == 0` 推断。
+4. requested-audio contract 继续作为最终 artifact gate。
+
+### 25.11 Important 5：`finish()` bounded claim 尚未完整闭环
+
+位置：
+
+- `src-tauri/src/media/ffmpeg_writer.rs`
+- `finish()`
+- `join_worker()`
+
+第 24 节 R4 声称：
+
+> `finish()` 从 blocking `send(Flush)` 改为 `try_send(Flush)` + bounded retry，不再无限阻塞录制停止路径。
+
+当前实际情况：
+
+1. 发送 `Flush` 的确改成了 bounded retry。
+2. 但随后仍调用无界 `join_worker()`。
+3. 如果 worker 卡在 FFmpeg 编码、muxer interleaving 或 IO，停止路径仍可能无限等待。
+
+本问题不是 BUG-009 的直接根因，但第 24 节整改结论不能写成“finish non-blocking 已完全修复”。
+
+建议修复：
+
+1. 短期：把文档和 diagnostics 口径改成“Flush send bounded，worker join 仍待 bounded 化”。
+2. 中期：worker 结果通过 channel 回传，`finish()` 使用 `recv_timeout()`。
+3. 长期：支持 cancel/abort worker，并清理半成品 artifact。
+
+建议测试：
+
+```rust
+#[test]
+fn ffmpeg_writer_finish_times_out_when_worker_does_not_return() {
+    // 用 fake worker 或 trait seam 模拟 worker 不返回
+    // finish 应返回结构化错误，而不是永久阻塞
+}
+```
+
+### 25.12 BUG.md 预防规则复核
+
+本轮针对 BUG-005/BUG-009 相关预防规则复核如下。
+
+1. “麦克风设备 stream config 必须来自设备 default/supported config”
+   - 当前满足：`cpal_microphone.rs` 使用 `default_input_config()`。
+   - BUG-009 日志也证明 MacBook Pro 麦克风成功以 `48000Hz/1ch` 打开。
+2. “writer 对音频 timestamp 的处理必须覆盖 first-gap、middle-gap、tail-gap、overlap、out-of-order”
+   - **未满足**。
+   - first-gap/middle-gap 分支存在致命缺陷：只补静音，不 append 当前 chunk。
+3. “MixedAudioChunk.samples 的布局必须与 channels 元数据一致”
+   - **部分不满足**。
+   - `AudioSynchronizer` window 只有一份 metadata，system/mic 可能被互相误标。
+4. “writer audio_pts 必须作为单调递增编码器 PTS 计数器”
+   - 当前方向正确。
+   - 但 audio timeline cursor 的推进逻辑在 gap 分支错误。
+5. “writer partial-overlap chunk append 后必须立即进入 AAC drain loop”
+   - 当前满足。
+6. “AudioMixer 入口必须校验 channels/sample_rate/sample layout”
+   - 当前 mixer 层满足。
+   - 但 synchronizer 可能在调用 mixer 前已经把 metadata 改错。
+7. “请求录制音频源必须和实际写入非静音音频内容建立可验证 contract”
+   - 当前 contract 已建立，并成功暴露 BUG-009。
+   - 但实现仍未满足 contract。
+8. “麦克风 UI 电平只能作为 capture-side indicator”
+   - 本轮再次验证该规则必要：UI/consumer RMS 非零不能证明 artifact 有声。
+9. “system/mic synchronizer 必须 source-aware”
+   - **部分不满足**。
+   - window 级 has_system/has_mic 是 source-aware，但 metadata 不是 source-aware。
+10. “capture channel drop count 必须进入 diagnostics”
+    - 当前满足。
+11. “silent AAC track 只能用于没有请求音频”
+    - artifact contract 已能阻止 requested audio + silent artifact。
+    - 但 `generated_silent_track` diagnostics 仍不可靠。
+12. “artifact validation 必须包含 audio RMS/peak”
+    - 当前满足，并成功捕捉 BUG-009。
+13. “FFmpeg writer queue 必须使用 non-blocking send”
+    - push path 满足。
+    - `finish()` 的 worker join 仍未 bounded。
+14. “consumer loop 必须使用 bounded batch 处理视频帧”
+    - 当前满足。
+15. “writer diagnostics 必须区分 queued/appended/discarded/encoded”
+    - **语义仍不充分**。
+    - 还必须区分 real PCM append 与 silence padding。
+
+### 25.13 建议整改 Phase
+
+#### R1：先补 BUG-009 writer leading/middle gap 内容回归测试
+
+目标：
+
+- 先用自动测试复现“采集有声但 artifact 静音”的核心缺陷。
+
+新增测试：
+
+1. `ffmpeg_writer_preserves_non_silent_audio_after_leading_gap`
+   - 视频从 `0ns` 开始。
+   - 第一个 audio chunk 从 `200ms` 开始。
+   - chunk samples 使用 `0.5f32` 或 sine wave。
+   - `finish()` 后解码 artifact。
+   - 断言 `audio_rms > 0.01` 且 `audio_peak > 0.02`。
+2. `ffmpeg_writer_preserves_non_silent_audio_after_middle_gap`
+   - 第一个 chunk 从 `0ns` 开始。
+   - 第二个 chunk 从 `500ms` 开始。
+   - 断言 decoded RMS/peak 非零，A/V drift 有界。
+3. `ffmpeg_writer_gap_branch_counts_silence_separately_from_real_pcm`
+   - 构造 leading gap。
+   - 断言 diagnostics 中 real frames appended 与 silence frames padded 分开记录。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_preserves_non_silent_audio_after_leading_gap -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_preserves_non_silent_audio_after_middle_gap -- --nocapture
+```
+
+预期：
+
+- 在当前实现上，RMS/peak 测试应失败。
+- 修复后通过。
+
+#### R2：修复 writer gap 分支
+
+目标：
+
+- gap 分支补静音后必须继续 append 当前真实 audio chunk。
+
+最小代码改动：
+
+```rust
+if target_sample > audio_timeline_cursor {
+    let gap_mono = target_sample - audio_timeline_cursor;
+    let gap_interleaved = (gap_mono * 2) as usize;
+    audio_sample_buffer.extend(std::iter::repeat_n(0.0f32, gap_interleaved));
+    audio_sample_buffer.extend_from_slice(&samples);
+    audio_timeline_cursor = target_sample + chunk_mono_frames;
+    writer_diag.audio_chunks_appended += 1;
+}
+```
+
+注意：
+
+- 不要只把 `audio_timeline_cursor = target_sample` 改成 `target_sample + chunk_mono_frames`，还必须 append `samples`。
+- 修复后每次 gap chunk 都会产生“gap silence + real PCM”。
+- gap silence 会降低整体 RMS，但只要后续真实 PCM 存在，RMS/peak 不应为 0。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg inspect_media_artifact_reports_nonzero_audio_rms -- --nocapture
+```
+
+#### R3：修正 writer diagnostics 语义
+
+目标：
+
+- diagnostics 能解释 BUG-009 这类“编码了很多 frame 但内容是静音”的问题。
+
+建议字段：
+
+```rust
+pub struct WriterDiagnostics {
+    pub audio_chunks_received: u64,
+    pub audio_chunks_appended: u64,
+    pub audio_chunks_discarded_full_overlap: u64,
+    pub audio_chunks_trimmed_partial_overlap: u64,
+    pub audio_real_frames_appended: u64,
+    pub audio_silence_frames_padded: u64,
+    pub audio_real_rms_max_before_encode: f32,
+    pub aac_frames_encoded: u64,
+    pub silent_aac_frames_encoded: u64,
+    pub generated_silent_track: bool,
+    pub video_queue_full_count: u64,
+    pub audio_queue_full_count: u64,
+}
+```
+
+实现要求：
+
+1. gap silence 只增加 `audio_silence_frames_padded`。
+2. 当前 chunk 的真实 PCM 被 append 后才增加 `audio_chunks_appended`。
+3. full overlap discard 不增加 appended。
+4. partial overlap 增加 trimmed 和 real frames appended。
+5. `audio_real_rms_max_before_encode` 从 append 的真实 PCM 计算，不包括 silence padding。
+6. silent AAC track 分支显式设置 `generated_silent_track=true`。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg writer_diagnostics -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml macos_service -- --nocapture
+```
+
+#### R4：修复 AudioSynchronizer per-source metadata
+
+目标：
+
+- system/mic 两路音频在进入 mixer 前保留各自 sample_rate/channels。
+
+建议结构：
+
+```rust
+struct SourceWindowBuffer {
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: u16,
+}
+
+struct AudioWindow {
+    system: Option<SourceWindowBuffer>,
+    mic: Option<SourceWindowBuffer>,
+    window_start_nanos: u64,
+}
+```
+
+注意：
+
+- 如果同一 source 在同一 window 内追加多个 chunk，必须先确认 metadata 一致。
+- 若同一 source metadata 发生变化，应切新 window 或返回 diagnostics warning。
+- 不要用 system metadata 构造 mic chunk，也不要用 mic metadata 构造 system chunk。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml audio_synchronizer -- --nocapture
+```
+
+新增测试：
+
+1. `audio_synchronizer_preserves_mic_mono_metadata_when_system_arrives_first`
+2. `audio_synchronizer_preserves_system_stereo_metadata_when_mic_arrives_first`
+3. `audio_synchronizer_mixes_48k_stereo_system_with_48k_mono_mic`
+4. `audio_synchronizer_mixes_48k_stereo_system_with_24k_mono_mic`
+
+#### R5：修复 silent track diagnostics
+
+目标：
+
+- diagnostics 明确区分“没有请求音频但生成 silent track”和“请求音频却只生成 silent track”。
+
+步骤：
+
+1. writer silent track 分支设置 `writer_diag.generated_silent_track = true`。
+2. 记录 `silent_aac_frames_encoded`。
+3. `RecordingDiagnostics.generated_silent_track` 从 writer diagnostics 合并，不再通过 `mixed_audio_chunk_count == 0` 推断。
+4. requested-audio contract 继续作为最终 error gate。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg generated_silent_track -- --nocapture
+```
+
+#### R6：补 `finish()` worker join bounded 策略
+
+目标：
+
+- 第 24 节 R4 “finish non-blocking” 真正闭环。
+
+建议：
+
+1. 短期保持现状也可以，但文档状态必须标注“Flush bounded，join 未 bounded”。
+2. 若本轮编码要一起修，建议把 worker result 通过 `mpsc::Receiver<AppResult<RecordingResult>>` 回传。
+3. `finish()` 等待 result 使用 `recv_timeout()`。
+4. timeout 后返回 `RecordingWriteFailed`，并标记 artifact 可能不完整。
+
+验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer_finish -- --nocapture
+```
+
+### 25.14 建议真实设备 manual gate
+
+修复后必须重新跑以下 manual gates，并把结果更新到 `BUG.md`。
+
+#### Gate 1：system-only
+
+步骤：
+
+1. 关闭麦克风，只开启系统音频。
+2. 播放音乐或视频 10 秒。
+3. 停止录制。
+4. 播放 source artifact。
+5. 导出并播放 export artifact。
+
+验收：
+
+- source/export 都能听到系统音频。
+- terminal 输出 artifact contract 验证通过。
+- decoded RMS/peak 非零。
+- writer diagnostics 中：
+  - `audio_chunks_received > 0`
+  - `audio_chunks_appended > 0`
+  - `audio_real_frames_appended > 0`
+  - `audio_silence_frames_padded` 可为非零，但不能只有 silence。
+
+#### Gate 2：mic-only，MacBook Pro 麦克风
+
+步骤：
+
+1. 关闭系统音频，只开启麦克风。
+2. 选择 `MacBook Pro麦克风`。
+3. 说话 10 秒。
+4. 停止录制。
+5. 播放 source/export。
+
+验收：
+
+- source/export 都能听到麦克风声音。
+- artifact contract 验证通过。
+- terminal 日志中 `mic_rms_max` 与 decoded RMS/peak 都非零。
+
+#### Gate 3：system + mic，MacBook Pro 麦克风
+
+步骤：
+
+1. 开启系统音频和麦克风。
+2. 选择 `MacBook Pro麦克风`。
+3. 播放系统音频，同时说话 10 秒。
+4. 停止录制并导出。
+
+验收：
+
+- source/export 都能听到系统音频和麦克风。
+- `paired_window_count` 明显大于 0。
+- `system_only_window_count` 和 `mic_only_window_count` 可以少量存在，但不能异常膨胀。
+- artifact contract 通过。
+
+#### Gate 4：蓝牙输出 + 内置麦克风
+
+步骤：
+
+1. 输出设备使用蓝牙耳机。
+2. 麦克风选择内置麦克风。
+3. 录制 system + mic 10 秒。
+
+验收：
+
+- 录制期间蓝牙输出音质不应明显降级。
+- source/export 音频可听。
+
+#### Gate 5：蓝牙输出 + 蓝牙麦克风
+
+步骤：
+
+1. 输出设备使用蓝牙耳机。
+2. 麦克风选择同一个蓝牙耳机麦克风。
+3. 录制 system + mic 10 秒。
+
+验收：
+
+- 如果 macOS 切到 HFP/profile 导致输出音质下降，应在 `BUG.md` 记录为平台限制。
+- UI 必须展示蓝牙麦克风兼容性提示。
+- artifact contract 仍应能判断最终文件是否有声。
+
+### 25.15 建议编码顺序
+
+推荐按下面顺序修复，避免继续被假阳性 diagnostics 带偏：
+
+1. **先写 failing test**：`ffmpeg_writer_preserves_non_silent_audio_after_leading_gap`。
+2. **修 writer gap branch**：补静音后 append 当前 samples，cursor 推进到 chunk end。
+3. **补 middle-gap test**：防止只修 first-gap。
+4. **修 writer diagnostics**：区分 silence padding 与 real PCM append。
+5. **修 AudioSynchronizer per-source metadata**：解决 system 2ch/mic 1ch 误标风险。
+6. **修 silent track diagnostics**：不要用 `mixed_audio_chunk_count == 0` 推断。
+7. **重新跑 ffmpeg feature tests**。
+8. **跑真实设备 manual gates**。
+9. **更新 `BUG.md` BUG-009 状态与预防规则**。
+10. **更新 `HANDOFF.md` 工作记录**。
+
+### 25.16 建议自动测试清单
+
+必须新增：
+
+1. `ffmpeg_writer_preserves_non_silent_audio_after_leading_gap`
+2. `ffmpeg_writer_preserves_non_silent_audio_after_middle_gap`
+3. `ffmpeg_writer_gap_branch_appends_current_chunk_after_padding`
+4. `ffmpeg_writer_gap_branch_counts_silence_padding_separately`
+5. `audio_synchronizer_preserves_mic_mono_metadata_when_system_arrives_first`
+6. `audio_synchronizer_preserves_system_stereo_metadata_when_mic_arrives_first`
+7. `audio_synchronizer_mixes_48k_stereo_system_with_48k_mono_mic`
+8. `audio_synchronizer_mixes_48k_stereo_system_with_24k_mono_mic`
+9. `generated_silent_track_diagnostic_true_when_no_audio_received`
+10. `requested_audio_contract_rejects_generated_silent_track`
+
+建议补充：
+
+1. `writer_diagnostics_real_rms_max_excludes_silence_padding`
+2. `writer_diagnostics_aac_frames_encoded_does_not_imply_non_silent_content`
+3. `consumer_diagnostics_reports_writer_generated_silent_track`
+4. `finish_flush_bounded_but_join_timeout_is_reported`
+
+建议验证命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_writer -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg ffmpeg_common -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml audio_synchronizer -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml macos_service -- --nocapture
+npm test -- --run
+```
+
+### 25.17 对 BUG-009 的建议修复说明
+
+建议在 `BUG.md` 中把 BUG-009 根因记录为：
+
+> BUG-009 的根因是 `FfmpegRecordingWriter` 音频 timeline gap 分支实现错误：当 `target_sample > audio_timeline_cursor` 时，writer 只补齐 gap silence 并推进 cursor 到 chunk 起点，没有追加当前 audio chunk 的真实 samples，也没有把 cursor 推进到 chunk 末尾。真实设备录制的首个音频 chunk 通常带有非零 timestamp，因此大量非静音 PCM 被替换为静音 AAC frame。第 24 节新增的 requested-audio artifact contract 正确暴露了该问题。
+
+建议新增预防规则：
+
+1. writer 处理 audio gap 时，padding silence 后必须继续 append 当前真实 chunk；gap padding 不能替代 chunk append。
+2. 音频 timeline 单元测试不能只检查 duration，还必须检查 decoded RMS/peak。
+3. writer diagnostics 必须区分 real PCM append 与 silence padding。
+4. `aac_frames_encoded > 0` 不能作为“artifact 有声”的证据，只能说明 AAC encoder 输出了 frame。
+5. synchronizer window 必须保留 per-source metadata，不能把 system/mic 两路 PCM 套用同一份 sample_rate/channels。
+
+### 25.18 建议对外状态表述
+
+建议后续整改前使用下面口径：
+
+> Phase 6 第 24 节整改中的 requested-audio contract 是有效的，它成功发现了 BUG-009：采集侧和 mixed chunk 都有非零 RMS，但最终 artifact 解码为全静音。根因已定位到 `FfmpegRecordingWriter` 的 audio gap 分支：补齐 leading/middle silence 后没有 append 当前真实音频 chunk，导致 AAC 实际编码的是静音 padding。当前还发现 writer diagnostics 对 `audio_chunks_appended` 的语义不准确，以及 `AudioSynchronizer` window metadata 仍不是 per-source。下一轮应先补 decoded RMS/peak 的 failing tests，再修 writer gap branch，随后修 diagnostics 和 synchronizer metadata，最后重新跑真实设备 system-only、mic-only、system+mic manual gates。

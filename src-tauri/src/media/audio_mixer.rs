@@ -54,8 +54,36 @@ impl AudioMixer for SimpleAudioMixer {
     }
 }
 
+/// Validate audio chunk metadata before processing.
+///
+/// Rejects chunks with invalid metadata that would cause panics or silent data
+/// corruption downstream (division by zero, misaligned interleaved samples).
+fn validate_audio_chunk(chunk: &AudioChunk) -> AppResult<()> {
+    if chunk.channels == 0 {
+        return Err(AppError::AudioMixFailed {
+            reason: format!("音频通道数为 0（采样率 {}Hz）", chunk.sample_rate),
+        });
+    }
+    if chunk.sample_rate == 0 {
+        return Err(AppError::AudioMixFailed {
+            reason: "音频采样率为 0".to_string(),
+        });
+    }
+    if !chunk.samples.len().is_multiple_of(chunk.channels as usize) {
+        return Err(AppError::AudioMixFailed {
+            reason: format!(
+                "音频样本数 {} 不是通道数 {} 的整数倍",
+                chunk.samples.len(),
+                chunk.channels
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Single-source passthrough: resample + convert to stereo if needed.
 fn passthrough(chunk: &AudioChunk) -> AppResult<MixedAudioChunk> {
+    validate_audio_chunk(chunk)?;
     let resampled = resample(chunk, MIXED_SAMPLE_RATE);
     let stereo = to_stereo(&resampled, chunk.channels);
     let clamped = clamp_samples(&stereo);
@@ -77,6 +105,8 @@ fn passthrough(chunk: &AudioChunk) -> AppResult<MixedAudioChunk> {
 /// 4. Non-overlapping tail: passthrough from the longer source
 /// 5. Hard clamp to [-1.0, 1.0] to prevent clipping
 fn mix_two(system: &AudioChunk, mic: &AudioChunk) -> AppResult<MixedAudioChunk> {
+    validate_audio_chunk(system)?;
+    validate_audio_chunk(mic)?;
     let sys_resampled = resample(system, MIXED_SAMPLE_RATE);
     let mic_resampled = resample(mic, MIXED_SAMPLE_RATE);
 
@@ -184,22 +214,43 @@ fn resample(chunk: &AudioChunk, target_rate: u32) -> Vec<f32> {
     output
 }
 
-/// Converts mono audio to stereo by duplicating each sample.
-/// If already stereo, passthrough unchanged.
+/// Converts audio to stereo (2-channel interleaved).
+///
+/// - 0 channels: returns empty.
+/// - 1 channel (mono): duplicates each sample to L+R.
+/// - 2 channels (stereo): passthrough unchanged.
+/// - >2 channels: extracts first 2 channels per frame, discarding extras.
+///
+/// The returned `Vec<f32>` is always interleaved stereo `[L, R, L, R, ...]`.
 fn to_stereo(samples: &[f32], src_channels: u16) -> Vec<f32> {
-    if src_channels >= 2 {
-        // Already stereo or more — just take first 2 channels
-        // For interleaved stereo: [L, R, L, R, ...] — passthrough
-        return samples.to_vec();
+    match src_channels {
+        0 => Vec::new(),
+        1 => {
+            // Mono → stereo: duplicate each sample to L+R.
+            let mut output = Vec::with_capacity(samples.len() * 2);
+            for &s in samples {
+                output.push(s);
+                output.push(s);
+            }
+            output
+        }
+        2 => {
+            // Already stereo — passthrough.
+            samples.to_vec()
+        }
+        n => {
+            // >2 channels: extract first 2 channels per interleaved frame.
+            // Input layout: [ch0, ch1, ch2, ..., chN-1, ch0, ch1, ...]
+            let n = n as usize;
+            let frames = samples.len() / n;
+            let mut output = Vec::with_capacity(frames * 2);
+            for frame in 0..frames {
+                output.push(samples[frame * n]);
+                output.push(samples[frame * n + 1]);
+            }
+            output
+        }
     }
-
-    // Mono: duplicate each sample to L+R
-    let mut output = Vec::with_capacity(samples.len() * 2);
-    for &s in samples {
-        output.push(s);
-        output.push(s);
-    }
-    output
 }
 
 /// Hard-clamps all samples to [-1.0, 1.0] to prevent clipping.
@@ -317,5 +368,93 @@ mod tests {
         assert_eq!(result.timestamp.nanos, 0);
         // The output should be longer than either input alone
         assert!(result.samples.len() > 6);
+    }
+
+    #[test]
+    fn to_stereo_truncates_four_channel_input_to_two_channels() {
+        // BUG-005: to_stereo must handle >2 channels by extracting first 2.
+        // Input: 4ch interleaved [L, R, Ls, Rs, L, R, Ls, Rs]
+        // Output: 2ch interleaved [L, R, L, R]
+        let samples = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        let result = to_stereo(&samples, 4);
+        assert_eq!(result.len(), 4); // 2 frames * 2 channels
+        assert!((result[0] - 0.1).abs() < 1e-6); // L frame 0
+        assert!((result[1] - 0.2).abs() < 1e-6); // R frame 0
+        assert!((result[2] - 0.5).abs() < 1e-6); // L frame 1
+        assert!((result[3] - 0.6).abs() < 1e-6); // R frame 1
+    }
+
+    #[test]
+    fn to_stereo_rejects_or_handles_zero_channels() {
+        let samples = vec![0.5, 0.5, 0.5];
+        let result = to_stereo(&samples, 0);
+        assert!(result.is_empty(), "0 channels should produce empty output");
+    }
+
+    #[test]
+    fn simple_mixer_rejects_zero_channel_input_without_panic() {
+        // R3: channels==0 must return an error, not panic (division by zero).
+        let mixer = SimpleAudioMixer::new();
+        let chunk = make_chunk(0, 48000, 0, vec![0.5, 0.5, 0.5]);
+        let result = mixer.mix(Some(&chunk), None);
+        assert!(result.is_err(), "0-channel input must be rejected");
+        assert!(
+            result.unwrap_err().to_string().contains("通道数为 0"),
+            "error should mention zero channels"
+        );
+    }
+
+    #[test]
+    fn simple_mixer_rejects_zero_sample_rate_input_without_panic() {
+        // R3: sample_rate==0 must return an error, not cause NaN in resample.
+        let mixer = SimpleAudioMixer::new();
+        let chunk = make_chunk(0, 0, 2, vec![0.5, 0.5]);
+        let result = mixer.mix(Some(&chunk), None);
+        assert!(result.is_err(), "0-sample-rate input must be rejected");
+        assert!(
+            result.unwrap_err().to_string().contains("采样率为 0"),
+            "error should mention zero sample rate"
+        );
+    }
+
+    #[test]
+    fn simple_mixer_rejects_sample_len_not_multiple_of_channels() {
+        // R3: odd sample count with 2ch means misaligned interleaved data.
+        let mixer = SimpleAudioMixer::new();
+        let chunk = make_chunk(0, 48000, 2, vec![0.5, 0.5, 0.5]); // 3 samples, 2ch
+        let result = mixer.mix(Some(&chunk), None);
+        assert!(result.is_err(), "misaligned samples must be rejected");
+        assert!(
+            result.unwrap_err().to_string().contains("整数倍"),
+            "error should mention sample/channel mismatch"
+        );
+    }
+
+    #[test]
+    fn mix_two_rejects_zero_channel_mic_input() {
+        // R3: mix_two must also validate both inputs.
+        let mixer = SimpleAudioMixer::new();
+        let sys = make_chunk(0, 48000, 2, vec![0.5, 0.5]);
+        let mic = make_chunk(0, 48000, 0, vec![0.5]);
+        let result = mixer.mix(Some(&sys), Some(&mic));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mixed_output_sample_len_matches_declared_stereo_channels() {
+        // Verify that MixedAudioChunk.samples.len() is always even (stereo).
+        let mixer = SimpleAudioMixer::new();
+        let chunk = make_chunk(0, 24000, 1, vec![0.5, 0.5, 0.5]);
+        let result = mixer.mix(Some(&chunk), None).unwrap();
+        assert_eq!(result.channels, 2);
+        assert!(
+            result.samples.len().is_multiple_of(2),
+            "stereo output must have even sample count, got {}",
+            result.samples.len()
+        );
+        // Duration check: samples / channels / sample_rate = duration
+        let duration_secs =
+            result.samples.len() as f64 / result.channels as f64 / result.sample_rate as f64;
+        assert!(duration_secs > 0.0, "duration must be positive");
     }
 }
