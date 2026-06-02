@@ -172,19 +172,34 @@ impl AudioCapture for CpalMicrophoneCapture {
 
     fn stop(&mut self) -> AppResult<()> {
         eprintln!("CpalMicrophoneCapture::stop() 开始");
+
+        // Signal running=false first — callbacks check this flag and exit early.
         self.running.store(false, Ordering::Relaxed);
 
-        // Take stream to local variable and explicitly drop it.
-        // This ensures CoreAudio device resources are released before we return.
-        let stream = self.stream.take();
-        let stream_dropped = stream.is_some();
-        drop(stream);
+        if let Some(send_stream) = self.stream.take() {
+            // Explicit pause before drop — captures CoreAudio stop error.
+            // drop() alone silently ignores stop/uninitialize errors.
+            match send_stream.0.pause() {
+                Ok(()) => {
+                    eprintln!("CpalMicrophoneCapture::pause() 成功");
+                }
+                Err(e) => {
+                    eprintln!("CpalMicrophoneCapture::pause() 失败: {:?}", e);
+                }
+            }
 
-        // Bounded wait for CoreAudio to complete device release.
-        // Bluetooth HFP profile switching can take 100-300ms.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+            // Drop stream to release CoreAudio resources.
+            drop(send_stream);
 
-        eprintln!("CpalMicrophoneCapture::stop() 完成 — stream_dropped={stream_dropped}");
+            // Bounded wait for CoreAudio to complete device release.
+            // Bluetooth HFP profile switching can take 100-300ms.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+
+            eprintln!("CpalMicrophoneCapture::stop() 完成 — stream_dropped=true, waited=300ms");
+        } else {
+            eprintln!("CpalMicrophoneCapture::stop() 完成 — 无活跃 stream");
+        }
+
         Ok(())
     }
 

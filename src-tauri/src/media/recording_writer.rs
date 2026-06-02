@@ -87,6 +87,14 @@ pub struct RecordingDiagnostics {
     pub system_rms_max_before_writer: f32,
     /// Maximum RMS of mic audio before writer (from synchronizer output).
     pub mic_rms_max_before_writer: f32,
+    /// Number of system audio windows that reached writer (before push_audio).
+    pub system_windows_before_writer: u64,
+    /// Number of mic audio windows that reached writer (before push_audio).
+    pub mic_windows_before_writer: u64,
+    /// Number of system audio frames that reached writer (before push_audio).
+    pub system_frames_before_writer: u64,
+    /// Number of mic audio frames that reached writer (before push_audio).
+    pub mic_frames_before_writer: u64,
 }
 
 /// Source-aware audio contract validation.
@@ -121,6 +129,46 @@ pub fn validate_source_aware_audio_contract(
             return Err(AppError::RecordingFinalizeFailed {
                 reason: format!(
                     "requested microphone, capture RMS={:.6}, but 0 mic windows emitted",
+                    diagnostics.mic_rms_max
+                ),
+            });
+        }
+    }
+
+    // NEW: Check before-writer presence — verifies each requested source
+    // actually reached the writer, not just that the synchronizer emitted windows.
+    if diagnostics.requested_system_audio && diagnostics.system_rms_max > 0.001 {
+        if diagnostics.system_windows_before_writer == 0 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested system audio, capture RMS={:.6}, but 0 system windows reached writer",
+                    diagnostics.system_rms_max
+                ),
+            });
+        }
+        if diagnostics.system_rms_max_before_writer < 0.001 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested system audio but system RMS before writer is 0 (capture RMS={:.6})",
+                    diagnostics.system_rms_max
+                ),
+            });
+        }
+    }
+
+    if diagnostics.requested_microphone && diagnostics.mic_rms_max > 0.001 {
+        if diagnostics.mic_windows_before_writer == 0 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested microphone, capture RMS={:.6}, but 0 mic windows reached writer",
+                    diagnostics.mic_rms_max
+                ),
+            });
+        }
+        if diagnostics.mic_rms_max_before_writer < 0.001 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested microphone but mic RMS before writer is 0 (capture RMS={:.6})",
                     diagnostics.mic_rms_max
                 ),
             });
@@ -405,5 +453,71 @@ mod tests {
         let result = writer.finish().unwrap();
         assert_eq!(result.frame_count, 1);
         assert_eq!(result.mixed_audio_chunk_count, 1);
+    }
+
+    #[test]
+    fn validate_source_aware_audio_contract_rejects_missing_system_before_writer() {
+        let diag = RecordingDiagnostics {
+            requested_system_audio: true,
+            requested_microphone: true,
+            system_rms_max: 0.05,
+            mic_rms_max: 0.10,
+            mic_windows_before_writer: 5,
+            mic_rms_max_before_writer: 0.08,
+            system_windows_before_writer: 0, // 0 windows reached writer
+            system_rms_max_before_writer: 0.0,
+            paired_window_count: 5,
+            ..Default::default()
+        };
+        let writer_diag = WriterDiagnostics::default();
+
+        let result = validate_source_aware_audio_contract(&diag, &writer_diag);
+        assert!(
+            result.is_err(),
+            "should reject when system requested, capture RMS non-zero, but 0 before-writer windows"
+        );
+    }
+
+    #[test]
+    fn validate_source_aware_audio_contract_rejects_missing_mic_before_writer() {
+        let diag = RecordingDiagnostics {
+            requested_system_audio: true,
+            requested_microphone: true,
+            system_rms_max: 0.05,
+            mic_rms_max: 0.10,
+            system_windows_before_writer: 5,
+            system_rms_max_before_writer: 0.04,
+            mic_windows_before_writer: 0, // 0 windows reached writer
+            mic_rms_max_before_writer: 0.0,
+            paired_window_count: 5,
+            ..Default::default()
+        };
+        let writer_diag = WriterDiagnostics::default();
+
+        let result = validate_source_aware_audio_contract(&diag, &writer_diag);
+        assert!(
+            result.is_err(),
+            "should reject when mic requested, capture RMS non-zero, but 0 before-writer windows"
+        );
+    }
+
+    #[test]
+    fn validate_source_aware_audio_contract_rejects_zero_rms_before_writer() {
+        let diag = RecordingDiagnostics {
+            requested_system_audio: true,
+            requested_microphone: false,
+            system_rms_max: 0.05,
+            system_windows_before_writer: 5,
+            system_rms_max_before_writer: 0.0, // windows exist but RMS is 0
+            paired_window_count: 5,
+            ..Default::default()
+        };
+        let writer_diag = WriterDiagnostics::default();
+
+        let result = validate_source_aware_audio_contract(&diag, &writer_diag);
+        assert!(
+            result.is_err(),
+            "should reject when system windows reached writer but RMS is 0"
+        );
     }
 }

@@ -42,6 +42,11 @@ pub struct AudioSynchronizerConfig {
     /// If a source hasn't produced a chunk in this duration, the synchronizer
     /// will emit windows containing only the active source.
     pub source_stall_timeout_nanos: u64,
+    /// Grace period for the second source to appear (default 500ms).
+    /// When both sources are requested but only one has been seen, the synchronizer
+    /// will NOT emit single-source windows until this grace period expires.
+    /// Prevents premature system-only emission when mic starts late.
+    pub source_start_grace_nanos: u64,
 }
 
 impl Default for AudioSynchronizerConfig {
@@ -52,6 +57,7 @@ impl Default for AudioSynchronizerConfig {
             window_nanos: 20_000_000,                  // 20ms
             hold_nanos: 40_000_000,                    // 40ms
             source_stall_timeout_nanos: 2_000_000_000, // 2 seconds
+            source_start_grace_nanos: 500_000_000,     // 500ms
         }
     }
 }
@@ -116,6 +122,10 @@ pub struct AudioSynchronizer<M: AudioMixer = SimpleAudioMixer> {
     last_system_active_nanos: u64,
     /// Timestamp when mic source was last active (for stall detection).
     last_mic_active_nanos: u64,
+    /// Timestamp when system source was first seen (for grace period).
+    first_system_seen_nanos: u64,
+    /// Timestamp when mic source was first seen (for grace period).
+    first_mic_seen_nanos: u64,
     /// Diagnostics: number of windows that had both system and mic.
     paired_window_count: u64,
     /// Diagnostics: number of windows with system-only audio.
@@ -141,6 +151,8 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
             seen_mic: false,
             last_system_active_nanos: 0,
             last_mic_active_nanos: 0,
+            first_system_seen_nanos: 0,
+            first_mic_seen_nanos: 0,
             paired_window_count: 0,
             system_only_window_count: 0,
             mic_only_window_count: 0,
@@ -152,8 +164,11 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
     ///
     /// Long chunks are automatically split into fixed 20ms windows by sample frame.
     pub fn push_system(&mut self, chunk: AudioChunk) {
-        self.seen_system = true;
         let ts = chunk.timestamp.nanos;
+        if !self.seen_system {
+            self.first_system_seen_nanos = ts;
+        }
+        self.seen_system = true;
         self.latest_system_ts = self.latest_system_ts.max(ts);
         self.last_system_active_nanos = ts;
 
@@ -164,8 +179,11 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
     ///
     /// Long chunks are automatically split into fixed 20ms windows by sample frame.
     pub fn push_mic(&mut self, chunk: AudioChunk) {
-        self.seen_mic = true;
         let ts = chunk.timestamp.nanos;
+        if !self.seen_mic {
+            self.first_mic_seen_nanos = ts;
+        }
+        self.seen_mic = true;
         self.latest_mic_ts = self.latest_mic_ts.max(ts);
         self.last_mic_active_nanos = ts;
 
@@ -181,7 +199,12 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
     /// Each window produces exactly one `SynchronizedAudioChunk`, preventing
     /// the double-write timeline issue.
     pub fn drain_mixed(&mut self) -> Vec<AppResult<SynchronizedAudioChunk>> {
-        let watermark_nanos = self.calculate_watermark();
+        let (watermark_nanos, is_timeout) = self.calculate_watermark();
+
+        // Within grace period — nothing to emit yet.
+        if watermark_nanos == u64::MAX {
+            return Vec::new();
+        }
 
         let ready_indices: Vec<u64> = self
             .windows
@@ -196,7 +219,7 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
         let mut results = Vec::with_capacity(ready_indices.len());
         for idx in ready_indices {
             if let Some(window) = self.windows.remove(&idx) {
-                match self.emit_window(window, false) {
+                match self.emit_window(window, is_timeout) {
                     Ok(synced) => results.push(Ok(synced)),
                     Err(e) => results.push(Err(e)),
                 }
@@ -263,12 +286,17 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
 
     /// Calculate the watermark timestamp for live drain.
     ///
+    /// Returns `(watermark_nanos, is_timeout_mode)`.
+    /// `is_timeout_mode=true` means the watermark was computed from a single source
+    /// due to start grace expiry or stall timeout, so emitted windows should be
+    /// marked with `emitted_due_to_timeout=true`.
+    ///
     /// When both sources are requested and have been seen, uses `min(system_ts, mic_ts)`
     /// to prevent the fast source from driving emission. Falls back to `max` when:
     /// - Only one source is requested
-    /// - One source hasn't been seen yet
+    /// - One source hasn't been seen yet (after grace period)
     /// - One source has stalled (no chunks for `source_stall_timeout_nanos`)
-    fn calculate_watermark(&self) -> u64 {
+    fn calculate_watermark(&self) -> (u64, bool) {
         let both_requested = self.config.requested_system_audio && self.config.requested_microphone;
 
         if both_requested && self.seen_system && self.seen_mic {
@@ -288,17 +316,33 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
 
             if system_stalled || mic_stalled {
                 // One source has stalled — fall back to max-based watermark
-                // to avoid blocking indefinitely.
+                // to avoid blocking indefinitely. Mark as timeout.
                 let max_ts = self.latest_system_ts.max(self.latest_mic_ts);
-                max_ts.saturating_sub(self.config.hold_nanos)
+                (max_ts.saturating_sub(self.config.hold_nanos), true)
             } else {
-                base_watermark
+                (base_watermark, false)
             }
+        } else if both_requested && (self.seen_system || self.seen_mic) {
+            // Only one source seen — check start grace period.
+            let grace_nanos = self.config.source_start_grace_nanos;
+            let first_seen_nanos = if self.seen_system {
+                self.first_system_seen_nanos
+            } else {
+                self.first_mic_seen_nanos
+            };
+            let latest_ts = self.latest_system_ts.max(self.latest_mic_ts);
+
+            if grace_nanos > 0 && latest_ts.saturating_sub(first_seen_nanos) < grace_nanos {
+                // Within grace period — don't emit yet (watermark at infinity).
+                return (u64::MAX, false);
+            }
+
+            // Grace expired — emit with timeout mark.
+            (latest_ts.saturating_sub(self.config.hold_nanos), true)
         } else {
-            // Single-source recording or one source not yet seen:
-            // use the active source's latest timestamp.
+            // Single source requested, or neither seen yet.
             let max_ts = self.latest_system_ts.max(self.latest_mic_ts);
-            max_ts.saturating_sub(self.config.hold_nanos)
+            (max_ts.saturating_sub(self.config.hold_nanos), false)
         }
     }
 
@@ -990,6 +1034,97 @@ mod tests {
             2,
             "expected 2 windows (held by min-watermark), got {}",
             results.len()
+        );
+    }
+
+    #[test]
+    fn audio_synchronizer_dual_source_waits_for_initial_slow_source_within_grace() {
+        // When both sources are requested but only system has arrived,
+        // synchronizer should NOT emit within the grace period.
+        let config = AudioSynchronizerConfig {
+            requested_system_audio: true,
+            requested_microphone: true,
+            source_start_grace_nanos: 500_000_000, // 500ms grace
+            ..Default::default()
+        };
+        let mut sync = AudioSynchronizer::new(SimpleAudioMixer::new(), config);
+
+        // System arrives at t=0
+        sync.push_system(chunk(0, vec![0.3, 0.3]));
+        // System continues at t=20ms, 40ms
+        sync.push_system(chunk(20_000_000, vec![0.3, 0.3]));
+        sync.push_system(chunk(40_000_000, vec![0.3, 0.3]));
+
+        // Within grace period — should NOT emit
+        let result = sync.drain_mixed();
+        assert!(
+            result.is_empty(),
+            "should wait for mic within grace period, got {} chunks",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn audio_synchronizer_dual_source_emits_after_start_grace_timeout() {
+        // When grace period expires without the second source arriving,
+        // synchronizer should emit with timeout marking.
+        let config = AudioSynchronizerConfig {
+            requested_system_audio: true,
+            requested_microphone: true,
+            source_start_grace_nanos: 100_000_000, // 100ms grace
+            ..Default::default()
+        };
+        let mut sync = AudioSynchronizer::new(SimpleAudioMixer::new(), config);
+
+        // System arrives at t=0
+        sync.push_system(chunk(0, vec![0.3, 0.3]));
+        // System continues well past grace period (200ms, 400ms)
+        sync.push_system(chunk(200_000_000, vec![0.3, 0.3]));
+        sync.push_system(chunk(400_000_000, vec![0.3, 0.3]));
+
+        let result = sync.drain_mixed();
+        assert!(!result.is_empty(), "should emit after grace timeout");
+        for chunk_result in &result {
+            let synced = chunk_result.as_ref().unwrap();
+            assert!(
+                synced.emitted_due_to_timeout,
+                "should be marked as timeout emission"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_synchronizer_marks_timeout_windows_when_source_stalls() {
+        // When both sources start together but one stalls,
+        // the synchronizer should emit stalled-source windows as timeout.
+        let config = AudioSynchronizerConfig {
+            requested_system_audio: true,
+            requested_microphone: true,
+            source_stall_timeout_nanos: 200_000_000, // 200ms stall timeout
+            source_start_grace_nanos: 0,
+            ..Default::default()
+        };
+        let mut sync = AudioSynchronizer::new(SimpleAudioMixer::new(), config);
+
+        // Both sources start together at t=0
+        sync.push_system(chunk(0, vec![0.3, 0.3]));
+        sync.push_mic(chunk(0, vec![0.5, 0.5]));
+
+        // Then mic stalls — system continues alone for 300ms
+        for i in 1..=15 {
+            sync.push_system(chunk(i * 20_000_000, vec![0.3, 0.3]));
+        }
+
+        let result = sync.drain_mixed();
+        let timeout_count = result
+            .iter()
+            .filter_map(|r| r.as_ref().ok())
+            .filter(|c| c.emitted_due_to_timeout)
+            .count();
+        assert!(
+            timeout_count > 0,
+            "should have timeout-emitted windows when mic stalls, got {}",
+            timeout_count
         );
     }
 }

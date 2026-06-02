@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-02 | Phase 6 第 25 节 code review 整改完成（source-aware synchronizer、source-aware contract、CPAL lazy offset、writer partial-overlap diagnostics、蓝牙 mic 释放、导出 audio contract）；真实设备 manual gate 仍待完成。
+> 最后更新：2026-06-02 | Phase 6 第 10 节 code review 整改完成（source-aware before-writer diagnostics、audible contract、蓝牙 mic pause/reset、synchronizer start grace、writer bounded join）；真实设备 manual gate 仍待完成。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,37 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-02：Phase 6 第 10 节 code review 整改（source-aware before-writer diagnostics、audible contract、蓝牙 mic pause、synchronizer grace、writer bounded join）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-01-phase-6-bug-005-code-review.md` 第 10 节
+- `docs/superpowers/plans/2026-06-02-phase-6-bug-005-rectification.md`
+
+本轮修复（7 个 Task）：
+
+1. **Task 1 AudioSynchronizer source start grace**：`AudioSynchronizerConfig` 新增 `source_start_grace_nanos`（默认 500ms）；`calculate_watermark()` 返回 `(u64, bool)` timeout mode；双源 requested 但仅一路 seen 时在 grace 内不 emit；grace 超时或 source stall 后 emit 标记 `emitted_due_to_timeout=true`；新增 `first_system_seen_nanos`/`first_mic_seen_nanos` 跟踪首次 seen 时间。
+2. **Task 2 RecordingDiagnostics before-writer fields**：新增 `system_windows_before_writer`/`mic_windows_before_writer`/`system_frames_before_writer`/`mic_frames_before_writer`；`validate_source_aware_audio_contract()` 增加 before-writer windows/RMS 检查。
+3. **Task 3 audible_min_rms enforcement**：`validate_source_artifact_with_audio_contract()` 和 `validate_export_artifact_with_audio_contract()` 新增 Level 2 audible 检查：RMS < `audible_min_rms`（0.015）时 fail。
+4. **Task 4 writer bounded join**：`FfmpegRecordingWriter.tx` 改为 `Option<SyncSender>`；`finish()` 在 `join_worker()` 前 `self.tx.take()` drop sender；新增慢 join 日志（>10s warning）。
+5. **Task 5 drain loop diagnostics write-back**：`consume_frames()` 的 live drain 和 final drain 在 `writer.push_audio()` 前写入 per-source before-writer RMS/frames/windows 到 `RecordingDiagnostics`。
+6. **Task 6 蓝牙 mic stop lifecycle**：`CpalMicrophoneCapture::stop()` 新增显式 `pause()` 调用并记录结果；wait 从 200ms 增加到 300ms；`MacRecordingService::stop()` 仅在 `last_requested_microphone` 时执行 mic stop；stop 后重建 `CpalMicrophoneCapture::new()`。
+7. **Task 7 export contract integration**：`export_video()` 修复 `unwrap()` 为 `map_err`；contract 已使用 `..Default::default()` 包含 `audible_min_rms=0.015`。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **279 unit + 10 integration tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` **229 tests** 通过（无 ffmpeg 无回归）
+- `npm test -- --run` **52 tests** 通过
+- `cargo fmt --check` 通过
+- `cargo clippy` 通过
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/media/audio_synchronizer.rs`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/media/ffmpeg_common.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/platform/macos/cpal_microphone.rs`, `src-tauri/src/lib.rs`
+
+---
 
 ### 2026-06-02：Phase 6 第 25 节 code review 整改（source-aware synchronizer、source-aware contract、CPAL lazy offset、writer partial-overlap diagnostics、蓝牙 mic 释放）
 

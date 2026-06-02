@@ -6,7 +6,7 @@
 
 ### BUG-005: 音频捕获失败
 
-**当前状态**：第 25 节 review 整改中 — source-aware synchronizer、source-aware contract、CPAL lazy offset、writer partial-overlap diagnostics、蓝牙 mic 释放。待真实设备验证。
+**当前状态**：第 10 节 review 整改完成 — source-aware before-writer diagnostics、audible contract、蓝牙 mic pause/reset、synchronizer start grace、writer bounded join。待真实设备验证。
 
 **修复进展**：
 
@@ -32,43 +32,99 @@
    - 该问题暂时标记为不可抗力。
 7. 新的bug， **新 bug 现象**：
    - 系统音频 + 蓝牙麦克风 10 秒，验证停止后蓝牙音质**没有**恢复。
-     - [ ] 情况1：同时开启系统音频、麦克风录制（蓝牙耳机麦克风），结束录制后，没有释放麦克风进程，导致音质一直都是处于很差的状态。
-     - [ ] 情况2：同时开启系统音频、麦克风录制（系统默认麦克风，此时默认麦克风貌似是蓝牙耳机麦克风，因为音质变差了），结束录制后，可以释放麦克风进程，音质恢复。
+     - [ ] **情况1**：同时开启系统音频、麦克风录制（主动选择蓝牙耳机麦克风），结束录制后，没有释放麦克风进程，导致音质一直都是处于很差的状态。
+     - [ ] **情况2**：同时开启系统音频、麦克风录制（主动选择系统默认麦克风，此时默认麦克风貌似是蓝牙耳机麦克风，因为音质变差了），结束录制后，可以释放麦克风进程，音质恢复。
 
 以下是**新 bug 复现**时的终端日志：
+**情况1**：
 
 ```
+     Running `target/debug/luzhi`
 麦克风配置协商: 请求 48000Hz/2ch, 设备实际 24000Hz/1ch
-[libx264 @ 0x8fa094000] using cpu capabilities: ARMv8 NEON DotProd
-[libx264 @ 0x8fa094000] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
+[libx264 @ 0xb89d28000] using cpu capabilities: ARMv8 NEON DotProd
+[libx264 @ 0xb89d28000] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
+CpalMicrophoneCapture::stop() 开始
+CpalMicrophoneCapture::stop() 完成 — stream_dropped=true
 警告: 最终排空发现未配对的系统音频块
 警告: 最终排空发现未配对的系统音频块
-[aac @ 0x8fa094e00] Qavg: 3247.884
-[libx264 @ 0x8fa094000] frame I:2     Avg QP:13.00  size:409994
-[libx264 @ 0x8fa094000] frame P:290   Avg QP: 2.01  size: 17771
-[libx264 @ 0x8fa094000] mb I  I16..4: 100.0%  0.0%  0.0%
-[libx264 @ 0x8fa094000] mb P  I16..4:  0.6%  0.0%  0.0%  P16..4: 20.7%  0.0%  0.0%  0.0%  0.0%    skip:78.7%
-[libx264 @ 0x8fa094000] final ratefactor: 6.76
-[libx264 @ 0x8fa094000] coded y,uvDC,uvAC intra: 38.9% 23.5% 21.7% inter: 8.3% 3.8% 3.5%
-[libx264 @ 0x8fa094000] i16 v,h,dc,p: 55% 40%  2%  3%
-[libx264 @ 0x8fa094000] i8c dc,h,v,p: 68% 20% 10%  2%
-[libx264 @ 0x8fa094000] kb/s:4762.88
-录制音频诊断: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: None, system_chunks_received: 499, mic_chunks_received: 493, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 904, writer_push_audio_failures: 0, system_rms_max: 0.017147802, mic_rms_max: 0.09349334, mixed_rms_max: 0.088926174, generated_silent_track: false, paired_window_count: 88, system_only_window_count: 411, mic_only_window_count: 405 }
-录制音频 contract 验证通过: RMS=0.006991, peak=0.039398, samples=972800
-录制音频诊断摘要: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: None, system_chunks_received: 499, mic_chunks_received: 493, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 904, writer_push_audio_failures: 0, system_rms_max: 0.017147802, mic_rms_max: 0.09349334, mixed_rms_max: 0.088926174, generated_silent_track: false, paired_window_count: 88, system_only_window_count: 411, mic_only_window_count: 405 }
-写入器诊断摘要: WriterDiagnostics { audio_chunks_received: 904, audio_chunks_appended: 499, audio_chunks_discarded_full_overlap: 405, audio_chunks_trimmed_partial_overlap: 0, audio_real_frames_appended: 479040, audio_silence_frames_padded: 3840, audio_real_rms_max_before_encode: 0.014637499, aac_frames_encoded: 474, silent_aac_frames_encoded: 0, generated_silent_track: false, video_queue_full_count: 0, audio_queue_full_count: 0 }
-[libx264 @ 0x8fa096300] using cpu capabilities: ARMv8 NEON DotProd
-[libx264 @ 0x8fa096300] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
-[aac @ 0x8fa096a00] Qavg: 2443.667
-[libx264 @ 0x8fa096300] frame I:2     Avg QP:13.00  size:408898
-[libx264 @ 0x8fa096300] frame P:288   Avg QP: 2.18  size: 13739
-[libx264 @ 0x8fa096300] mb I  I16..4: 100.0%  0.0%  0.0%
-[libx264 @ 0x8fa096300] mb P  I16..4:  0.6%  0.0%  0.0%  P16..4: 14.9%  0.0%  0.0%  0.0%  0.0%    skip:84.5%
-[libx264 @ 0x8fa096300] final ratefactor: 5.49
-[libx264 @ 0x8fa096300] coded y,uvDC,uvAC intra: 39.9% 23.1% 21.3% inter: 5.8% 2.7% 2.3%
-[libx264 @ 0x8fa096300] i16 v,h,dc,p: 52% 43%  3%  3%
-[libx264 @ 0x8fa096300] i8c dc,h,v,p: 67% 21% 10%  2%
-[libx264 @ 0x8fa096300] kb/s:3832.41
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+[aac @ 0xb89d28700] Qavg: 3169.140
+[libx264 @ 0xb89d28000] frame I:2     Avg QP:13.00  size:313350
+[libx264 @ 0xb89d28000] frame P:366   Avg QP: 1.22  size: 12469
+[libx264 @ 0xb89d28000] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0xb89d28000] mb P  I16..4:  0.6%  0.0%  0.0%  P16..4: 16.7%  0.0%  0.0%  0.0%  0.0%    skip:82.7%
+[libx264 @ 0xb89d28000] final ratefactor: 3.78
+[libx264 @ 0xb89d28000] coded y,uvDC,uvAC intra: 26.8% 13.0% 11.6% inter: 6.5% 3.0% 2.8%
+[libx264 @ 0xb89d28000] i16 v,h,dc,p: 68% 28%  2%  2%
+[libx264 @ 0xb89d28000] i8c dc,h,v,p: 82% 10%  7%  1%
+[libx264 @ 0xb89d28000] kb/s:3227.13
+录制音频诊断: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: Some("drizzle"), system_chunks_received: 640, mic_chunks_received: 618, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 641, writer_push_audio_failures: 0, system_rms_max: 0.028443791, mic_rms_max: 0.12326609, mixed_rms_max: 0.059752557, generated_silent_track: false, paired_window_count: 619, system_only_window_count: 22, mic_only_window_count: 0, source_timeout_window_count: 0, system_rms_max_before_writer: 0.0, mic_rms_max_before_writer: 0.0 }
+录制音频 contract 验证通过: RMS=0.006896, peak=0.163129, samples=1247232
+录制音频诊断摘要: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: Some("drizzle"), system_chunks_received: 640, mic_chunks_received: 618, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 641, writer_push_audio_failures: 0, system_rms_max: 0.028443791, mic_rms_max: 0.12326609, mixed_rms_max: 0.059752557, generated_silent_track: false, paired_window_count: 619, system_only_window_count: 22, mic_only_window_count: 0, source_timeout_window_count: 0, system_rms_max_before_writer: 0.0, mic_rms_max_before_writer: 0.0 }
+写入器诊断摘要: WriterDiagnostics { audio_chunks_received: 641, audio_chunks_appended: 641, audio_chunks_discarded_full_overlap: 0, audio_chunks_trimmed_partial_overlap: 0, audio_real_frames_appended: 614400, audio_silence_frames_padded: 5611, audio_real_rms_max_before_encode: 0.06016173, aac_frames_encoded: 608, silent_aac_frames_encoded: 0, generated_silent_track: false, video_queue_full_count: 0, audio_queue_full_count: 0 }
+[libx264 @ 0xb89d29180] using cpu capabilities: ARMv8 NEON DotProd
+[libx264 @ 0xb89d29180] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
+[aac @ 0xb89d29880] Qavg: 2482.959
+[libx264 @ 0xb89d29180] frame I:2     Avg QP:13.00  size:312212
+[libx264 @ 0xb89d29180] frame P:339   Avg QP: 1.43  size:  8888
+[libx264 @ 0xb89d29180] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0xb89d29180] mb P  I16..4:  0.5%  0.0%  0.0%  P16..4: 11.5%  0.0%  0.0%  0.0%  0.0%    skip:88.0%
+[libx264 @ 0xb89d29180] final ratefactor: 2.15
+[libx264 @ 0xb89d29180] coded y,uvDC,uvAC intra: 30.0% 14.0% 12.3% inter: 4.4% 1.8% 1.5%
+[libx264 @ 0xb89d29180] i16 v,h,dc,p: 62% 33%  2%  3%
+[libx264 @ 0xb89d29180] i8c dc,h,v,p: 79% 11%  8%  2%
+[libx264 @ 0xb89d29180] kb/s:2438.55
+```
+
+**情况2**：
+
+```
+     Running `target/debug/luzhi`
+麦克风配置协商: 请求 48000Hz/2ch, 设备实际 24000Hz/1ch
+[libx264 @ 0x72ba6c000] using cpu capabilities: ARMv8 NEON DotProd
+[libx264 @ 0x72ba6c000] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
+CpalMicrophoneCapture::stop() 开始
+CpalMicrophoneCapture::stop() 完成 — stream_dropped=true
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+警告: 最终排空发现未配对的系统音频块
+[aac @ 0x72ba6c700] Qavg: 3672.200
+[libx264 @ 0x72ba6c000] frame I:2     Avg QP:13.00  size:309620
+[libx264 @ 0x72ba6c000] frame P:397   Avg QP: 1.23  size: 10839
+[libx264 @ 0x72ba6c000] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x72ba6c000] mb P  I16..4:  0.2%  0.0%  0.0%  P16..4: 14.9%  0.0%  0.0%  0.0%  0.0%    skip:84.9%
+[libx264 @ 0x72ba6c000] final ratefactor: 3.09
+[libx264 @ 0x72ba6c000] coded y,uvDC,uvAC intra: 34.1% 18.4% 16.4% inter: 5.8% 2.8% 2.6%
+[libx264 @ 0x72ba6c000] i16 v,h,dc,p: 62% 33%  2%  3%
+[libx264 @ 0x72ba6c000] i8c dc,h,v,p: 76% 12% 10%  2%
+[libx264 @ 0x72ba6c000] kb/s:2909.63
+录制音频诊断: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: None, system_chunks_received: 674, mic_chunks_received: 655, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 675, writer_push_audio_failures: 0, system_rms_max: 0.02666031, mic_rms_max: 0.29693782, mixed_rms_max: 0.16463715, generated_silent_track: false, paired_window_count: 656, system_only_window_count: 19, mic_only_window_count: 0, source_timeout_window_count: 0, system_rms_max_before_writer: 0.0, mic_rms_max_before_writer: 0.0 }
+录制音频 contract 验证通过: RMS=0.010561, peak=0.434141, samples=1312768
+录制音频诊断摘要: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: None, system_chunks_received: 674, mic_chunks_received: 655, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 675, writer_push_audio_failures: 0, system_rms_max: 0.02666031, mic_rms_max: 0.29693782, mixed_rms_max: 0.16463715, generated_silent_track: false, paired_window_count: 656, system_only_window_count: 19, mic_only_window_count: 0, source_timeout_window_count: 0, system_rms_max_before_writer: 0.0, mic_rms_max_before_writer: 0.0 }
+写入器诊断摘要: WriterDiagnostics { audio_chunks_received: 675, audio_chunks_appended: 675, audio_chunks_discarded_full_overlap: 0, audio_chunks_trimmed_partial_overlap: 0, audio_real_frames_appended: 647040, audio_silence_frames_padded: 5787, audio_real_rms_max_before_encode: 0.16452658, aac_frames_encoded: 640, silent_aac_frames_encoded: 0, generated_silent_track: false, video_queue_full_count: 0, audio_queue_full_count: 0 }
+[libx264 @ 0x72ba6d500] using cpu capabilities: ARMv8 NEON DotProd
+[libx264 @ 0x72ba6d500] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
+[aac @ 0x72ba6dc00] Qavg: 2728.863
+[libx264 @ 0x72ba6d500] frame I:2     Avg QP:13.00  size:308737
+[libx264 @ 0x72ba6d500] frame P:379   Avg QP: 1.36  size:  7444
+[libx264 @ 0x72ba6d500] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x72ba6d500] mb P  I16..4:  0.2%  0.0%  0.0%  P16..4:  9.9%  0.0%  0.0%  0.0%  0.0%    skip:89.9%
+[libx264 @ 0x72ba6d500] final ratefactor: 1.29
+[libx264 @ 0x72ba6d500] coded y,uvDC,uvAC intra: 34.5% 17.8% 15.8% inter: 3.7% 1.5% 1.3%
+[libx264 @ 0x72ba6d500] i16 v,h,dc,p: 59% 35%  3%  3%
+[libx264 @ 0x72ba6d500] i8c dc,h,v,p: 77% 12%  8%  2%
+[libx264 @ 0x72ba6d500] kb/s:2127.10
 ```
 
 **现象**：
@@ -127,6 +183,19 @@
 - 当 capture-side 某请求源 RMS 非零但 writer/source-aware diagnostics 显示该源被大量 overlap discard 时，必须视为录制失败或至少阻断 BUG 关闭
 - CPAL 麦克风 timestamp 不能在 stream build 时固定 offset；首帧 callback 或设备 timestamp 才能作为输入流真实起点
 - 蓝牙麦克风 UI warning 不能替代资源释放验证；显式蓝牙设备 stop 后必须验证 stream drop 与音质恢复
+
+**新增预防规则（2026-06-02 Section 10 整改）**：
+
+- consumer drain 循环必须在 writer push 前写入 per-source before-writer RMS/frames/windows 诊断数据
+- source-aware contract 必须检查 before-writer 字段，不能只依赖 synchronizer window counts
+- `audible_min_rms` 必须参与 source/export validation，不能只作为日志字段
+- CPAL 麦克风 stop 必须显式调用 `pause()` 并记录结果，不能只依赖 `drop()` 的隐式释放
+- stop 顺序应为 mic first → screen capture，减少蓝牙 HFP profile 持有时间
+- 只在本轮确实启动过麦克风时才执行 mic stop，避免无意义的 300ms sleep
+- stop 后应重建 `CpalMicrophoneCapture` 实例，避免旧 device handle 残留
+- AudioSynchronizer 双源启动阶段应有 grace period，防止早到源单独 emit
+- `source_timeout_window_count` 必须在 source stall 或 grace timeout 时正确递增
+- FFmpeg writer `tx` 必须为 `Option<SyncSender>`，`finish()` 必须在 `join_worker()` 前 drop sender，防止 worker 卡在 recv 时 join 无限阻塞
 
 ---
 

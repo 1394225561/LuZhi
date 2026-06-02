@@ -293,8 +293,15 @@ impl MacRecordingService {
         self.cursor_runtime = None;
 
         // Stop mic first to release Bluetooth HFP profile ASAP.
-        // This reduces the time the Bluetooth device is held in SCO mode.
-        let mic_result = self.mic_capture.stop();
+        // Only stop if microphone was actually started this session —
+        // avoids unnecessary 300ms wait when mic was not used.
+        let mic_result = if self.last_requested_microphone {
+            eprintln!("麦克风已启动，执行 mic stop...");
+            self.mic_capture.stop()
+        } else {
+            eprintln!("本轮未启动麦克风，跳过 mic stop");
+            Ok(())
+        };
         // Then stop screen capture so no new media can be enqueued.
         let capture_result = ScreenCapture::stop(&mut self.screen_capture);
 
@@ -393,6 +400,12 @@ impl MacRecordingService {
         // Reset mic level after session ends — always executed.
         if let Ok(mut guard) = self.mic_level.lock() {
             *guard = 0.0;
+        }
+
+        // Reset mic capture instance to avoid stale device handle.
+        // Next recording session will re-select the device fresh.
+        if self.last_requested_microphone {
+            self.mic_capture = CpalMicrophoneCapture::new();
         }
 
         // Collect capture/mic stop errors.
@@ -567,6 +580,25 @@ impl MacRecordingService {
             for synced_result in synchronizer.drain_mixed() {
                 match synced_result {
                     Ok(synced) => {
+                        // Record per-source before-writer diagnostics.
+                        if synced.has_system {
+                            diagnostics.system_windows_before_writer += 1;
+                            diagnostics.system_frames_before_writer += synced.system_frames;
+                            if synced.system_rms > diagnostics.system_rms_max_before_writer {
+                                diagnostics.system_rms_max_before_writer = synced.system_rms;
+                            }
+                        }
+                        if synced.has_mic {
+                            diagnostics.mic_windows_before_writer += 1;
+                            diagnostics.mic_frames_before_writer += synced.mic_frames;
+                            if synced.mic_rms > diagnostics.mic_rms_max_before_writer {
+                                diagnostics.mic_rms_max_before_writer = synced.mic_rms;
+                            }
+                        }
+                        if synced.emitted_due_to_timeout {
+                            diagnostics.source_timeout_window_count += 1;
+                        }
+
                         // Track audio duration independent of sample caps.
                         let chunk_frames =
                             synced.mixed.samples.len() as u64 / synced.mixed.channels.max(1) as u64;
@@ -679,6 +711,26 @@ impl MacRecordingService {
                     eprintln!("警告: 最终排空发现未配对的麦克风音频块");
                 }
             }
+
+            // Record per-source before-writer diagnostics (final drain).
+            if synchronized.has_system {
+                diagnostics.system_windows_before_writer += 1;
+                diagnostics.system_frames_before_writer += synchronized.system_frames;
+                if synchronized.system_rms > diagnostics.system_rms_max_before_writer {
+                    diagnostics.system_rms_max_before_writer = synchronized.system_rms;
+                }
+            }
+            if synchronized.has_mic {
+                diagnostics.mic_windows_before_writer += 1;
+                diagnostics.mic_frames_before_writer += synchronized.mic_frames;
+                if synchronized.mic_rms > diagnostics.mic_rms_max_before_writer {
+                    diagnostics.mic_rms_max_before_writer = synchronized.mic_rms;
+                }
+            }
+            if synchronized.emitted_due_to_timeout {
+                diagnostics.source_timeout_window_count += 1;
+            }
+
             let chunk_frames =
                 synchronized.mixed.samples.len() as u64 / synchronized.mixed.channels.max(1) as u64;
             let chunk_nanos = chunk_frames.saturating_mul(1_000_000_000)

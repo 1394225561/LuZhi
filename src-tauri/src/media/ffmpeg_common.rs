@@ -550,6 +550,19 @@ pub fn validate_source_artifact_with_audio_contract(
         });
     }
 
+    // Level 2: audible check — RMS must exceed the audible threshold.
+    if rms < contract.audible_min_rms {
+        return Err(AppError::RecordingWriteFailed {
+            reason: format!(
+                "请求了音频录制但 RMS 低于可听阈值（RMS={:.6} < {:.6}，system={}, mic={}）",
+                rms,
+                contract.audible_min_rms,
+                contract.requested_system_audio,
+                contract.requested_microphone,
+            ),
+        });
+    }
+
     Ok(inspection)
 }
 
@@ -592,6 +605,16 @@ pub fn validate_export_artifact_with_audio_contract(
             reason: format!(
                 "导出文件请求了音频但解码后近乎静音（RMS={:.6} < {:.6}，peak={:.6} < {:.6}）",
                 rms, contract.min_rms, peak, contract.min_peak,
+            ),
+        });
+    }
+
+    // Level 2: audible check — RMS must exceed the audible threshold.
+    if rms < contract.audible_min_rms {
+        return Err(AppError::ExportFailed {
+            reason: format!(
+                "导出文件 RMS 低于可听阈值（RMS={:.6} < {:.6}）",
+                rms, contract.audible_min_rms,
             ),
         });
     }

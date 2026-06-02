@@ -898,7 +898,10 @@ async fn export_video(
         if let Ok(ref result) = export_result {
             let spec = export_preset.spec();
             let contract = {
-                let svc = state.service.lock().unwrap();
+                let svc = state
+                    .service
+                    .lock()
+                    .map_err(|_| "录制服务锁已损坏".to_string())?;
                 media::ffmpeg_common::RequestedAudioContract {
                     requested_system_audio: svc.last_requested_system_audio(),
                     requested_microphone: svc.last_requested_microphone(),

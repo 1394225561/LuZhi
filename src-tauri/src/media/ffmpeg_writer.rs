@@ -36,7 +36,7 @@ enum EncoderMessage {
 /// capture consumer thread free. The bounded channel provides backpressure when
 /// the encoder can't keep up, preventing unbounded memory growth.
 pub struct FfmpegRecordingWriter {
-    tx: mpsc::SyncSender<EncoderMessage>,
+    tx: Option<mpsc::SyncSender<EncoderMessage>>,
     worker: Option<thread::JoinHandle<AppResult<RecordingResult>>>,
     frame_count: u64,
     mixed_audio_chunk_count: u64,
@@ -61,7 +61,7 @@ impl FfmpegRecordingWriter {
         let worker = thread::spawn(move || encoder_worker(worker_path, rx));
 
         Ok(Self {
-            tx,
+            tx: Some(tx),
             worker: Some(worker),
             frame_count: 0,
             mixed_audio_chunk_count: 0,
@@ -121,26 +121,28 @@ impl RecordingWriter for FfmpegRecordingWriter {
         // This prevents the capture consumer thread from stalling when the
         // FFmpeg encoder can't keep up, which would cause audio drops in
         // the media channels.
-        self.tx
-            .try_send(EncoderMessage::Video {
-                timestamp_nanos: frame.timestamp.nanos,
-                width: frame.width,
-                height: frame.height,
-                stride_bytes: copy_per_row,
-                buffer,
-            })
-            .map_err(|e| match e {
-                mpsc::TrySendError::Full(_) => {
-                    self.video_queue_full_count += 1;
-                    AppError::RecordingWriteFailed {
-                        reason: "FFmpeg 编码队列已满，视频帧被丢弃（编码速度跟不上采集速度）"
-                            .to_string(),
-                    }
+        let tx = self.tx.as_ref().ok_or(AppError::RecordingWriteFailed {
+            reason: "编码队列已关闭（writer 已 finish）".to_string(),
+        })?;
+        tx.try_send(EncoderMessage::Video {
+            timestamp_nanos: frame.timestamp.nanos,
+            width: frame.width,
+            height: frame.height,
+            stride_bytes: copy_per_row,
+            buffer,
+        })
+        .map_err(|e| match e {
+            mpsc::TrySendError::Full(_) => {
+                self.video_queue_full_count += 1;
+                AppError::RecordingWriteFailed {
+                    reason: "FFmpeg 编码队列已满，视频帧被丢弃（编码速度跟不上采集速度）"
+                        .to_string(),
                 }
-                mpsc::TrySendError::Disconnected(_) => AppError::RecordingWriteFailed {
-                    reason: "编码队列已关闭，无法发送视频帧".to_string(),
-                },
-            })
+            }
+            mpsc::TrySendError::Disconnected(_) => AppError::RecordingWriteFailed {
+                reason: "编码队列已关闭，无法发送视频帧".to_string(),
+            },
+        })
     }
 
     fn push_audio(&mut self, chunk: MixedAudioChunk) -> AppResult<()> {
@@ -172,23 +174,25 @@ impl RecordingWriter for FfmpegRecordingWriter {
         // Non-blocking enqueue — returns error if the queue is full.
         // Audio starvation is worse than a logged drop because it can cause
         // the entire capture pipeline to stall.
-        self.tx
-            .try_send(EncoderMessage::Audio {
-                samples: chunk.samples.to_vec(),
-                timestamp_nanos: chunk.timestamp.nanos,
-            })
-            .map_err(|e| match e {
-                mpsc::TrySendError::Full(_) => {
-                    self.audio_queue_full_count += 1;
-                    AppError::RecordingWriteFailed {
-                        reason: "FFmpeg 编码队列已满，音频数据被丢弃（编码速度跟不上采集速度）"
-                            .to_string(),
-                    }
+        let tx = self.tx.as_ref().ok_or(AppError::RecordingWriteFailed {
+            reason: "编码队列已关闭（writer 已 finish）".to_string(),
+        })?;
+        tx.try_send(EncoderMessage::Audio {
+            samples: chunk.samples.to_vec(),
+            timestamp_nanos: chunk.timestamp.nanos,
+        })
+        .map_err(|e| match e {
+            mpsc::TrySendError::Full(_) => {
+                self.audio_queue_full_count += 1;
+                AppError::RecordingWriteFailed {
+                    reason: "FFmpeg 编码队列已满，音频数据被丢弃（编码速度跟不上采集速度）"
+                        .to_string(),
                 }
-                mpsc::TrySendError::Disconnected(_) => AppError::RecordingWriteFailed {
-                    reason: "编码队列已关闭，无法发送音频数据".to_string(),
-                },
-            })
+            }
+            mpsc::TrySendError::Disconnected(_) => AppError::RecordingWriteFailed {
+                reason: "编码队列已关闭，无法发送音频数据".to_string(),
+            },
+        })
     }
 
     fn finish(&mut self) -> AppResult<RecordingResult> {
@@ -200,17 +204,26 @@ impl RecordingWriter for FfmpegRecordingWriter {
 
         let mut flush_sent = false;
         for _ in 0..MAX_FLUSH_RETRIES {
-            match self.tx.try_send(EncoderMessage::Flush) {
-                Ok(()) => {
+            match self
+                .tx
+                .as_ref()
+                .map(|tx| tx.try_send(EncoderMessage::Flush))
+            {
+                Some(Ok(())) => {
                     flush_sent = true;
                     break;
                 }
-                Err(mpsc::TrySendError::Full(_)) => {
+                Some(Err(mpsc::TrySendError::Full(_))) => {
                     // Queue is full — wait briefly for the worker to drain.
                     std::thread::sleep(FLUSH_RETRY_DELAY);
                 }
-                Err(mpsc::TrySendError::Disconnected(_)) => {
+                Some(Err(mpsc::TrySendError::Disconnected(_))) => {
                     // Worker already exited — skip flush.
+                    flush_sent = true;
+                    break;
+                }
+                None => {
+                    // tx already taken — skip flush.
                     flush_sent = true;
                     break;
                 }
@@ -226,8 +239,22 @@ impl RecordingWriter for FfmpegRecordingWriter {
             });
         }
 
+        // Drop sender before joining worker.
+        // This ensures the worker's channel becomes disconnected after it processes
+        // the Flush message, so if the worker is stuck on rx.recv() it will get a
+        // RecvError and exit cleanly instead of blocking join() forever.
+        self.tx.take();
+
         // Join the worker and merge front-end queue diagnostics.
+        let start = std::time::Instant::now();
         let mut result = self.join_worker()?;
+        let join_elapsed = start.elapsed();
+        if join_elapsed > std::time::Duration::from_secs(10) {
+            eprintln!(
+                "警告: encoder worker join 耗时 {:.1}s，可能 FFmpeg flush 缓慢",
+                join_elapsed.as_secs_f64()
+            );
+        }
         result.writer_diagnostics.video_queue_full_count += self.video_queue_full_count;
         result.writer_diagnostics.audio_queue_full_count += self.audio_queue_full_count;
         Ok(result)
