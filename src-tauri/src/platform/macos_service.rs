@@ -781,6 +781,16 @@ impl MacRecordingService {
                     }
                 }
             }
+
+            // Source-aware contract: check each requested source actually contributed.
+            if let Err(e) = crate::media::recording_writer::validate_source_aware_audio_contract(
+                &diagnostics,
+                &result.writer_diagnostics,
+            ) {
+                let msg = format!("source-aware audio contract 失败: {e}");
+                eprintln!("{msg}");
+                errors.push(msg);
+            }
         }
 
         // Writer duration may be 0 when using CountingRecordingWriter (no

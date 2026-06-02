@@ -89,6 +89,68 @@ pub struct RecordingDiagnostics {
     pub mic_rms_max_before_writer: f32,
 }
 
+/// Source-aware audio contract validation.
+///
+/// Unlike aggregate-only validation, this checks that each requested source
+/// actually contributed to the artifact. Uses synchronizer diagnostics to
+/// detect the BUG-005 pattern: capture-side RMS non-zero but writer discarded
+/// all chunks from one source.
+pub fn validate_source_aware_audio_contract(
+    diagnostics: &RecordingDiagnostics,
+    writer_diagnostics: &WriterDiagnostics,
+) -> crate::app::error::AppResult<()> {
+    use crate::app::error::AppError;
+
+    // Check: if system audio was requested and capture-side RMS was non-zero,
+    // but no system windows were emitted by synchronizer, that's a failure.
+    if diagnostics.requested_system_audio && diagnostics.system_rms_max > 0.001 {
+        if diagnostics.system_only_window_count + diagnostics.paired_window_count == 0 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested system audio, capture RMS={:.6}, but 0 system windows emitted",
+                    diagnostics.system_rms_max
+                ),
+            });
+        }
+    }
+
+    // Check: if mic was requested and capture-side RMS was non-zero,
+    // but no mic windows were emitted, that's a failure.
+    if diagnostics.requested_microphone && diagnostics.mic_rms_max > 0.001 {
+        if diagnostics.mic_only_window_count + diagnostics.paired_window_count == 0 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested microphone, capture RMS={:.6}, but 0 mic windows emitted",
+                    diagnostics.mic_rms_max
+                ),
+            });
+        }
+    }
+
+    // Check: if mic was requested and capture RMS was non-zero, but most audio
+    // chunks were discarded by writer (full-overlap), that's a failure.
+    if diagnostics.requested_microphone && diagnostics.mic_rms_max > 0.001 {
+        let mic_windows_emitted =
+            diagnostics.mic_only_window_count + diagnostics.paired_window_count;
+        if mic_windows_emitted > 0 && writer_diagnostics.audio_chunks_discarded_full_overlap > 0 {
+            let discard_ratio = writer_diagnostics.audio_chunks_discarded_full_overlap as f64
+                / (writer_diagnostics.audio_chunks_received.max(1)) as f64;
+            if discard_ratio > 0.5 {
+                return Err(AppError::RecordingFinalizeFailed {
+                    reason: format!(
+                        "requested microphone, but {:.0}% of audio chunks were discarded as full overlap ({} of {})",
+                        discard_ratio * 100.0,
+                        writer_diagnostics.audio_chunks_discarded_full_overlap,
+                        writer_diagnostics.audio_chunks_received
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Result returned after finalizing a recording session.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

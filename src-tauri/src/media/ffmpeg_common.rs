@@ -21,6 +21,9 @@ pub struct RequestedAudioContract {
     /// Minimum decoded peak to consider audio non-silent.
     /// Default: 0.02 (conservative threshold for audible content).
     pub min_peak: f32,
+    /// Higher threshold for "audible" audio — used for real-device validation.
+    /// Default 0.015. Aggregate RMS below this triggers a warning.
+    pub audible_min_rms: f64,
 }
 
 impl Default for RequestedAudioContract {
@@ -30,6 +33,7 @@ impl Default for RequestedAudioContract {
             requested_microphone: false,
             min_rms: 0.003,
             min_peak: 0.02,
+            audible_min_rms: 0.015,
         }
     }
 }
