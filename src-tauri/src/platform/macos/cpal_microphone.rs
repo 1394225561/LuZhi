@@ -228,11 +228,9 @@ fn build_input_stream<T: cpal::SizedSample>(
 where
     f32: cpal::FromSample<T>,
 {
-    let mut sample_clock = crate::core::clock::AudioSampleClock::new(sample_rate, channels);
-    if let Some(ref clock) = session_clock {
-        sample_clock = sample_clock.with_session_clock(clock);
-    }
-    let sample_clock = Arc::new(sample_clock);
+    // Use lazy offset: the session offset is set on the first audio callback
+    // (not at stream build time) to prevent build-delay from inflating timestamps.
+    let sample_clock = Arc::new(crate::core::clock::AudioSampleClock::new(sample_rate, channels));
 
     let stream = device
         .build_input_stream(
@@ -246,6 +244,13 @@ where
 
                 if samples.is_empty() {
                     return;
+                }
+
+                // Lazy offset initialization on first callback.
+                // This prevents stream-build delay from inflating the first chunk's timestamp.
+                if let Some(ref session) = session_clock {
+                    let buffer_frames = samples.len() as u64 / channels.max(1) as u64;
+                    sample_clock.initialize_offset(session, buffer_frames);
                 }
 
                 let timestamp = sample_clock.timestamp_for_interleaved_sample_count(samples.len());

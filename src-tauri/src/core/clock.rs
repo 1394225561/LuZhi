@@ -67,6 +67,10 @@ impl Default for SessionClock {
 /// interleaved audio samples emitted, derived from sample rate and channel count.
 /// When anchored to a `SessionClock`, the first timestamp reflects the real
 /// elapsed time since recording started.
+///
+/// **Lazy offset**: Use `with_lazy_offset()` + `initialize_offset()` to set the
+/// session offset on the first audio callback, preventing stream-build delay from
+/// creating a systematic timestamp offset (BUG-005 Important 1).
 #[derive(Debug)]
 pub struct AudioSampleClock {
     sample_rate: u32,
@@ -74,7 +78,8 @@ pub struct AudioSampleClock {
     emitted_frames: AtomicU64,
     /// Offset added to every sample-count-derived timestamp so the first
     /// chunk's timestamp equals the wall-clock elapsed time at callback entry.
-    session_offset_nanos: u64,
+    /// Uses AtomicU64 to support lazy initialization from `&self` (via CAS).
+    session_offset_nanos: AtomicU64,
 }
 
 impl AudioSampleClock {
@@ -86,16 +91,42 @@ impl AudioSampleClock {
             sample_rate,
             channels,
             emitted_frames: AtomicU64::new(0),
-            session_offset_nanos: 0,
+            session_offset_nanos: AtomicU64::new(0),
         }
     }
 
     /// Anchors this clock to a session clock so the first timestamp reflects
     /// the real elapsed time since the session started, rather than starting
     /// at zero independently.
-    pub fn with_session_clock(mut self, session: &SessionClock) -> Self {
-        self.session_offset_nanos = session.elapsed_nanos();
+    ///
+    /// **Prefer `with_lazy_offset()` + `initialize_offset()` for mic capture**
+    /// to avoid the stream-build delay offsetting timestamps.
+    pub fn with_session_clock(self, session: &SessionClock) -> Self {
+        self.session_offset_nanos
+            .store(session.elapsed_nanos(), Ordering::Relaxed);
         self
+    }
+
+    /// Initializes the session offset lazily from the first audio callback.
+    ///
+    /// Computes `callback_now - buffer_duration` to estimate when capture
+    /// actually started, preventing the stream-build delay from inflating
+    /// the first chunk's timestamp.
+    ///
+    /// Uses CAS so only the first call takes effect; subsequent calls are no-ops.
+    /// This method is safe to call from `&self` (no `&mut` required).
+    pub fn initialize_offset(&self, session: &SessionClock, buffer_frames: u64) {
+        let buffer_duration_nanos = buffer_frames * 1_000_000_000 / self.sample_rate as u64;
+        let callback_now = session.elapsed_nanos();
+        let offset = callback_now.saturating_sub(buffer_duration_nanos);
+
+        // Only set if currently 0 (first-call wins).
+        let _ = self.session_offset_nanos.compare_exchange(
+            0,
+            offset,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
     }
 
     /// Returns the timestamp for the next batch of `sample_count` interleaved samples.
@@ -105,8 +136,9 @@ impl AudioSampleClock {
         let frames = sample_count as u64 / self.channels as u64;
         let start_frame = self.emitted_frames.fetch_add(frames, Ordering::Relaxed);
         let nanos = start_frame.saturating_mul(1_000_000_000) / self.sample_rate as u64;
+        let offset = self.session_offset_nanos.load(Ordering::Relaxed);
 
-        MediaTimestamp::from_nanos(nanos + self.session_offset_nanos)
+        MediaTimestamp::from_nanos(nanos + offset)
     }
 }
 
@@ -153,5 +185,46 @@ mod tests {
         // with_session_clock was called (a few microseconds at most).
         assert!(first.nanos > 0);
         assert!(first.nanos < session.elapsed_nanos() + 1_000_000);
+    }
+
+    #[test]
+    fn audio_sample_clock_lazy_offset_anchors_first_callback_start() {
+        let session = SessionClock::new();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let clock = AudioSampleClock::new(48_000, 2);
+        // Simulate first callback with 960 frames (10ms buffer @ 48kHz stereo).
+        clock.initialize_offset(&session, 960);
+
+        let first = clock.timestamp_for_interleaved_sample_count(1920); // 960 frames, 2ch
+        // First timestamp should be near session elapsed - 10ms buffer.
+        let expected_start = session.elapsed_nanos().saturating_sub(10_000_000);
+        assert!(first.nanos >= expected_start.saturating_sub(1_000_000));
+        assert!(first.nanos <= expected_start + 1_000_000);
+    }
+
+    #[test]
+    fn mic_clock_startup_delay_does_not_shift_first_chunk_by_stream_build_time() {
+        let session = SessionClock::new();
+
+        // Simulate 200ms delay between stream build and first callback.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // With eager offset (old behavior), offset would be ~200ms.
+        let eager_clock = AudioSampleClock::new(48_000, 2).with_session_clock(&session);
+        let eager_first = eager_clock.timestamp_for_interleaved_sample_count(1920);
+
+        // With lazy offset (new behavior), offset is set at callback time minus buffer.
+        let lazy_clock = AudioSampleClock::new(48_000, 2);
+        lazy_clock.initialize_offset(&session, 960);
+        let lazy_first = lazy_clock.timestamp_for_interleaved_sample_count(1920);
+
+        // Lazy should be significantly smaller than eager (which included the 200ms build delay).
+        assert!(
+            lazy_first.nanos < eager_first.nanos,
+            "lazy ({}) should be less than eager ({}) due to build delay",
+            lazy_first.nanos,
+            eager_first.nanos
+        );
     }
 }
