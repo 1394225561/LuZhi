@@ -103,96 +103,131 @@ pub struct RecordingDiagnostics {
 /// actually contributed to the artifact. Uses synchronizer diagnostics to
 /// detect the BUG-005 pattern: capture-side RMS non-zero but writer discarded
 /// all chunks from one source.
+///
+/// **Phase C fix**: source presence checks are based on chunk/window/frame
+/// counts, NOT gated by RMS. RMS is only used for "capture had sound but
+// writer lost it" detection, not for deciding whether to run presence checks.
 pub fn validate_source_aware_audio_contract(
     diagnostics: &RecordingDiagnostics,
     writer_diagnostics: &WriterDiagnostics,
 ) -> crate::app::error::AppResult<()> {
     use crate::app::error::AppError;
 
-    // Check: if system audio was requested and capture-side RMS was non-zero,
-    // but no system windows were emitted by synchronizer, that's a failure.
-    if diagnostics.requested_system_audio && diagnostics.system_rms_max > 0.001 {
-        if diagnostics.system_only_window_count + diagnostics.paired_window_count == 0 {
+    // --- System audio presence checks ---
+    if diagnostics.requested_system_audio {
+        if diagnostics.system_chunks_received == 0 {
+            // Capture source missing entirely — this is a real failure.
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: "requested system audio but 0 chunks received from capture".to_string(),
+            });
+        }
+        // Chunks received — verify they reached the synchronizer and writer.
+        let system_windows = diagnostics.system_only_window_count + diagnostics.paired_window_count;
+        if system_windows == 0 {
             return Err(AppError::RecordingFinalizeFailed {
                 reason: format!(
-                    "requested system audio, capture RMS={:.6}, but 0 system windows emitted",
-                    diagnostics.system_rms_max
+                    "requested system audio, received {} chunks, but 0 system windows emitted",
+                    diagnostics.system_chunks_received
                 ),
             });
         }
-    }
-
-    // Check: if mic was requested and capture-side RMS was non-zero,
-    // but no mic windows were emitted, that's a failure.
-    if diagnostics.requested_microphone && diagnostics.mic_rms_max > 0.001 {
-        if diagnostics.mic_only_window_count + diagnostics.paired_window_count == 0 {
-            return Err(AppError::RecordingFinalizeFailed {
-                reason: format!(
-                    "requested microphone, capture RMS={:.6}, but 0 mic windows emitted",
-                    diagnostics.mic_rms_max
-                ),
-            });
-        }
-    }
-
-    // NEW: Check before-writer presence — verifies each requested source
-    // actually reached the writer, not just that the synchronizer emitted windows.
-    if diagnostics.requested_system_audio && diagnostics.system_rms_max > 0.001 {
         if diagnostics.system_windows_before_writer == 0 {
             return Err(AppError::RecordingFinalizeFailed {
                 reason: format!(
-                    "requested system audio, capture RMS={:.6}, but 0 system windows reached writer",
-                    diagnostics.system_rms_max
+                    "requested system audio, received {} chunks, but 0 system windows reached writer",
+                    diagnostics.system_chunks_received
                 ),
             });
         }
-        if diagnostics.system_rms_max_before_writer < 0.001 {
+        if diagnostics.system_frames_before_writer == 0 {
             return Err(AppError::RecordingFinalizeFailed {
                 reason: format!(
-                    "requested system audio but system RMS before writer is 0 (capture RMS={:.6})",
+                    "requested system audio, received {} chunks, but 0 system frames reached writer",
+                    diagnostics.system_chunks_received
+                ),
+            });
+        }
+        // Capture had sound but writer-side RMS is 0 — something went wrong
+        // between synchronizer and encoder.
+        if diagnostics.system_rms_max > 0.001 && diagnostics.system_rms_max_before_writer < 0.001 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested system audio, capture RMS={:.6}, but RMS before writer is 0",
                     diagnostics.system_rms_max
                 ),
             });
         }
     }
 
-    if diagnostics.requested_microphone && diagnostics.mic_rms_max > 0.001 {
+    // --- Microphone presence checks ---
+    if diagnostics.requested_microphone {
+        if diagnostics.mic_chunks_received == 0 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: "requested microphone but 0 chunks received from capture".to_string(),
+            });
+        }
+        let mic_windows = diagnostics.mic_only_window_count + diagnostics.paired_window_count;
+        if mic_windows == 0 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested microphone, received {} chunks, but 0 mic windows emitted",
+                    diagnostics.mic_chunks_received
+                ),
+            });
+        }
         if diagnostics.mic_windows_before_writer == 0 {
             return Err(AppError::RecordingFinalizeFailed {
                 reason: format!(
-                    "requested microphone, capture RMS={:.6}, but 0 mic windows reached writer",
-                    diagnostics.mic_rms_max
+                    "requested microphone, received {} chunks, but 0 mic windows reached writer",
+                    diagnostics.mic_chunks_received
                 ),
             });
         }
-        if diagnostics.mic_rms_max_before_writer < 0.001 {
+        if diagnostics.mic_frames_before_writer == 0 {
             return Err(AppError::RecordingFinalizeFailed {
                 reason: format!(
-                    "requested microphone but mic RMS before writer is 0 (capture RMS={:.6})",
+                    "requested microphone, received {} chunks, but 0 mic frames reached writer",
+                    diagnostics.mic_chunks_received
+                ),
+            });
+        }
+        if diagnostics.mic_rms_max > 0.001 && diagnostics.mic_rms_max_before_writer < 0.001 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested microphone, capture RMS={:.6}, but RMS before writer is 0",
                     diagnostics.mic_rms_max
                 ),
             });
         }
     }
 
-    // Check: if mic was requested and capture RMS was non-zero, but most audio
-    // chunks were discarded by writer (full-overlap), that's a failure.
-    if diagnostics.requested_microphone && diagnostics.mic_rms_max > 0.001 {
-        let mic_windows_emitted =
-            diagnostics.mic_only_window_count + diagnostics.paired_window_count;
-        if mic_windows_emitted > 0 && writer_diagnostics.audio_chunks_discarded_full_overlap > 0 {
-            let discard_ratio = writer_diagnostics.audio_chunks_discarded_full_overlap as f64
-                / (writer_diagnostics.audio_chunks_received.max(1)) as f64;
-            if discard_ratio > 0.5 {
-                return Err(AppError::RecordingFinalizeFailed {
-                    reason: format!(
-                        "requested microphone, but {:.0}% of audio chunks were discarded as full overlap ({} of {})",
-                        discard_ratio * 100.0,
-                        writer_diagnostics.audio_chunks_discarded_full_overlap,
-                        writer_diagnostics.audio_chunks_received
-                    ),
-                });
-            }
+    // --- Writer discard check (symmetric for both sources) ---
+    // If most audio chunks were discarded by writer (full-overlap), that's a
+    // failure regardless of which source was requested.
+    if writer_diagnostics.audio_chunks_received > 0
+        && writer_diagnostics.audio_chunks_discarded_full_overlap > 0
+    {
+        let discard_ratio = writer_diagnostics.audio_chunks_discarded_full_overlap as f64
+            / writer_diagnostics.audio_chunks_received as f64;
+        if discard_ratio > 0.5 {
+            let source_desc = match (
+                diagnostics.requested_system_audio,
+                diagnostics.requested_microphone,
+            ) {
+                (true, true) => "system+mic",
+                (true, false) => "system",
+                (false, true) => "mic",
+                (false, false) => "none",
+            };
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: format!(
+                    "requested {}, but {:.0}% of audio chunks were discarded as full overlap ({} of {})",
+                    source_desc,
+                    discard_ratio * 100.0,
+                    writer_diagnostics.audio_chunks_discarded_full_overlap,
+                    writer_diagnostics.audio_chunks_received
+                ),
+            });
         }
     }
 
@@ -460,6 +495,8 @@ mod tests {
         let diag = RecordingDiagnostics {
             requested_system_audio: true,
             requested_microphone: true,
+            system_chunks_received: 100,
+            mic_chunks_received: 80,
             system_rms_max: 0.05,
             mic_rms_max: 0.10,
             mic_windows_before_writer: 5,
@@ -474,7 +511,7 @@ mod tests {
         let result = validate_source_aware_audio_contract(&diag, &writer_diag);
         assert!(
             result.is_err(),
-            "should reject when system requested, capture RMS non-zero, but 0 before-writer windows"
+            "should reject when system requested, chunks received, but 0 before-writer windows"
         );
     }
 
@@ -483,6 +520,8 @@ mod tests {
         let diag = RecordingDiagnostics {
             requested_system_audio: true,
             requested_microphone: true,
+            system_chunks_received: 100,
+            mic_chunks_received: 80,
             system_rms_max: 0.05,
             mic_rms_max: 0.10,
             system_windows_before_writer: 5,
@@ -497,7 +536,7 @@ mod tests {
         let result = validate_source_aware_audio_contract(&diag, &writer_diag);
         assert!(
             result.is_err(),
-            "should reject when mic requested, capture RMS non-zero, but 0 before-writer windows"
+            "should reject when mic requested, chunks received, but 0 before-writer windows"
         );
     }
 
@@ -506,8 +545,10 @@ mod tests {
         let diag = RecordingDiagnostics {
             requested_system_audio: true,
             requested_microphone: false,
+            system_chunks_received: 100,
             system_rms_max: 0.05,
             system_windows_before_writer: 5,
+            system_frames_before_writer: 1000,
             system_rms_max_before_writer: 0.0, // windows exist but RMS is 0
             paired_window_count: 5,
             ..Default::default()
@@ -517,7 +558,7 @@ mod tests {
         let result = validate_source_aware_audio_contract(&diag, &writer_diag);
         assert!(
             result.is_err(),
-            "should reject when system windows reached writer but RMS is 0"
+            "should reject when capture RMS non-zero but RMS before writer is 0"
         );
     }
 }

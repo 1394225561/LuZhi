@@ -226,3 +226,70 @@ fn synthetic_audio_chunk_at(timestamp_nanos: u64) -> MixedAudioChunk {
         samples: Arc::from(vec![0.25f32; 2048].into_boxed_slice()),
     }
 }
+
+/// Creates a synthetic source artifact with configurable audio amplitude.
+///
+/// Use this for tests that need specific RMS/peak levels (e.g., low-RMS
+/// regression tests for audible contract validation).
+#[cfg(feature = "ffmpeg")]
+pub fn create_synthetic_source_artifact_strict_with_amplitude(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    duration_nanos: u64,
+    audio_amplitude: f32,
+) -> crate::app::error::AppResult<()> {
+    use crate::app::error::AppError;
+    use crate::media::recording_writer::RecordingWriter;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AppError::RecordingWriteFailed {
+            reason: format!("创建测试目录失败: {e}"),
+        })?;
+    }
+
+    let mut writer = crate::media::ffmpeg_writer::FfmpegRecordingWriter::new(path.to_path_buf())?;
+
+    let fps = 30u64;
+    let frame_duration = 1_000_000_000 / fps;
+    let num_frames = (duration_nanos / frame_duration).max(1);
+    let audio_interval = 20_000_000; // 20ms audio chunks
+    let num_audio = (duration_nanos / audio_interval).max(1);
+
+    for i in 0..num_frames {
+        let ts = i * frame_duration;
+        let frame = synthetic_video_frame_at(ts, width, height);
+        writer
+            .push_video(frame)
+            .map_err(|e| AppError::RecordingWriteFailed {
+                reason: format!("strict helper: push_video 失败 (frame {i}): {e}"),
+            })?;
+        if i % 5 == 0 && i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    for i in 0..num_audio {
+        let ts = i * audio_interval;
+        let chunk = MixedAudioChunk {
+            timestamp: MediaTimestamp::from_nanos(ts),
+            sample_rate: 48_000,
+            channels: 2,
+            samples: Arc::from(vec![audio_amplitude; 2048].into_boxed_slice()),
+        };
+        writer
+            .push_audio(chunk)
+            .map_err(|e| AppError::RecordingWriteFailed {
+                reason: format!("strict helper: push_audio 失败 (chunk {i}): {e}"),
+            })?;
+        if i % 5 == 0 && i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    let result = writer.finish()?;
+    verify_artifact_output(path, &result)?;
+    Ok(())
+}

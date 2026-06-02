@@ -21,8 +21,13 @@ pub struct RequestedAudioContract {
     /// Minimum decoded peak to consider audio non-silent.
     /// Default: 0.02 (conservative threshold for audible content).
     pub min_peak: f32,
-    /// Higher threshold for "audible" audio — used for real-device validation.
-    /// Default 0.015. Aggregate RMS below this triggers a warning.
+    /// Higher threshold for "audible" audio — used for real-device diagnostics.
+    /// Default 0.015. Aggregate RMS below this triggers a **warning** (not hard fail).
+    ///
+    /// Global decoded RMS is diluted by silence padding (leading gaps, middle gaps,
+    /// tail padding to video end). A recording with real audio content can have
+    /// global RMS well below this threshold. This field is NOT used as a hard gate;
+    /// it only produces `eprintln!` warnings for diagnostics.
     pub audible_min_rms: f64,
 }
 
@@ -550,17 +555,26 @@ pub fn validate_source_artifact_with_audio_contract(
         });
     }
 
-    // Level 2: audible check — RMS must exceed the audible threshold.
+    // Level 2: audible diagnostics — warn when aggregate RMS is below the
+    // audible threshold, but do NOT hard fail.
+    //
+    // Global decoded RMS is computed over the entire audio stream duration
+    // including silence padding (leading gaps, middle gaps, tail padding to
+    // video end). This dilutes the RMS significantly when real audio content
+    // is short relative to the total timeline. A recording with real audible
+    // content (peak > min_peak) can have global RMS well below audible_min_rms.
+    //
+    // The Level 1 check (min_rms/min_peak) already prevents truly silent
+    // artifacts. This check only produces diagnostics warnings.
     if rms < contract.audible_min_rms {
-        return Err(AppError::RecordingWriteFailed {
-            reason: format!(
-                "请求了音频录制但 RMS 低于可听阈值（RMS={:.6} < {:.6}，system={}, mic={}）",
-                rms,
-                contract.audible_min_rms,
-                contract.requested_system_audio,
-                contract.requested_microphone,
-            ),
-        });
+        eprintln!(
+            "警告: 请求了音频录制但 aggregate RMS 低于可听建议阈值（RMS={:.6} < {:.6}，peak={:.6}，system={}, mic={}）",
+            rms,
+            contract.audible_min_rms,
+            peak,
+            contract.requested_system_audio,
+            contract.requested_microphone,
+        );
     }
 
     Ok(inspection)
@@ -609,14 +623,13 @@ pub fn validate_export_artifact_with_audio_contract(
         });
     }
 
-    // Level 2: audible check — RMS must exceed the audible threshold.
+    // Level 2: audible diagnostics — warn only, do NOT hard fail.
+    // Same rationale as source artifact: global RMS is diluted by silence padding.
     if rms < contract.audible_min_rms {
-        return Err(AppError::ExportFailed {
-            reason: format!(
-                "导出文件 RMS 低于可听阈值（RMS={:.6} < {:.6}）",
-                rms, contract.audible_min_rms,
-            ),
-        });
+        eprintln!(
+            "警告: 导出文件 aggregate RMS 低于可听建议阈值（RMS={:.6} < {:.6}，peak={:.6}）",
+            rms, contract.audible_min_rms, peak,
+        );
     }
 
     Ok(())
@@ -949,6 +962,125 @@ mod tests {
         assert!(
             inspection.audio_rms.unwrap() > 0.01,
             "audio should be non-silent"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- BUG-005_2 low-RMS regression tests ---
+    // These tests verify that artifacts with real but quiet audio content
+    // (RMS between min_rms and audible_min_rms) pass validation without
+    // hard failure. The audible check is now warning-only.
+
+    #[test]
+    fn requested_audio_contract_allows_low_but_non_silent_rms() {
+        // BUG-005_2 regression: RMS ≈ 0.010, above min_rms=0.003 but below
+        // audible_min_rms=0.015. Must NOT hard fail — the Level 1 check
+        // (min_rms/min_peak) already prevents silent artifacts.
+        use crate::test_support::ffmpeg_helpers::{
+            create_synthetic_source_artifact_strict_with_amplitude, unique_media_path,
+        };
+
+        let path = unique_media_path("low-rms-source", "mp4");
+        // Low amplitude (0.01) produces low but non-zero RMS.
+        let result = create_synthetic_source_artifact_strict_with_amplitude(
+            &path,
+            64,
+            48,
+            2_000_000_000,
+            0.01,
+        );
+        assert!(result.is_ok(), "helper should succeed: {:?}", result.err());
+
+        let contract = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            ..Default::default()
+        };
+
+        let result = validate_source_artifact_with_audio_contract(&path, &contract);
+        assert!(
+            result.is_ok(),
+            "low-RMS artifact should pass (audible check is warning-only): {:?}",
+            result.err()
+        );
+
+        let inspection = result.unwrap();
+        let rms = inspection.audio_rms.unwrap();
+        assert!(
+            rms < 0.015,
+            "test premise: RMS should be below audible_min_rms, got {rms}"
+        );
+        assert!(
+            rms > 0.003,
+            "test premise: RMS should be above min_rms, got {rms}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn export_audio_contract_allows_low_but_non_silent_rms() {
+        // BUG-005_2 regression: export validation also uses warning-only audible check.
+        // Note: validate_export_artifact checks dimensions against expected values,
+        // so we use the same dimensions as the helper (64×48).
+        use crate::test_support::ffmpeg_helpers::{
+            create_synthetic_source_artifact_strict_with_amplitude, unique_media_path,
+        };
+
+        let path = unique_media_path("low-rms-export", "mp4");
+        let result = create_synthetic_source_artifact_strict_with_amplitude(
+            &path,
+            1920,
+            1080,
+            2_000_000_000,
+            0.01,
+        );
+        assert!(result.is_ok(), "helper should succeed: {:?}", result.err());
+
+        let contract = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            ..Default::default()
+        };
+
+        let result = validate_export_artifact_with_audio_contract(&path, 1920, 1080, &contract);
+        assert!(
+            result.is_ok(),
+            "low-RMS export should pass (audible check is warning-only): {:?}",
+            result.err()
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn requested_audio_contract_still_rejects_near_silent_audio() {
+        // Level 1 check (min_rms/min_peak) must still hard-fail for near-silent artifacts.
+        use crate::media::recording_writer::RecordingWriter;
+        use crate::test_support::ffmpeg_helpers::unique_media_path;
+
+        let path = unique_media_path("near-silent-reject", "mp4");
+        // Create a video-only artifact (no real audio content).
+        {
+            use crate::media::ffmpeg_writer::FfmpegRecordingWriter;
+            use crate::test_support::ffmpeg_helpers::test_video_frame_at;
+            let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
+            writer.push_video(test_video_frame_at(0)).unwrap();
+            writer.push_video(test_video_frame_at(33_333_333)).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let contract = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            ..Default::default()
+        };
+
+        let result = validate_source_artifact_with_audio_contract(&path, &contract);
+        assert!(
+            result.is_err(),
+            "near-silent artifact should still be rejected by Level 1 check"
         );
 
         let _ = std::fs::remove_file(&path);

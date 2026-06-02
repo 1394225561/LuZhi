@@ -4,11 +4,25 @@
 
 ## 未解决
 
+（暂无）
+
+---
+
+## 已解决
+
 ### BUG-005: 音频捕获失败
 
-**当前状态**：第 10 节 review 整改完成 — source-aware before-writer diagnostics、audible contract、蓝牙 mic pause/reset、synchronizer start grace、writer bounded join。待真实设备验证。
+**当前状态**：已修复（第 20-26 节整改）+ 人工验证通过。
 
-**修复进展**：
+**根因**（多层叠加）：
+
+1. **CPAL 配置协商**：`cpal_microphone.rs` 把 UI 目标格式（48kHz/2ch）当作硬件 stream config，但真实设备只支持 24kHz/1ch。
+2. **writer audio timeline merge**：`ffmpeg_writer.rs` 的音频时间轴合并逻辑未覆盖 gap/overlap/out-of-order 场景。
+3. **AudioMixer::to_stereo()**：多声道输入（>2ch）未正确截取前两个通道。
+4. **AudioSynchronizer**：旧的 per-chunk 配对导致 system/mic 双写同一时间轴。
+5. **audible_min_rms 硬门控**（BUG-005_2）：`audible_min_rms=0.015` 作为硬失败阈值，但 global decoded RMS 被 silence padding 稀释，真实有声录制的 RMS 可能远低于该值。
+
+**修复内容**：
 
 1. **CPAL 配置协商**（第 20 节 R2）：`cpal_microphone.rs` 使用 `device.default_input_config()` 获取真实设备配置，不再把 UI 目标格式当作硬件 stream config。
 2. **writer audio timeline merge**（第 21 节 R3）：`ffmpeg_writer.rs` 的音频时间轴合并逻辑已重写。
@@ -19,187 +33,36 @@
 7. **finish() non-blocking**（第 24 节 R4）：`finish()` 改为 `try_send(Flush)` + bounded retry，不再无限阻塞。
 8. **strict synthetic artifact helper**（第 24 节 R5）：新增 `create_synthetic_source_artifact_strict()`，任何 push 失败立即返回错误。音频内容测试（RMS/peak 验证）使用 strict helper，backpressure 测试保留 tolerant helper。
 9. **麦克风设备选择和蓝牙兼容提示**（第 24 节 R6）：后端新增 `list_microphone_devices` 命令返回设备列表和蓝牙检测。前端新增麦克风设备选择器，对蓝牙麦克风显示 HFP profile 兼容性警告。
-
-**待验证**：需要在真实设备上开启麦克风（特别是 `24000Hz/1ch` 设备）录制 10 秒，确认不再出现 `音频 53s` 的偏差。
-**验证结果**：
-
-1. [x] 可以录制并导出，不会出现偏差报错。
-2. [x] 只录系统音频 10 秒，播放音乐，验证 source/export 都可听。
-3. [x] 只录内置麦克风 10 秒，说话，验证 source/export 都可听。
-4. [x] 系统音频 + 内置麦克风 10 秒，验证两路都可听。
-5. [x] 录制的源视频、导出的视频，播放时，都听不见系统音频声音、麦克风的声音，但是录制中顶部胶囊状态栏上有麦克风的波动反馈。（这个问题在只录制系统音频、同时录制系统音频和麦克风，这两种情况下都存在）
-6. [x] 同时开启系统音频、麦克风录制，录制过程中从耳机里听到的电脑输出的系统音频声音音质变差，断断续续。结束录制后，耳机里声音就恢复正常了。
-   - 该问题暂时标记为不可抗力。
-7. 新的bug， **新 bug 现象**：
-   - 系统音频 + 蓝牙麦克风 10 秒，验证停止后蓝牙音质**没有**恢复。
-     - [ ] **情况1**：同时开启系统音频、麦克风录制（主动选择蓝牙耳机麦克风），结束录制后，没有释放麦克风进程，导致音质一直都是处于很差的状态。
-     - [ ] **情况2**：同时开启系统音频、麦克风录制（主动选择系统默认麦克风，此时默认麦克风貌似是蓝牙耳机麦克风，因为音质变差了），结束录制后，可以释放麦克风进程，音质恢复。
-
-以下是**新 bug 复现**时的终端日志：
-**情况1**：
-
-```
-     Running `target/debug/luzhi`
-麦克风配置协商: 请求 48000Hz/2ch, 设备实际 24000Hz/1ch
-[libx264 @ 0xb89d28000] using cpu capabilities: ARMv8 NEON DotProd
-[libx264 @ 0xb89d28000] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
-CpalMicrophoneCapture::stop() 开始
-CpalMicrophoneCapture::stop() 完成 — stream_dropped=true
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-[aac @ 0xb89d28700] Qavg: 3169.140
-[libx264 @ 0xb89d28000] frame I:2     Avg QP:13.00  size:313350
-[libx264 @ 0xb89d28000] frame P:366   Avg QP: 1.22  size: 12469
-[libx264 @ 0xb89d28000] mb I  I16..4: 100.0%  0.0%  0.0%
-[libx264 @ 0xb89d28000] mb P  I16..4:  0.6%  0.0%  0.0%  P16..4: 16.7%  0.0%  0.0%  0.0%  0.0%    skip:82.7%
-[libx264 @ 0xb89d28000] final ratefactor: 3.78
-[libx264 @ 0xb89d28000] coded y,uvDC,uvAC intra: 26.8% 13.0% 11.6% inter: 6.5% 3.0% 2.8%
-[libx264 @ 0xb89d28000] i16 v,h,dc,p: 68% 28%  2%  2%
-[libx264 @ 0xb89d28000] i8c dc,h,v,p: 82% 10%  7%  1%
-[libx264 @ 0xb89d28000] kb/s:3227.13
-录制音频诊断: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: Some("drizzle"), system_chunks_received: 640, mic_chunks_received: 618, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 641, writer_push_audio_failures: 0, system_rms_max: 0.028443791, mic_rms_max: 0.12326609, mixed_rms_max: 0.059752557, generated_silent_track: false, paired_window_count: 619, system_only_window_count: 22, mic_only_window_count: 0, source_timeout_window_count: 0, system_rms_max_before_writer: 0.0, mic_rms_max_before_writer: 0.0 }
-录制音频 contract 验证通过: RMS=0.006896, peak=0.163129, samples=1247232
-录制音频诊断摘要: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: Some("drizzle"), system_chunks_received: 640, mic_chunks_received: 618, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 641, writer_push_audio_failures: 0, system_rms_max: 0.028443791, mic_rms_max: 0.12326609, mixed_rms_max: 0.059752557, generated_silent_track: false, paired_window_count: 619, system_only_window_count: 22, mic_only_window_count: 0, source_timeout_window_count: 0, system_rms_max_before_writer: 0.0, mic_rms_max_before_writer: 0.0 }
-写入器诊断摘要: WriterDiagnostics { audio_chunks_received: 641, audio_chunks_appended: 641, audio_chunks_discarded_full_overlap: 0, audio_chunks_trimmed_partial_overlap: 0, audio_real_frames_appended: 614400, audio_silence_frames_padded: 5611, audio_real_rms_max_before_encode: 0.06016173, aac_frames_encoded: 608, silent_aac_frames_encoded: 0, generated_silent_track: false, video_queue_full_count: 0, audio_queue_full_count: 0 }
-[libx264 @ 0xb89d29180] using cpu capabilities: ARMv8 NEON DotProd
-[libx264 @ 0xb89d29180] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
-[aac @ 0xb89d29880] Qavg: 2482.959
-[libx264 @ 0xb89d29180] frame I:2     Avg QP:13.00  size:312212
-[libx264 @ 0xb89d29180] frame P:339   Avg QP: 1.43  size:  8888
-[libx264 @ 0xb89d29180] mb I  I16..4: 100.0%  0.0%  0.0%
-[libx264 @ 0xb89d29180] mb P  I16..4:  0.5%  0.0%  0.0%  P16..4: 11.5%  0.0%  0.0%  0.0%  0.0%    skip:88.0%
-[libx264 @ 0xb89d29180] final ratefactor: 2.15
-[libx264 @ 0xb89d29180] coded y,uvDC,uvAC intra: 30.0% 14.0% 12.3% inter: 4.4% 1.8% 1.5%
-[libx264 @ 0xb89d29180] i16 v,h,dc,p: 62% 33%  2%  3%
-[libx264 @ 0xb89d29180] i8c dc,h,v,p: 79% 11%  8%  2%
-[libx264 @ 0xb89d29180] kb/s:2438.55
-```
-
-**情况2**：
-
-```
-     Running `target/debug/luzhi`
-麦克风配置协商: 请求 48000Hz/2ch, 设备实际 24000Hz/1ch
-[libx264 @ 0x72ba6c000] using cpu capabilities: ARMv8 NEON DotProd
-[libx264 @ 0x72ba6c000] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
-CpalMicrophoneCapture::stop() 开始
-CpalMicrophoneCapture::stop() 完成 — stream_dropped=true
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-警告: 最终排空发现未配对的系统音频块
-[aac @ 0x72ba6c700] Qavg: 3672.200
-[libx264 @ 0x72ba6c000] frame I:2     Avg QP:13.00  size:309620
-[libx264 @ 0x72ba6c000] frame P:397   Avg QP: 1.23  size: 10839
-[libx264 @ 0x72ba6c000] mb I  I16..4: 100.0%  0.0%  0.0%
-[libx264 @ 0x72ba6c000] mb P  I16..4:  0.2%  0.0%  0.0%  P16..4: 14.9%  0.0%  0.0%  0.0%  0.0%    skip:84.9%
-[libx264 @ 0x72ba6c000] final ratefactor: 3.09
-[libx264 @ 0x72ba6c000] coded y,uvDC,uvAC intra: 34.1% 18.4% 16.4% inter: 5.8% 2.8% 2.6%
-[libx264 @ 0x72ba6c000] i16 v,h,dc,p: 62% 33%  2%  3%
-[libx264 @ 0x72ba6c000] i8c dc,h,v,p: 76% 12% 10%  2%
-[libx264 @ 0x72ba6c000] kb/s:2909.63
-录制音频诊断: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: None, system_chunks_received: 674, mic_chunks_received: 655, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 675, writer_push_audio_failures: 0, system_rms_max: 0.02666031, mic_rms_max: 0.29693782, mixed_rms_max: 0.16463715, generated_silent_track: false, paired_window_count: 656, system_only_window_count: 19, mic_only_window_count: 0, source_timeout_window_count: 0, system_rms_max_before_writer: 0.0, mic_rms_max_before_writer: 0.0 }
-录制音频 contract 验证通过: RMS=0.010561, peak=0.434141, samples=1312768
-录制音频诊断摘要: RecordingDiagnostics { requested_system_audio: true, requested_microphone: true, microphone_device: None, system_chunks_received: 674, mic_chunks_received: 655, system_chunks_dropped: 0, mic_chunks_dropped: 0, mixed_chunks_queued: 675, writer_push_audio_failures: 0, system_rms_max: 0.02666031, mic_rms_max: 0.29693782, mixed_rms_max: 0.16463715, generated_silent_track: false, paired_window_count: 656, system_only_window_count: 19, mic_only_window_count: 0, source_timeout_window_count: 0, system_rms_max_before_writer: 0.0, mic_rms_max_before_writer: 0.0 }
-写入器诊断摘要: WriterDiagnostics { audio_chunks_received: 675, audio_chunks_appended: 675, audio_chunks_discarded_full_overlap: 0, audio_chunks_trimmed_partial_overlap: 0, audio_real_frames_appended: 647040, audio_silence_frames_padded: 5787, audio_real_rms_max_before_encode: 0.16452658, aac_frames_encoded: 640, silent_aac_frames_encoded: 0, generated_silent_track: false, video_queue_full_count: 0, audio_queue_full_count: 0 }
-[libx264 @ 0x72ba6d500] using cpu capabilities: ARMv8 NEON DotProd
-[libx264 @ 0x72ba6d500] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
-[aac @ 0x72ba6dc00] Qavg: 2728.863
-[libx264 @ 0x72ba6d500] frame I:2     Avg QP:13.00  size:308737
-[libx264 @ 0x72ba6d500] frame P:379   Avg QP: 1.36  size:  7444
-[libx264 @ 0x72ba6d500] mb I  I16..4: 100.0%  0.0%  0.0%
-[libx264 @ 0x72ba6d500] mb P  I16..4:  0.2%  0.0%  0.0%  P16..4:  9.9%  0.0%  0.0%  0.0%  0.0%    skip:89.9%
-[libx264 @ 0x72ba6d500] final ratefactor: 1.29
-[libx264 @ 0x72ba6d500] coded y,uvDC,uvAC intra: 34.5% 17.8% 15.8% inter: 3.7% 1.5% 1.3%
-[libx264 @ 0x72ba6d500] i16 v,h,dc,p: 59% 35%  3%  3%
-[libx264 @ 0x72ba6d500] i8c dc,h,v,p: 77% 12%  8%  2%
-[libx264 @ 0x72ba6d500] kb/s:2127.10
-```
-
-**现象**：
-
-- 录制前开启 `麦克风`，点击开始录制
-- `录制中界面` 没有报错，但是点击`结束录制`，会出现报错：
-  - `录制写入器完成失败: 写入录制文件失败：录制视频/音频时长偏差过大：视频 10033ms，音频 53397ms，偏差 43363ms`
-
-以下是终端日志：
-
-```
-     Running `target/debug/luzhi`
-麦克风配置协商: 请求 48000Hz/2ch, 设备实际 24000Hz/1ch
-[libx264 @ 0x8cbccc700] using cpu capabilities: ARMv8 NEON DotProd
-[libx264 @ 0x8cbccc700] profile Constrained Baseline, level 4.0, 4:2:0, 8-bit
-[aac @ 0x8cbccce00] Qavg: 50300.516
-[libx264 @ 0x8cbccc700] frame I:2     Avg QP:12.50  size:269829
-[libx264 @ 0x8cbccc700] frame P:281   Avg QP: 1.81  size: 33703
-[libx264 @ 0x8cbccc700] mb I  I16..4: 100.0%  0.0%  0.0%
-[libx264 @ 0x8cbccc700] mb P  I16..4:  4.0%  0.0%  0.0%  P16..4: 16.3%  0.0%  0.0%  0.0%  0.0%    skip:79.7%
-[libx264 @ 0x8cbccc700] final ratefactor: 7.00
-[libx264 @ 0x8cbccc700] coded y,uvDC,uvAC intra: 36.8% 20.2% 19.6% inter: 7.6% 3.7% 3.3%
-[libx264 @ 0x8cbccc700] i16 v,h,dc,p: 62% 34%  2%  2%
-[libx264 @ 0x8cbccc700] i8c dc,h,v,p: 76% 15%  8%  1%
-[libx264 @ 0x8cbccc700] kb/s:7955.15
-录制写入器完成失败: 写入录制文件失败：录制视频/音频时长偏差过大：视频 10033ms，音频 53397ms，偏差 43363ms
-```
+10. **audible_min_rms 降级为 warning**（第 26 节 Phase A）：`validate_source_artifact_with_audio_contract()` 和 `validate_export_artifact_with_audio_contract()` 中的 `audible_min_rms` 检查从 `Err(AppError)` 降级为 `eprintln!` 警告。`min_rms/min_peak` 保持硬失败用于防止 truly silent artifact。根因：global decoded RMS 被 silence padding 稀释，真实有声录制的 RMS 可能远低于 0.015。
+11. **source-aware contract 去除 RMS 门控**（第 26 节 Phase C）：`validate_source_aware_audio_contract()` 的 presence 检查改为基于 chunk/window/frame 计数，不再以 `system_rms_max > 0.001` 作为前置条件。低音量内容不等于 source 缺失。writer discard 检查对称覆盖 system 和 mic。
+12. **low-RMS regression tests**（第 26 节 Phase B）：新增 `create_synthetic_source_artifact_strict_with_amplitude()` helper 和 3 个回归测试，覆盖 RMS ≈ 0.010 的非静音 artifact 通过验证、近静音 artifact 仍被拒绝的场景。
 
 ---
+
+### BUG-005_2: 录制音频 contract 验证失败（audible_min_rms false positive）
+
+**当前状态**：已修复（第 26 节整改）+ 人工验证通过。
+
+**根因**：Section 10 把 `audible_min_rms=0.015` 从"可听性诊断阈值"升级成了 source/export artifact 的硬失败阈值。真实录制 artifact 的 aggregate decoded RMS 为 `0.010835`，已经高于非静音阈值 `min_rms=0.003`，capture/writer 诊断均证明音频真实进入了 writer；但它低于 `audible_min_rms=0.015`，因此 stop 阶段被误判为录制失败。
+
+global decoded RMS 被 silence padding 稀释（leading gaps、middle gaps、tail padding to video end），真实有声内容的 RMS 可能远低于 per-chunk peak RMS。
+
+**修复内容**：
+
+1. `audible_min_rms` 从硬失败降级为 `eprintln!` 诊断警告。
+2. `min_rms + min_peak` 联合判断保持硬失败，用于防止 truly silent artifact。
+3. source-aware contract 去除 RMS 门控，presence 检查基于 chunk/window/frame 计数。
+4. writer discard 检查对称覆盖 system 和 mic。
+5. 新增 `create_synthetic_source_artifact_strict_with_amplitude()` helper 和 3 个 low-RMS 回归测试。
 
 **预防规则**：
 
-- 麦克风设备 stream config 必须来自设备 default/supported config，UI 目标格式只能作为 mixer output target
-- writer 对音频 timestamp 的处理必须同时覆盖 first-gap、middle-gap、tail-gap、overlap、out-of-order 五种情况
-- `MixedAudioChunk.samples` 的布局必须与 `channels` 元数据一致；任何 downmix/truncate/resample 后都必须用测试验证 sample length 与 duration
-- writer `audio_pts` 必须作为单调递增的编码器 PTS 计数器，不能与 timeline cursor 混用
-- writer partial-overlap chunk append 后必须立即进入 AAC drain loop，不能跳过 drain 直接 continue（否则音频 buffer 累积到 finish 阶段）
-- AudioMixer 入口必须校验 `channels > 0`、`sample_rate > 0`、`samples.len() % channels == 0`，不信任底层音频 chunk metadata
-- "请求录制音频源"必须和"实际写入非静音音频内容"建立可验证 contract；不能只检查 audio stream 是否存在
-- 麦克风 UI 电平只能作为 capture-side indicator，不能作为 recording artifact 成功证据
-- system/mic synchronizer 必须 source-aware，同一时间窗口只输出一个 mixed chunk，不能让先到的单源 chunk 占用时间轴并吞掉后到的另一源
-- capture channel drop count 必须进入 diagnostics；音频 drop 不能完全静默
-- silent AAC track 只能用于"没有请求音频"的录屏兼容；用户请求音频时 silent track 必须触发 warning/error
-- artifact validation 必须包含 audio RMS/peak 检查，不能只依赖 stream presence 和 duration
-- FFmpeg writer queue 必须使用 non-blocking send，避免 capture consumer thread 被编码压力阻塞导致音频丢包
-- consumer loop 必须使用 bounded batch 处理视频帧，避免音频被无限 drain video 饿死
-- writer diagnostics 必须区分 queued（进入队列）和 encoded（实际编码进 AAC），不能用 queued 数冒充 encoded 数
-- `finish()` 必须使用 bounded wait 策略（try_send + retry），不能无限阻塞等待编码队列
-- 蓝牙耳机麦克风可能触发 macOS HFP profile 切换，建议用户选择内置麦克风作为输入设备
-
-**新增预防规则（2026-06-02 Section 25 review）**：
-
-- `AudioSynchronizer` 不能只按 chunk 起始 timestamp 归桶；真实音频 chunk 必须按 sample frame 切分到固定时间窗口
-- 双源录制时 live watermark 不能由快的一路单独推进；在两个请求源都 active 时必须以慢源或 source-aware timeout 策略决定发射
-- requested-audio contract 必须 source-aware；aggregate decoded RMS/peak 只能证明 artifact 非全静音，不能证明每个请求源都存在
-- 当 capture-side 某请求源 RMS 非零但 writer/source-aware diagnostics 显示该源被大量 overlap discard 时，必须视为录制失败或至少阻断 BUG 关闭
-- CPAL 麦克风 timestamp 不能在 stream build 时固定 offset；首帧 callback 或设备 timestamp 才能作为输入流真实起点
-- 蓝牙麦克风 UI warning 不能替代资源释放验证；显式蓝牙设备 stop 后必须验证 stream drop 与音质恢复
-
-**新增预防规则（2026-06-02 Section 10 整改）**：
-
-- consumer drain 循环必须在 writer push 前写入 per-source before-writer RMS/frames/windows 诊断数据
-- source-aware contract 必须检查 before-writer 字段，不能只依赖 synchronizer window counts
-- `audible_min_rms` 必须参与 source/export validation，不能只作为日志字段
-- CPAL 麦克风 stop 必须显式调用 `pause()` 并记录结果，不能只依赖 `drop()` 的隐式释放
-- stop 顺序应为 mic first → screen capture，减少蓝牙 HFP profile 持有时间
-- 只在本轮确实启动过麦克风时才执行 mic stop，避免无意义的 300ms sleep
-- stop 后应重建 `CpalMicrophoneCapture` 实例，避免旧 device handle 残留
-- AudioSynchronizer 双源启动阶段应有 grace period，防止早到源单独 emit
-- `source_timeout_window_count` 必须在 source stall 或 grace timeout 时正确递增
-- FFmpeg writer `tx` 必须为 `Option<SyncSender>`，`finish()` 必须在 `join_worker()` 前 drop sender，防止 worker 卡在 recv 时 join 无限阻塞
+- `audible_min_rms` 不能作为 artifact validation 的硬失败阈值；global decoded RMS 被 silence padding 稀释
+- artifact 静音检测的硬失败只由 `min_rms + min_peak` 联合判断
+- source-aware presence contract 不能以 RMS 作为前置门控条件；低音量请求源的 chunks/windows/frames 非零即视为 source 存在
+- writer discard ratio 检查必须对称覆盖 system 和 mic
 
 ---
-
-## 已解决
 
 ### BUG-009: 选择系统默认麦克风会导致录制失败
 
