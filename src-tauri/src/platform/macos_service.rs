@@ -425,7 +425,14 @@ impl MacRecordingService {
         requested_microphone: bool,
         microphone_device: Option<String>,
     ) -> RecordingConsumerOutput {
-        let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::default();
+        let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::new(
+            SimpleAudioMixer::new(),
+            crate::media::audio_synchronizer::AudioSynchronizerConfig {
+                requested_system_audio,
+                requested_microphone,
+                ..Default::default()
+            },
+        );
         let mut mic_detector = MicLevelDetector::new(4096); // ~85ms 窗口 @ 48kHz
 
         // Audio diagnostics — tracks source-aware metrics to diagnose silent audio issues.

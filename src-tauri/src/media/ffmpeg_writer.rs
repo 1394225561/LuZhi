@@ -304,6 +304,10 @@ struct TimelineAppendResult {
     silence_frames_padded: u64,
     /// Number of real mono frames appended from this chunk.
     appended_frames: u64,
+    /// Whether this chunk was partially trimmed due to overlap.
+    trimmed_partial_overlap: bool,
+    /// Number of mono frames trimmed (skipped) due to partial overlap.
+    trimmed_frames: u64,
 }
 
 /// Append an audio chunk to the timeline buffer, handling gaps and overlaps.
@@ -330,6 +334,8 @@ fn append_audio_chunk_to_timeline(
             chunk_appended: true,
             silence_frames_padded: gap_mono as u64,
             appended_frames: chunk_mono_frames as u64,
+            trimmed_partial_overlap: false,
+            trimmed_frames: 0,
         };
     }
 
@@ -342,6 +348,8 @@ fn append_audio_chunk_to_timeline(
                 chunk_appended: false,
                 silence_frames_padded: 0,
                 appended_frames: 0,
+                trimmed_partial_overlap: false,
+                trimmed_frames: 0,
             };
         }
         // Partial overlap: skip the overlapping prefix, append the rest.
@@ -354,6 +362,8 @@ fn append_audio_chunk_to_timeline(
             chunk_appended: true,
             silence_frames_padded: 0,
             appended_frames: appended_mono as u64,
+            trimmed_partial_overlap: true,
+            trimmed_frames: overlap_mono as u64,
         };
     }
 
@@ -364,6 +374,8 @@ fn append_audio_chunk_to_timeline(
         chunk_appended: true,
         silence_frames_padded: 0,
         appended_frames: chunk_mono_frames as u64,
+        trimmed_partial_overlap: false,
+        trimmed_frames: 0,
     }
 }
 
@@ -618,6 +630,9 @@ fn encoder_worker(
                     }
                 } else {
                     writer_diag.audio_chunks_discarded_full_overlap += 1;
+                }
+                if append_result.trimmed_partial_overlap {
+                    writer_diag.audio_chunks_trimmed_partial_overlap += 1;
                 }
                 writer_diag.audio_silence_frames_padded += append_result.silence_frames_padded;
 
