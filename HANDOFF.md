@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-01 | Phase 6 第 24 节 code review 整改完成（R1-R6 全部完成：RequestedAudioContract、AudioSynchronizer window merger、WriterDiagnostics、finish() non-blocking、strict artifact helper、麦克风设备选择和蓝牙提示）；真实设备 manual gate 仍待完成。
+> 最后更新：2026-06-02 | Phase 6 第 25 节 code review 整改完成（source-aware synchronizer、source-aware contract、CPAL lazy offset、writer partial-overlap diagnostics、蓝牙 mic 释放、导出 audio contract）；真实设备 manual gate 仍待完成。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,37 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-02：Phase 6 第 25 节 code review 整改（source-aware synchronizer、source-aware contract、CPAL lazy offset、writer partial-overlap diagnostics、蓝牙 mic 释放）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-01-phase-6-bug-005-code-review.md` 第 25 节
+
+本轮修复（8 个 Task）：
+
+1. **Task 1 失败测试锁定**：新增 3 个失败测试锁定 Critical 1/2 缺陷（dual-source offset、long-chunk splitting、fast-source watermark）。
+2. **Task 2 AudioSynchronizer 重构**：重构为 source-aware fixed-window sample merger。watermark 使用 `min(system_ts, mic_ts)` 防止快源单独推进；chunk 按 sample frame 切分到 20ms 窗口；source stall timeout 防止无限阻塞；`SynchronizedAudioChunk` 新增 `system_frames`/`mic_frames`/`emitted_due_to_timeout`。
+3. **Task 3 consumer 线程接入**：`macos_service.rs` 传入 `AudioSynchronizerConfig`（requested sources）；`drain_mixed()` 返回 `SynchronizedAudioChunk`，consumer 用 `synced.mixed` 推入 writer；`RecordingDiagnostics` 新增 `source_timeout_window_count`/`system_rms_max_before_writer`/`mic_rms_max_before_writer`。
+4. **Task 4 writer partial-overlap diagnostics**：`TimelineAppendResult` 新增 `trimmed_partial_overlap`/`trimmed_frames`；partial-overlap 分支正确设置标志；encoder_worker 递增 `audio_chunks_trimmed_partial_overlap`。
+5. **Task 5 source-aware contract**：`RequestedAudioContract` 新增 `audible_min_rms=0.015`；新增 `validate_source_aware_audio_contract()` 检查每个请求源的 window emission 和 discard ratio；consumer thread 在 artifact contract 后调用。
+6. **Task 6 CPAL lazy offset**：`AudioSampleClock.session_offset_nanos` 改为 `AtomicU64`；新增 `initialize_offset()` 在首次回调时用 CAS 设置 offset（`callback_now - buffer_duration`）；`cpal_microphone.rs` 不再在 stream build 时调用 `with_session_clock()`。
+7. **Task 7 导出 contract + 蓝牙 mic 释放**：`export_video()` 使用 `validate_export_artifact_with_audio_contract` 代替 plain validation；`MacRecordingService` 新增 `last_requested_system_audio`/`last_requested_microphone`；stop 顺序改为 mic first；`CpalMicrophoneCapture::stop()` 显式 drop stream + 200ms bounded wait。
+8. **Task 8 BUG.md + 回归**：更新 BUG-005 状态和 6 条新增预防规则。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **273 unit + 10 integration tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` 通过
+- `npm test -- --run` **52 tests** 通过
+- `cargo fmt --check` 通过
+- `cargo clippy` 通过（既有 warnings）
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/media/audio_synchronizer.rs`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/media/ffmpeg_common.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/platform/macos/cpal_microphone.rs`, `src-tauri/src/core/clock.rs`, `src-tauri/src/lib.rs`
+
+---
 
 ### 2026-06-01：Phase 6 第 24 节 code review 整改（RequestedAudioContract、window merger、WriterDiagnostics、finish non-blocking、strict helper、蓝牙提示）
 
