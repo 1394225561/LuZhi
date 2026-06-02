@@ -1127,4 +1127,30 @@ mod tests {
             timeout_count
         );
     }
+
+    #[test]
+    fn drain_mixed_with_no_input_returns_empty() {
+        // Finding 2: When no audio is pushed, drain should return empty.
+        // The mixer returns an error for (None, None) which is correctly
+        // handled by skipping the window.
+        let mut synchronizer = AudioSynchronizer::default();
+        let results = synchronizer.drain_mixed();
+        assert!(
+            results.is_empty(),
+            "should return empty when no input, got {} chunks",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn drain_final_with_no_input_returns_empty() {
+        // Finding 2: drain_final should also return empty when no input.
+        let mut synchronizer = AudioSynchronizer::default();
+        let results = synchronizer.drain_final();
+        assert!(
+            results.is_empty(),
+            "should return empty when no input, got {} chunks",
+            results.len()
+        );
+    }
 }
