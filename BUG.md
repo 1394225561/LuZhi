@@ -6,7 +6,7 @@
 
 ### BUG-005: 音频捕获失败
 
-**当前状态**：第 24 节整改完成（R1-R4），待真实设备验证。
+**当前状态**：第 25 节 review 整改中 — source-aware synchronizer、source-aware contract、CPAL lazy offset、writer partial-overlap diagnostics、蓝牙 mic 释放。待真实设备验证。
 
 **修复进展**：
 
@@ -114,6 +114,15 @@
 - writer diagnostics 必须区分 queued（进入队列）和 encoded（实际编码进 AAC），不能用 queued 数冒充 encoded 数
 - `finish()` 必须使用 bounded wait 策略（try_send + retry），不能无限阻塞等待编码队列
 - 蓝牙耳机麦克风可能触发 macOS HFP profile 切换，建议用户选择内置麦克风作为输入设备
+
+**新增预防规则（2026-06-02 Section 25 review）**：
+
+- `AudioSynchronizer` 不能只按 chunk 起始 timestamp 归桶；真实音频 chunk 必须按 sample frame 切分到固定时间窗口
+- 双源录制时 live watermark 不能由快的一路单独推进；在两个请求源都 active 时必须以慢源或 source-aware timeout 策略决定发射
+- requested-audio contract 必须 source-aware；aggregate decoded RMS/peak 只能证明 artifact 非全静音，不能证明每个请求源都存在
+- 当 capture-side 某请求源 RMS 非零但 writer/source-aware diagnostics 显示该源被大量 overlap discard 时，必须视为录制失败或至少阻断 BUG 关闭
+- CPAL 麦克风 timestamp 不能在 stream build 时固定 offset；首帧 callback 或设备 timestamp 才能作为输入流真实起点
+- 蓝牙麦克风 UI warning 不能替代资源释放验证；显式蓝牙设备 stop 后必须验证 stream drop 与音质恢复
 
 ---
 
