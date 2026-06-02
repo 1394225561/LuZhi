@@ -64,11 +64,23 @@ pub struct MacRecordingService {
     /// Monotonically incrementing session counter. Used to guard async
     /// post-process jobs against writing stale results into a new session.
     session_id: u64,
+    /// Last recording's requested system audio flag (for export contract).
+    last_requested_system_audio: bool,
+    /// Last recording's requested microphone flag (for export contract).
+    last_requested_microphone: bool,
 }
 
 impl MacRecordingService {
     pub fn last_cursor_metadata_path(&self) -> Option<String> {
         self.last_cursor_metadata_path.clone()
+    }
+
+    pub fn last_requested_system_audio(&self) -> bool {
+        self.last_requested_system_audio
+    }
+
+    pub fn last_requested_microphone(&self) -> bool {
+        self.last_requested_microphone
     }
 
     pub fn set_last_effect_timeline_path(&mut self, path: Option<String>) {
@@ -117,6 +129,8 @@ impl MacRecordingService {
             last_cut_timeline_path: None,
             last_recording_output_path: None,
             session_id: 0,
+            last_requested_system_audio: false,
+            last_requested_microphone: false,
         }
     }
 
@@ -237,6 +251,10 @@ impl MacRecordingService {
         let requested_microphone = audio_config.capture_microphone;
         let microphone_device = audio_config.microphone_device.clone();
 
+        // Save for export contract validation.
+        self.last_requested_system_audio = requested_system_audio;
+        self.last_requested_microphone = requested_microphone;
+
         self.consumer_handle = Some(thread::spawn(move || {
             Self::consume_frames(
                 stop_flag,
@@ -274,9 +292,11 @@ impl MacRecordingService {
             .and_then(|runtime| runtime.stop());
         self.cursor_runtime = None;
 
-        // Stop native captures so no new media can be enqueued.
-        let capture_result = ScreenCapture::stop(&mut self.screen_capture);
+        // Stop mic first to release Bluetooth HFP profile ASAP.
+        // This reduces the time the Bluetooth device is held in SCO mode.
         let mic_result = self.mic_capture.stop();
+        // Then stop screen capture so no new media can be enqueued.
+        let capture_result = ScreenCapture::stop(&mut self.screen_capture);
 
         // Signal the consumer thread to stop.
         if let Some(flag) = &self.stop_flag {

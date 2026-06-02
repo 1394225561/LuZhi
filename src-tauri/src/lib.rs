@@ -891,15 +891,26 @@ async fn export_video(
             })
         };
 
-        // Validate artifact is playable (streams, dimensions, duration).
+        // Validate artifact is playable (streams, dimensions, duration, audio contract).
         #[cfg(feature = "ffmpeg")]
         if let Ok(ref result) = export_result {
             let spec = export_preset.spec();
-            if let Err(error) = media::ffmpeg_common::validate_export_artifact(
-                &result.output_path,
-                spec.width,
-                spec.height,
-            ) {
+            let contract = {
+                let svc = state.service.lock().unwrap();
+                media::ffmpeg_common::RequestedAudioContract {
+                    requested_system_audio: svc.last_requested_system_audio(),
+                    requested_microphone: svc.last_requested_microphone(),
+                    ..Default::default()
+                }
+            };
+            if let Err(error) =
+                media::ffmpeg_common::validate_export_artifact_with_audio_contract(
+                    &result.output_path,
+                    spec.width,
+                    spec.height,
+                    &contract,
+                )
+            {
                 let _ = std::fs::remove_file(&result.output_path);
                 return Err(error.to_string());
             }

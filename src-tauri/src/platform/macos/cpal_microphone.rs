@@ -171,8 +171,20 @@ impl AudioCapture for CpalMicrophoneCapture {
     }
 
     fn stop(&mut self) -> AppResult<()> {
+        eprintln!("CpalMicrophoneCapture::stop() 开始");
         self.running.store(false, Ordering::Relaxed);
-        self.stream = None;
+
+        // Take stream to local variable and explicitly drop it.
+        // This ensures CoreAudio device resources are released before we return.
+        let stream = self.stream.take();
+        let stream_dropped = stream.is_some();
+        drop(stream);
+
+        // Bounded wait for CoreAudio to complete device release.
+        // Bluetooth HFP profile switching can take 100-300ms.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        eprintln!("CpalMicrophoneCapture::stop() 完成 — stream_dropped={stream_dropped}");
         Ok(())
     }
 
