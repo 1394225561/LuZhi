@@ -49,8 +49,8 @@ impl Default for AudioSynchronizerConfig {
         Self {
             requested_system_audio: false,
             requested_microphone: false,
-            window_nanos: 20_000_000,          // 20ms
-            hold_nanos: 40_000_000,            // 40ms
+            window_nanos: 20_000_000,                  // 20ms
+            hold_nanos: 40_000_000,                    // 40ms
             source_stall_timeout_nanos: 2_000_000_000, // 2 seconds
         }
     }
@@ -269,8 +269,7 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
     /// - One source hasn't been seen yet
     /// - One source has stalled (no chunks for `source_stall_timeout_nanos`)
     fn calculate_watermark(&self) -> u64 {
-        let both_requested =
-            self.config.requested_system_audio && self.config.requested_microphone;
+        let both_requested = self.config.requested_system_audio && self.config.requested_microphone;
 
         if both_requested && self.seen_system && self.seen_mic {
             // Both sources requested and both have been seen.
@@ -350,34 +349,26 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
 
             let slice = &chunk.samples[start_sample..end_sample];
 
-            let window =
-                self.windows
-                    .entry(window_idx)
-                    .or_insert_with(|| AudioWindow {
-                        system: None,
-                        mic: None,
-                        window_start_nanos: window_start,
-                    });
+            let window = self
+                .windows
+                .entry(window_idx)
+                .or_insert_with(|| AudioWindow {
+                    system: None,
+                    mic: None,
+                    window_start_nanos: window_start,
+                });
 
             let buf = match source {
-                Source::System => {
-                    window
-                        .system
-                        .get_or_insert_with(|| SourceWindowBuffer {
-                            samples: Vec::new(),
-                            sample_rate: chunk.sample_rate,
-                            channels: chunk.channels,
-                        })
-                }
-                Source::Mic => {
-                    window
-                        .mic
-                        .get_or_insert_with(|| SourceWindowBuffer {
-                            samples: Vec::new(),
-                            sample_rate: chunk.sample_rate,
-                            channels: chunk.channels,
-                        })
-                }
+                Source::System => window.system.get_or_insert_with(|| SourceWindowBuffer {
+                    samples: Vec::new(),
+                    sample_rate: chunk.sample_rate,
+                    channels: chunk.channels,
+                }),
+                Source::Mic => window.mic.get_or_insert_with(|| SourceWindowBuffer {
+                    samples: Vec::new(),
+                    sample_rate: chunk.sample_rate,
+                    channels: chunk.channels,
+                }),
             };
 
             buf.samples.extend_from_slice(slice);
@@ -427,33 +418,24 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
             .system
             .as_ref()
             .map_or(0.0, |b| compute_rms(&b.samples));
-        let mic_rms = window
-            .mic
-            .as_ref()
-            .map_or(0.0, |b| compute_rms(&b.samples));
+        let mic_rms = window.mic.as_ref().map_or(0.0, |b| compute_rms(&b.samples));
 
         // Create AudioChunks using per-source metadata.
         let system_chunk = window.system.map(|buf| AudioChunk {
-            timestamp: crate::core::frame::MediaTimestamp::from_nanos(
-                window.window_start_nanos,
-            ),
+            timestamp: crate::core::frame::MediaTimestamp::from_nanos(window.window_start_nanos),
             sample_rate: buf.sample_rate,
             channels: buf.channels,
             samples: std::sync::Arc::from(buf.samples.into_boxed_slice()),
         });
 
         let mic_chunk = window.mic.map(|buf| AudioChunk {
-            timestamp: crate::core::frame::MediaTimestamp::from_nanos(
-                window.window_start_nanos,
-            ),
+            timestamp: crate::core::frame::MediaTimestamp::from_nanos(window.window_start_nanos),
             sample_rate: buf.sample_rate,
             channels: buf.channels,
             samples: std::sync::Arc::from(buf.samples.into_boxed_slice()),
         });
 
-        let mixed = self
-            .mixer
-            .mix(system_chunk.as_ref(), mic_chunk.as_ref())?;
+        let mixed = self.mixer.mix(system_chunk.as_ref(), mic_chunk.as_ref())?;
 
         Ok(SynchronizedAudioChunk {
             mixed,
@@ -553,7 +535,12 @@ mod tests {
 
         let results = synchronizer.drain_mixed();
 
-        assert_eq!(results.len(), 2, "expected 2 mixed chunks, got {}", results.len());
+        assert_eq!(
+            results.len(),
+            2,
+            "expected 2 mixed chunks, got {}",
+            results.len()
+        );
         assert!(results[0].is_ok());
         assert!(results[1].is_ok());
 
@@ -574,7 +561,12 @@ mod tests {
 
         let results = synchronizer.drain_mixed();
 
-        assert_eq!(results.len(), 1, "expected 1 mixed chunk, got {}", results.len());
+        assert_eq!(
+            results.len(),
+            1,
+            "expected 1 mixed chunk, got {}",
+            results.len()
+        );
         assert!(results[0].is_ok());
 
         let (paired, _, _, _) = synchronizer.diagnostics();
@@ -595,7 +587,10 @@ mod tests {
 
         let synced = results[0].as_ref().unwrap();
         let mixed_rms = compute_rms(&synced.mixed.samples);
-        assert!(mixed_rms > 0.1, "mixed RMS should preserve mic content, got {mixed_rms}");
+        assert!(
+            mixed_rms > 0.1,
+            "mixed RMS should preserve mic content, got {mixed_rms}"
+        );
     }
 
     #[test]
@@ -612,7 +607,10 @@ mod tests {
 
         let synced = results[0].as_ref().unwrap();
         let mixed_rms = compute_rms(&synced.mixed.samples);
-        assert!(mixed_rms > 0.1, "mixed should be non-silent when mic is non-silent, got {mixed_rms}");
+        assert!(
+            mixed_rms > 0.1,
+            "mixed should be non-silent when mic is non-silent, got {mixed_rms}"
+        );
     }
 
     #[test]
@@ -728,14 +726,21 @@ mod tests {
 
         let results = synchronizer.drain_mixed();
 
-        assert!(results.len() >= 5, "expected at least 5 mixed chunks, got {}", results.len());
+        assert!(
+            results.len() >= 5,
+            "expected at least 5 mixed chunks, got {}",
+            results.len()
+        );
 
         for r in &results {
             assert!(r.is_ok());
         }
 
         let (paired, _, _, _) = synchronizer.diagnostics();
-        assert!(paired >= 5, "expected at least 5 paired windows, got {paired}");
+        assert!(
+            paired >= 5,
+            "expected at least 5 paired windows, got {paired}"
+        );
     }
 
     #[test]
@@ -764,7 +769,10 @@ mod tests {
 
         assert!(count >= 50, "expected at least 50 chunks, got {count}");
         let avg_rms = total_rms / count as f32;
-        assert!(avg_rms > 0.1, "average RMS should reflect mixed content, got {avg_rms}");
+        assert!(
+            avg_rms > 0.1,
+            "average RMS should reflect mixed content, got {avg_rms}"
+        );
 
         let (paired, sys_only, mic_only, _) = synchronizer.diagnostics();
         assert_eq!(sys_only, 0, "should have no system-only windows");
@@ -801,7 +809,10 @@ mod tests {
         sync.push_system(system_chunk2);
 
         let results = sync.drain_mixed();
-        assert!(!results.is_empty(), "should have emitted at least one window");
+        assert!(
+            !results.is_empty(),
+            "should have emitted at least one window"
+        );
 
         for result in results {
             let synced = result.unwrap();
@@ -903,11 +914,20 @@ mod tests {
 
         let results = synchronizer.drain_mixed();
 
-        assert_eq!(results.len(), 3, "expected 3 windows from 60ms chunk, got {}", results.len());
+        assert_eq!(
+            results.len(),
+            3,
+            "expected 3 windows from 60ms chunk, got {}",
+            results.len()
+        );
 
         for (i, result) in results.iter().enumerate() {
             let synced = result.as_ref().unwrap();
-            assert_eq!(synced.mixed.samples.len(), 1920, "window {i} should have 1920 samples");
+            assert_eq!(
+                synced.mixed.samples.len(),
+                1920,
+                "window {i} should have 1920 samples"
+            );
             assert_eq!(synced.mixed.sample_rate, 48_000);
             assert_eq!(synced.mixed.channels, 2);
         }
@@ -930,7 +950,12 @@ mod tests {
 
         let results = synchronizer.drain_mixed();
 
-        assert_eq!(results.len(), 2, "expected 2 windows from 40ms chunk, got {}", results.len());
+        assert_eq!(
+            results.len(),
+            2,
+            "expected 2 windows from 40ms chunk, got {}",
+            results.len()
+        );
     }
 
     #[test]
@@ -960,6 +985,11 @@ mod tests {
         assert_eq!(paired, 2, "windows 0-1 should be paired");
         assert_eq!(sys_only, 0, "no system-only windows should be emitted");
         // Only 2 windows emitted — the min-watermark correctly holds windows 2-4.
-        assert_eq!(results.len(), 2, "expected 2 windows (held by min-watermark), got {}", results.len());
+        assert_eq!(
+            results.len(),
+            2,
+            "expected 2 windows (held by min-watermark), got {}",
+            results.len()
+        );
     }
 }

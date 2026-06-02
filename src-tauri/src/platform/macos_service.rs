@@ -683,8 +683,13 @@ impl MacRecordingService {
                 synchronized.mixed.samples.len() as u64 / synchronized.mixed.channels.max(1) as u64;
             let chunk_nanos = chunk_frames.saturating_mul(1_000_000_000)
                 / synchronized.mixed.sample_rate.max(1) as u64;
-            latest_observed_media_nanos = latest_observed_media_nanos
-                .max(synchronized.mixed.timestamp.nanos.saturating_add(chunk_nanos));
+            latest_observed_media_nanos = latest_observed_media_nanos.max(
+                synchronized
+                    .mixed
+                    .timestamp
+                    .nanos
+                    .saturating_add(chunk_nanos),
+            );
             let mixed_rms = compute_rms(&synchronized.mixed.samples);
             if mixed_rms > diagnostics.mixed_rms_max {
                 diagnostics.mixed_rms_max = mixed_rms;
@@ -723,7 +728,8 @@ impl MacRecordingService {
                     effect_timeline_path: None,
                     trim_metadata_path: None,
                     cut_timeline_path: None,
-                    writer_diagnostics: crate::media::recording_writer::WriterDiagnostics::default(),
+                    writer_diagnostics: crate::media::recording_writer::WriterDiagnostics::default(
+                    ),
                 }
             }
         };
@@ -1381,8 +1387,8 @@ mod tests {
             writer,
             mic_level,
             "medium",
-            true,  // requested_system_audio
-            true,  // requested_microphone
+            true, // requested_system_audio
+            true, // requested_microphone
             Some("Built-in Microphone".to_string()),
         );
 

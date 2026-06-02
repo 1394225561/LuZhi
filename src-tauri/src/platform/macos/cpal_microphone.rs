@@ -242,7 +242,10 @@ where
 {
     // Use lazy offset: the session offset is set on the first audio callback
     // (not at stream build time) to prevent build-delay from inflating timestamps.
-    let sample_clock = Arc::new(crate::core::clock::AudioSampleClock::new(sample_rate, channels));
+    let sample_clock = Arc::new(crate::core::clock::AudioSampleClock::new(
+        sample_rate,
+        channels,
+    ));
 
     let stream = device
         .build_input_stream(

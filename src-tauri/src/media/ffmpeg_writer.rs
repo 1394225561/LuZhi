@@ -133,7 +133,8 @@ impl RecordingWriter for FfmpegRecordingWriter {
                 mpsc::TrySendError::Full(_) => {
                     self.video_queue_full_count += 1;
                     AppError::RecordingWriteFailed {
-                        reason: "FFmpeg 编码队列已满，视频帧被丢弃（编码速度跟不上采集速度）".to_string(),
+                        reason: "FFmpeg 编码队列已满，视频帧被丢弃（编码速度跟不上采集速度）"
+                            .to_string(),
                     }
                 }
                 mpsc::TrySendError::Disconnected(_) => AppError::RecordingWriteFailed {
@@ -180,7 +181,8 @@ impl RecordingWriter for FfmpegRecordingWriter {
                 mpsc::TrySendError::Full(_) => {
                     self.audio_queue_full_count += 1;
                     AppError::RecordingWriteFailed {
-                        reason: "FFmpeg 编码队列已满，音频数据被丢弃（编码速度跟不上采集速度）".to_string(),
+                        reason: "FFmpeg 编码队列已满，音频数据被丢弃（编码速度跟不上采集速度）"
+                            .to_string(),
                     }
                 }
                 mpsc::TrySendError::Disconnected(_) => AppError::RecordingWriteFailed {
@@ -740,11 +742,11 @@ fn encoder_worker(
         while audio_encoder.receive_packet(&mut packet).is_ok() {
             packet.set_stream(audio_stream_index);
             packet.rescale_ts(Rational(1, 48000), audio_tb);
-            packet.write_interleaved(&mut output).map_err(|e| {
-                AppError::RecordingWriteFailed {
+            packet
+                .write_interleaved(&mut output)
+                .map_err(|e| AppError::RecordingWriteFailed {
                     reason: format!("写入最终音频数据包失败: {e}"),
-                }
-            })?;
+                })?;
         }
     }
 
@@ -1269,10 +1271,8 @@ mod tests {
         // R1: Partial-overlap chunks must be drained during recording, not
         // accumulated until finish(). Multiple slight-overlap chunks should
         // all produce audio output without excessive buffering.
-        let path = crate::test_support::ffmpeg_helpers::unique_media_path(
-            "writer-partial-drain",
-            "mp4",
-        );
+        let path =
+            crate::test_support::ffmpeg_helpers::unique_media_path("writer-partial-drain", "mp4");
         let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
 
         // 3 seconds of video at 30fps — reduced to avoid queue overflow in tests.
@@ -1326,8 +1326,7 @@ mod tests {
     fn ffmpeg_writer_handles_out_of_order_audio_chunks() {
         // R2: Out-of-order chunks (timestamp < cursor) must be trimmed or
         // discarded without corrupting the audio timeline.
-        let path =
-            crate::test_support::ffmpeg_helpers::unique_media_path("writer-ooo", "mp4");
+        let path = crate::test_support::ffmpeg_helpers::unique_media_path("writer-ooo", "mp4");
         let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
 
         for i in 0..3 {
@@ -1340,12 +1339,16 @@ mod tests {
         writer.push_audio(audio_chunk_with_frames(0, 1024)).unwrap();
         // Second chunk at correct position.
         let ts2 = 1024u64 * 1_000_000_000 / 48000;
-        writer.push_audio(audio_chunk_with_frames(ts2, 1024)).unwrap();
+        writer
+            .push_audio(audio_chunk_with_frames(ts2, 1024))
+            .unwrap();
         // Third chunk: out-of-order, back at t=0 — fully overlapped, should be discarded.
         writer.push_audio(audio_chunk_with_frames(0, 1024)).unwrap();
         // Fourth chunk: partially overlapping the second chunk.
         let ts4 = ts2 + 512u64 * 1_000_000_000 / 48000;
-        writer.push_audio(audio_chunk_with_frames(ts4, 1024)).unwrap();
+        writer
+            .push_audio(audio_chunk_with_frames(ts4, 1024))
+            .unwrap();
 
         let result = writer.finish().unwrap();
         assert!(result.output_path.is_some());
@@ -1484,15 +1487,15 @@ mod tests {
 
     #[test]
     fn ffmpeg_writer_preserves_non_silent_audio_after_leading_gap() {
-        let path = crate::test_support::ffmpeg_helpers::unique_media_path(
-            "writer-leading-gap-rms",
-            "mp4",
-        );
+        let path =
+            crate::test_support::ffmpeg_helpers::unique_media_path("writer-leading-gap-rms", "mp4");
         let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
 
         // Video from t=0, 30 frames = 1 second. Keep count low to avoid queue overflow.
         for i in 0..30 {
-            writer.push_video(test_video_frame_at(i * 33_333_333)).unwrap();
+            writer
+                .push_video(test_video_frame_at(i * 33_333_333))
+                .unwrap();
         }
 
         // First audio chunk at t=200ms — creates a leading gap.
@@ -1525,26 +1528,30 @@ mod tests {
 
     #[test]
     fn ffmpeg_writer_preserves_non_silent_audio_after_middle_gap() {
-        let path = crate::test_support::ffmpeg_helpers::unique_media_path(
-            "writer-middle-gap-rms",
-            "mp4",
-        );
+        let path =
+            crate::test_support::ffmpeg_helpers::unique_media_path("writer-middle-gap-rms", "mp4");
         let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
 
         // Video from t=0, 60 frames = 2 seconds.
         for i in 0..60 {
-            writer.push_video(test_video_frame_at(i * 33_333_333)).unwrap();
+            writer
+                .push_video(test_video_frame_at(i * 33_333_333))
+                .unwrap();
         }
 
         // First audio chunk at t=0, contiguous.
         writer.push_audio(audio_chunk_with_frames(0, 1024)).unwrap();
 
         // Second audio chunk at t=500ms — creates a middle gap.
-        writer.push_audio(audio_chunk_with_frames(500_000_000, 1024)).unwrap();
+        writer
+            .push_audio(audio_chunk_with_frames(500_000_000, 1024))
+            .unwrap();
 
         // Third audio chunk immediately after second.
         let chunk3_ts = 500_000_000 + 1024 * 1_000_000_000 / 48_000;
-        writer.push_audio(audio_chunk_with_frames(chunk3_ts, 1024)).unwrap();
+        writer
+            .push_audio(audio_chunk_with_frames(chunk3_ts, 1024))
+            .unwrap();
 
         writer.finish().unwrap();
 

@@ -255,16 +255,18 @@ fn decode_audio_stats(path: &std::path::Path) -> AppResult<AudioStats> {
         })?;
 
     let codecpar = stream.parameters();
-    let decoder =
-        ffmpeg_next::codec::context::Context::from_parameters(codecpar).map_err(|e| {
-            AppError::ExportFailed {
-                reason: format!("创建音频解码器失败: {e}"),
-            }
-        })?;
-
-    let mut decoder = decoder.decoder().audio().map_err(|e| AppError::ExportFailed {
-        reason: format!("打开音频解码器失败: {e}"),
+    let decoder = ffmpeg_next::codec::context::Context::from_parameters(codecpar).map_err(|e| {
+        AppError::ExportFailed {
+            reason: format!("创建音频解码器失败: {e}"),
+        }
     })?;
+
+    let mut decoder = decoder
+        .decoder()
+        .audio()
+        .map_err(|e| AppError::ExportFailed {
+            reason: format!("打开音频解码器失败: {e}"),
+        })?;
 
     let mut sample_count: u64 = 0;
     let mut sum_squares: f64 = 0.0;
@@ -299,11 +301,11 @@ fn decode_audio_stats(path: &std::path::Path) -> AppResult<AudioStats> {
                 if stream.index() != audio_stream_index {
                     continue;
                 }
-                decoder.send_packet(&packet).map_err(|e| {
-                    AppError::ExportFailed {
+                decoder
+                    .send_packet(&packet)
+                    .map_err(|e| AppError::ExportFailed {
                         reason: format!("发送音频包到解码器失败: {e}"),
-                    }
-                })?;
+                    })?;
 
                 let mut decoded = ffmpeg_next::frame::Audio::empty();
                 while decoder.receive_frame(&mut decoded).is_ok() {
@@ -771,7 +773,10 @@ mod tests {
 
         // Should succeed — no audio requested, so contract is trivially satisfied.
         let result = validate_source_artifact_with_audio_contract(&path, &contract);
-        assert!(result.is_ok(), "should allow silent when no audio requested");
+        assert!(
+            result.is_ok(),
+            "should allow silent when no audio requested"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -799,7 +804,10 @@ mod tests {
 
         // Should fail — audio was requested but artifact has only silent track.
         let result = validate_source_artifact_with_audio_contract(&path, &contract);
-        assert!(result.is_err(), "should reject silent audio when audio requested");
+        assert!(
+            result.is_err(),
+            "should reject silent audio when audio requested"
+        );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
             err_msg.contains("静音") || err_msg.contains("音频"),
@@ -828,7 +836,11 @@ mod tests {
         };
 
         let result = validate_source_artifact_with_audio_contract(&path, &contract);
-        assert!(result.is_ok(), "should accept non-silent audio: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "should accept non-silent audio: {:?}",
+            result.err()
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -845,7 +857,9 @@ mod tests {
             use crate::test_support::ffmpeg_helpers::test_video_frame_at;
             let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
             for i in 0..3 {
-                writer.push_video(test_video_frame_at(i * 33_333_333)).unwrap();
+                writer
+                    .push_video(test_video_frame_at(i * 33_333_333))
+                    .unwrap();
             }
             writer.finish().unwrap();
         }
@@ -857,13 +871,11 @@ mod tests {
         };
 
         // Export validation should also enforce the contract.
-        let result = validate_export_artifact_with_audio_contract(
-            &path,
-            1920,
-            1080,
-            &contract,
+        let result = validate_export_artifact_with_audio_contract(&path, 1920, 1080, &contract);
+        assert!(
+            result.is_err(),
+            "should reject silent export when audio requested"
         );
-        assert!(result.is_err(), "should reject silent export when audio requested");
 
         let _ = std::fs::remove_file(&path);
     }
@@ -902,12 +914,19 @@ mod tests {
 
         let path = unique_media_path("strict-helper", "mp4");
         let result = create_synthetic_source_artifact_strict(&path, 64, 48, 500_000_000);
-        assert!(result.is_ok(), "strict helper should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "strict helper should succeed: {:?}",
+            result.err()
+        );
 
         let inspection = inspect_media_artifact(&path).unwrap();
         assert!(inspection.has_video_stream);
         assert!(inspection.has_audio_stream);
-        assert!(inspection.audio_rms.unwrap() > 0.01, "audio should be non-silent");
+        assert!(
+            inspection.audio_rms.unwrap() > 0.01,
+            "audio should be non-silent"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

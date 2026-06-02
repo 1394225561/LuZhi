@@ -396,21 +396,23 @@ fn list_microphone_devices() -> Result<Vec<MicrophoneDeviceInfo>, String> {
         .map_err(|e| format!("枚举麦克风设备失败: {e}"))?;
 
     let bluetooth_keywords = [
-        "bluetooth", "airpods", "headset", "hands-free", "hfp", "a2dp",
-        "wireless", "bt ", "bt-",
+        "bluetooth",
+        "airpods",
+        "headset",
+        "hands-free",
+        "hfp",
+        "a2dp",
+        "wireless",
+        "bt ",
+        "bt-",
     ];
 
     let mut result = Vec::new();
     for device in devices {
         if let Ok(name) = device.name() {
             let name_lower = name.to_lowercase();
-            let is_bluetooth = bluetooth_keywords
-                .iter()
-                .any(|kw| name_lower.contains(kw));
-            result.push(MicrophoneDeviceInfo {
-                name,
-                is_bluetooth,
-            });
+            let is_bluetooth = bluetooth_keywords.iter().any(|kw| name_lower.contains(kw));
+            result.push(MicrophoneDeviceInfo { name, is_bluetooth });
         }
     }
 
@@ -903,14 +905,12 @@ async fn export_video(
                     ..Default::default()
                 }
             };
-            if let Err(error) =
-                media::ffmpeg_common::validate_export_artifact_with_audio_contract(
-                    &result.output_path,
-                    spec.width,
-                    spec.height,
-                    &contract,
-                )
-            {
+            if let Err(error) = media::ffmpeg_common::validate_export_artifact_with_audio_contract(
+                &result.output_path,
+                spec.width,
+                spec.height,
+                &contract,
+            ) {
                 let _ = std::fs::remove_file(&result.output_path);
                 return Err(error.to_string());
             }

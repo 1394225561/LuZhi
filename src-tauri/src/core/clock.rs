@@ -197,7 +197,7 @@ mod tests {
         clock.initialize_offset(&session, 960);
 
         let first = clock.timestamp_for_interleaved_sample_count(1920); // 960 frames, 2ch
-        // First timestamp should be near session elapsed - 10ms buffer.
+                                                                        // First timestamp should be near session elapsed - 10ms buffer.
         let expected_start = session.elapsed_nanos().saturating_sub(10_000_000);
         assert!(first.nanos >= expected_start.saturating_sub(1_000_000));
         assert!(first.nanos <= expected_start + 1_000_000);

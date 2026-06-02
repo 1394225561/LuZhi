@@ -8,9 +8,9 @@ use std::sync::Arc;
 // Re-export from production module for backward compatibility.
 #[cfg(feature = "ffmpeg")]
 pub use crate::media::ffmpeg_common::{
-    inspect_media_artifact, inspect_media_artifact_with_audio_stats, MediaArtifactInspection,
-    RequestedAudioContract, validate_source_artifact_with_audio_contract,
-    validate_export_artifact_with_audio_contract,
+    inspect_media_artifact, inspect_media_artifact_with_audio_stats,
+    validate_export_artifact_with_audio_contract, validate_source_artifact_with_audio_contract,
+    MediaArtifactInspection, RequestedAudioContract,
 };
 
 pub fn unique_media_path(prefix: &str, extension: &str) -> PathBuf {
@@ -134,11 +134,11 @@ pub fn create_synthetic_source_artifact_strict(
     for i in 0..num_frames {
         let ts = i * frame_duration;
         let frame = synthetic_video_frame_at(ts, width, height);
-        writer.push_video(frame).map_err(|e| {
-            AppError::RecordingWriteFailed {
+        writer
+            .push_video(frame)
+            .map_err(|e| AppError::RecordingWriteFailed {
                 reason: format!("strict helper: push_video 失败 (frame {i}): {e}"),
-            }
-        })?;
+            })?;
         // Pace: every 5 frames, yield to encoder worker.
         if i % 5 == 0 && i > 0 {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -152,11 +152,11 @@ pub fn create_synthetic_source_artifact_strict(
     for i in 0..num_audio {
         let ts = i * audio_interval;
         let chunk = synthetic_audio_chunk_at(ts);
-        writer.push_audio(chunk).map_err(|e| {
-            AppError::RecordingWriteFailed {
+        writer
+            .push_audio(chunk)
+            .map_err(|e| AppError::RecordingWriteFailed {
                 reason: format!("strict helper: push_audio 失败 (chunk {i}): {e}"),
-            }
-        })?;
+            })?;
         // Pace: every 5 chunks, yield to encoder worker.
         if i % 5 == 0 && i > 0 {
             std::thread::sleep(std::time::Duration::from_millis(10));
