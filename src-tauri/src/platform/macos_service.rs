@@ -810,21 +810,42 @@ impl MacRecordingService {
             eprintln!("{msg}");
             errors.push(msg);
         }
+        // Drop warnings: small drops are diagnostics-only (not errors).
+        // Hard fail only when drop ratio exceeds threshold (Important 3).
+        const AUDIO_DROP_RATIO_HARD_FAIL: f64 = 0.10; // 10%
         if requested_system_audio && diagnostics.system_chunks_dropped > 0 {
-            let msg = format!(
-                "警告: 系统音频通道丢弃了 {} 个音频块",
-                diagnostics.system_chunks_dropped
+            let total = diagnostics.system_chunks_received.max(1) as f64;
+            let ratio = diagnostics.system_chunks_dropped as f64 / total;
+            eprintln!(
+                "警告: 系统音频通道丢弃了 {} 个音频块 (总计 {}，丢弃率 {:.1}%)",
+                diagnostics.system_chunks_dropped,
+                diagnostics.system_chunks_received,
+                ratio * 100.0,
             );
-            eprintln!("{msg}");
-            errors.push(msg);
+            if ratio > AUDIO_DROP_RATIO_HARD_FAIL {
+                errors.push(format!(
+                    "系统音频丢弃率过高 ({:.1}% > {:.1}%)",
+                    ratio * 100.0,
+                    AUDIO_DROP_RATIO_HARD_FAIL * 100.0
+                ));
+            }
         }
         if requested_microphone && diagnostics.mic_chunks_dropped > 0 {
-            let msg = format!(
-                "警告: 麦克风通道丢弃了 {} 个音频块",
-                diagnostics.mic_chunks_dropped
+            let total = diagnostics.mic_chunks_received.max(1) as f64;
+            let ratio = diagnostics.mic_chunks_dropped as f64 / total;
+            eprintln!(
+                "警告: 麦克风通道丢弃了 {} 个音频块 (总计 {}，丢弃率 {:.1}%)",
+                diagnostics.mic_chunks_dropped,
+                diagnostics.mic_chunks_received,
+                ratio * 100.0,
             );
-            eprintln!("{msg}");
-            errors.push(msg);
+            if ratio > AUDIO_DROP_RATIO_HARD_FAIL {
+                errors.push(format!(
+                    "麦克风音频丢弃率过高 ({:.1}% > {:.1}%)",
+                    ratio * 100.0,
+                    AUDIO_DROP_RATIO_HARD_FAIL * 100.0
+                ));
+            }
         }
 
         // Artifact-level audio contract validation (BUG-005).
@@ -1466,5 +1487,79 @@ mod tests {
 
         // Mixed positive/negative: sqrt((0.04 + 0.04) / 2) = sqrt(0.04) = 0.2
         assert!((compute_rms(&[0.2, -0.2]) - 0.2).abs() < 0.001);
+    }
+
+    /// Verifies that small audio drops (<10%) produce warnings but NOT errors.
+    /// This prevents incidental drops from causing recording failure (Important 3).
+    #[test]
+    fn consume_frames_warns_but_does_not_fail_on_small_audio_drop() {
+        use crate::core::frame::AudioChunk;
+        use crate::media::recording_writer::CountingRecordingWriter;
+        use std::sync::Arc;
+
+        // Create channel with capacity 11. Send 11 items to fill, then 1 more = 1 drop.
+        // Drop ratio = 1/11 ≈ 9%, below the 10% threshold.
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1);
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(11);
+
+        // Fill the channel with 11 chunks.
+        for i in 0..11 {
+            let chunk = AudioChunk {
+                timestamp: MediaTimestamp::from_nanos(i * 10_000_000),
+                sample_rate: 48000,
+                channels: 2,
+                samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+            };
+            assert!(audio_tx.try_send_drop_newest(chunk));
+        }
+        // This one will be dropped (channel full).
+        let overflow_chunk = AudioChunk {
+            timestamp: MediaTimestamp::from_nanos(110_000_000),
+            sample_rate: 48000,
+            channels: 2,
+            samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+        };
+        assert!(!audio_tx.try_send_drop_newest(overflow_chunk));
+
+        let stop_flag = Arc::new(AtomicBool::new(true)); // immediate stop
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        let writer: Box<dyn RecordingWriter> =
+            Box::new(CountingRecordingWriter::new(None));
+
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+            true,  // requested_system_audio
+            false, // requested_microphone
+            None,
+        );
+
+        // Should have received 11 chunks in final drain.
+        assert_eq!(output.diagnostics.system_chunks_received, 11);
+        // Should have 1 drop.
+        assert_eq!(output.diagnostics.system_chunks_dropped, 1);
+
+        // Drop ratio 1/11 ≈ 9% < 10% → should NOT be in errors.
+        let drop_errors: Vec<_> = output
+            .errors
+            .iter()
+            .filter(|e| e.contains("丢弃率过高"))
+            .collect();
+        assert!(
+            drop_errors.is_empty(),
+            "small drop ratio (9%) should not cause hard fail, got: {:?}",
+            output.errors
+        );
     }
 }
