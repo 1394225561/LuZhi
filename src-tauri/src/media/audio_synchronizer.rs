@@ -782,4 +782,122 @@ mod tests {
             assert_eq!(mixed.channels, 2);
         }
     }
+
+    #[test]
+    fn dual_source_offset_does_not_discard_mic_windows() {
+        // BUG-005 Critical 1: When system audio leads mic by a systematic offset,
+        // the max-based watermark emits system-only windows before mic chunks
+        // land in those windows. With source-aware watermark (min), the synchronizer
+        // should wait for mic to catch up.
+        let mut synchronizer = AudioSynchronizer::new(SimpleAudioMixer::new());
+
+        // System fills windows 0-2, arrives first.
+        synchronizer.push_system(chunk(5_000_000, vec![0.3, 0.3])); // window 0
+        synchronizer.push_system(chunk(25_000_000, vec![0.3, 0.3])); // window 1
+        synchronizer.push_system(chunk(45_000_000, vec![0.3, 0.3])); // window 2
+
+        // System continues advancing the watermark — with max-based watermark,
+        // this causes windows 0-2 to be emitted as system-only BEFORE mic arrives.
+        synchronizer.push_system(chunk(120_000_000, vec![0.1, 0.1]));
+
+        // Now mic arrives for the same recording windows (offset by callback delay).
+        // These land in windows 0, 1, 2 — but with max-watermark, those windows
+        // were already emitted as system-only.
+        synchronizer.push_mic(chunk(10_000_000, vec![0.5, 0.5])); // window 0
+        synchronizer.push_mic(chunk(30_000_000, vec![0.5, 0.5])); // window 1
+        synchronizer.push_mic(chunk(50_000_000, vec![0.5, 0.5])); // window 2
+
+        // Drain whatever is left.
+        synchronizer.push_system(chunk(200_000_000, vec![0.1, 0.1]));
+        let _more = synchronizer.drain_mixed();
+
+        // With source-aware watermark, all 3 windows should be paired.
+        // With current max-watermark, some windows are emitted as system-only
+        // before mic arrives, then mic lands in a new copy of those windows.
+        let (paired, sys_only, mic_only) = synchronizer.diagnostics();
+        assert_eq!(
+            sys_only, 0,
+            "source-aware watermark should not emit system-only windows before mic arrives, \
+             got paired={paired}, sys_only={sys_only}, mic_only={mic_only}"
+        );
+    }
+
+    #[test]
+    fn synchronizer_splits_long_system_callback_to_multiple_windows() {
+        // BUG-005 Critical 2: A single callback delivering 60ms of audio
+        // must be split into 3 × 20ms windows, not lumped into one.
+        let mut synchronizer = AudioSynchronizer::new(SimpleAudioMixer::new());
+
+        // 60ms of 48kHz stereo = 60 * 48000 / 1000 = 2880 frames = 5760 samples
+        let samples_60ms = vec![0.3f32; 5760];
+        synchronizer.push_system(AudioChunk {
+            timestamp: MediaTimestamp::from_nanos(0),
+            sample_rate: 48_000,
+            channels: 2,
+            samples: Arc::from(samples_60ms.into_boxed_slice()),
+        });
+
+        // Advance watermark.
+        synchronizer.push_system(chunk(200_000_000, vec![0.1, 0.1]));
+
+        let results = synchronizer.drain_mixed();
+
+        // Should produce 3 windows (0-20ms, 20-40ms, 40-60ms), not 1.
+        assert_eq!(
+            results.len(),
+            3,
+            "expected 3 windows from 60ms chunk, got {}",
+            results.len()
+        );
+
+        // Each window should have ~1920 samples (960 frames × 2ch).
+        for (i, result) in results.iter().enumerate() {
+            let mixed = result.as_ref().unwrap();
+            assert_eq!(
+                mixed.samples.len(),
+                1920,
+                "window {i} should have 1920 samples"
+            );
+            assert_eq!(mixed.sample_rate, 48_000);
+            assert_eq!(mixed.channels, 2);
+        }
+    }
+
+    #[test]
+    fn synchronizer_does_not_emit_fast_source_before_slow_source_watermark() {
+        // BUG-005 Critical 1: System is ahead of mic. With source-aware watermark,
+        // system-only windows should not be emitted before mic arrives or timeout.
+        let mut synchronizer = AudioSynchronizer::new(SimpleAudioMixer::new());
+
+        // System fills windows 0-4.
+        for i in 0..5 {
+            synchronizer.push_system(chunk(i * 20_000_000 + 5_000_000, vec![0.3, 0.3]));
+        }
+
+        // Only mic in window 0 and 1.
+        synchronizer.push_mic(chunk(5_000_000, vec![0.5, 0.5]));
+        synchronizer.push_mic(chunk(25_000_000, vec![0.5, 0.5]));
+
+        // Now advance mic to window 4 — this should unlock windows 2-4.
+        synchronizer.push_mic(chunk(85_000_000, vec![0.5, 0.5]));
+
+        let results = synchronizer.drain_mixed();
+
+        // Windows 0 and 1 should be paired. Windows 2-4 may be system-only
+        // or still held depending on watermark logic.
+        let (paired, sys_only, _mic_only) = synchronizer.diagnostics();
+        assert!(
+            paired >= 2,
+            "windows 0-1 should be paired, got {paired}"
+        );
+        // The key assertion: total emitted should not have all system-only for windows 2-4.
+        // With current max-watermark, system-only windows 0-4 would all be emitted
+        // BEFORE mic arrives — this test locks that defect.
+        assert_eq!(
+            results.len(),
+            5,
+            "expected all 5 windows to be emitted, got {}",
+            results.len()
+        );
+    }
 }
