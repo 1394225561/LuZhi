@@ -561,4 +561,68 @@ mod tests {
             "should reject when capture RMS non-zero but RMS before writer is 0"
         );
     }
+
+    /// Verifies that the writer discard ratio check covers system audio
+    /// symmetrically with mic (Important 4).
+    #[test]
+    fn source_aware_contract_rejects_when_requested_system_windows_are_all_discarded() {
+        let diag = RecordingDiagnostics {
+            requested_system_audio: true,
+            requested_microphone: false,
+            system_chunks_received: 100,
+            system_rms_max: 0.05,
+            system_windows_before_writer: 100,
+            system_frames_before_writer: 48000,
+            system_rms_max_before_writer: 0.04,
+            paired_window_count: 0,
+            system_only_window_count: 100,
+            ..Default::default()
+        };
+        let writer_diag = WriterDiagnostics {
+            audio_chunks_received: 100,
+            audio_chunks_discarded_full_overlap: 100, // all discarded
+            ..Default::default()
+        };
+
+        let result = validate_source_aware_audio_contract(&diag, &writer_diag);
+        assert!(
+            result.is_err(),
+            "should reject when system requested but all chunks discarded by writer"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("discarded as full overlap"),
+            "error should mention full overlap discard, got: {}",
+            err_msg
+        );
+    }
+
+    /// Verifies that the writer discard ratio check covers mic audio
+    /// symmetrically with system (Important 4).
+    #[test]
+    fn source_aware_contract_rejects_when_requested_mic_windows_are_all_discarded() {
+        let diag = RecordingDiagnostics {
+            requested_system_audio: false,
+            requested_microphone: true,
+            mic_chunks_received: 80,
+            mic_rms_max: 0.10,
+            mic_windows_before_writer: 80,
+            mic_frames_before_writer: 38400,
+            mic_rms_max_before_writer: 0.08,
+            paired_window_count: 0,
+            mic_only_window_count: 80,
+            ..Default::default()
+        };
+        let writer_diag = WriterDiagnostics {
+            audio_chunks_received: 80,
+            audio_chunks_discarded_full_overlap: 80, // all discarded
+            ..Default::default()
+        };
+
+        let result = validate_source_aware_audio_contract(&diag, &writer_diag);
+        assert!(
+            result.is_err(),
+            "should reject when mic requested but all chunks discarded by writer"
+        );
+    }
 }
