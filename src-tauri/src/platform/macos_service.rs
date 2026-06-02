@@ -537,23 +537,23 @@ impl MacRecordingService {
             }
 
             // Pair by timestamp proximity and mix.
-            for mixed_result in synchronizer.drain_mixed() {
-                match mixed_result {
-                    Ok(mixed) => {
+            for synced_result in synchronizer.drain_mixed() {
+                match synced_result {
+                    Ok(synced) => {
                         // Track audio duration independent of sample caps.
                         let chunk_frames =
-                            mixed.samples.len() as u64 / mixed.channels.max(1) as u64;
+                            synced.mixed.samples.len() as u64 / synced.mixed.channels.max(1) as u64;
                         let chunk_nanos = chunk_frames.saturating_mul(1_000_000_000)
-                            / mixed.sample_rate.max(1) as u64;
+                            / synced.mixed.sample_rate.max(1) as u64;
                         latest_observed_media_nanos = latest_observed_media_nanos
-                            .max(mixed.timestamp.nanos.saturating_add(chunk_nanos));
+                            .max(synced.mixed.timestamp.nanos.saturating_add(chunk_nanos));
                         // Track mixed audio RMS.
-                        let mixed_rms = compute_rms(&mixed.samples);
+                        let mixed_rms = compute_rms(&synced.mixed.samples);
                         if mixed_rms > diagnostics.mixed_rms_max {
                             diagnostics.mixed_rms_max = mixed_rms;
                         }
                         // Collect sensitivity-independent 100ms base RMS buckets.
-                        for sample in base_audio_analyzer.push_chunk(&mixed) {
+                        for sample in base_audio_analyzer.push_chunk(&synced.mixed) {
                             if !push_bounded_base_audio_sample(
                                 &mut base_audio_activity,
                                 sample,
@@ -562,7 +562,7 @@ impl MacRecordingService {
                                 audio_dropped += 1;
                             }
                         }
-                        if let Err(e) = writer.push_audio(mixed) {
+                        if let Err(e) = writer.push_audio(synced.mixed) {
                             diagnostics.writer_push_audio_failures += 1;
                             let msg = format!("写入混音音频失败: {e}");
                             eprintln!("{msg}");
@@ -639,10 +639,11 @@ impl MacRecordingService {
         // This ensures no audio chunks are left in the queues when stopping.
         let drain_results = synchronizer.drain_final();
         // Record window pairing diagnostics from the synchronizer.
-        let (paired, sys_only, mic_only) = synchronizer.diagnostics();
+        let (paired, sys_only, mic_only, timeout_windows) = synchronizer.diagnostics();
         diagnostics.paired_window_count = paired;
         diagnostics.system_only_window_count = sys_only;
         diagnostics.mic_only_window_count = mic_only;
+        diagnostics.source_timeout_window_count = timeout_windows;
         for (synchronized, was_unpaired) in drain_results {
             if was_unpaired {
                 if synchronized.has_system && !synchronized.has_mic {

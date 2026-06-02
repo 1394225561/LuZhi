@@ -81,6 +81,12 @@ pub struct RecordingDiagnostics {
     pub system_only_window_count: u64,
     /// Number of time windows with mic-only audio.
     pub mic_only_window_count: u64,
+    /// Number of windows emitted due to source stall timeout.
+    pub source_timeout_window_count: u64,
+    /// Maximum RMS of system audio before writer (from synchronizer output).
+    pub system_rms_max_before_writer: f32,
+    /// Maximum RMS of mic audio before writer (from synchronizer output).
+    pub mic_rms_max_before_writer: f32,
 }
 
 /// Result returned after finalizing a recording session.
