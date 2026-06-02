@@ -37,6 +37,32 @@
 11. **source-aware contract 去除 RMS 门控**（第 26 节 Phase C）：`validate_source_aware_audio_contract()` 的 presence 检查改为基于 chunk/window/frame 计数，不再以 `system_rms_max > 0.001` 作为前置条件。低音量内容不等于 source 缺失。writer discard 检查对称覆盖 system 和 mic。
 12. **low-RMS regression tests**（第 26 节 Phase B）：新增 `create_synthetic_source_artifact_strict_with_amplitude()` helper 和 3 个回归测试，覆盖 RMS ≈ 0.010 的非静音 artifact 通过验证、近静音 artifact 仍被拒绝的场景。
 
+**预防规则**：
+
+1. 麦克风硬件 stream config 必须来自设备 `default_input_config()` 或 supported config；UI 目标格式只能作为 mixer/output target，不能直接当作 CPAL 硬件配置。
+2. 音频 chunk 必须携带真实 `timestamp/sample_rate/channels`；统一 48kHz/stereo 只能发生在 mixer 或 writer timeline 层。
+3. `AudioMixer` 入口必须校验 `channels > 0`、`sample_rate > 0`、`samples.len() % channels == 0`，不能信任底层捕获元数据。
+4. system/mic 同步器必须 source-aware：同一固定时间窗口最多输出一个 mixed chunk，不能让先到的单源 chunk 独占时间轴并吞掉后到源。
+5. 同步器窗口必须保留 per-source metadata；system 与 mic 不得共用一份 `sample_rate/channels`。
+6. 双源请求但仅一路先到时，必须有 source-start grace；grace 和 stall timeout 都需要测试覆盖，避免初始慢源被误判为缺失。
+7. writer 处理 audio gap 时，padding silence 后必须继续 append 当前真实 chunk；gap padding 不能替代 chunk append。
+8. writer 必须同时覆盖 first-gap、middle-gap、tail-gap、full-overlap、partial-overlap、out-of-order 六类时间轴场景，并用 decoded RMS/peak 验证真实 PCM 未丢失。
+9. writer partial-overlap append 后必须立即 drain AAC buffer，不能跳过 drain 直接进入下一轮或等到 finish。
+10. `audio_pts` 只能作为编码器单调 PTS 计数器；timeline cursor 只用于 gap/overlap 决策，两者不能混用。
+11. writer diagnostics 必须区分 queued、received、appended、discarded、trimmed、real PCM frames、silence padding、encoded AAC frames；不能用 queued 或 AAC frame 数冒充 artifact 有声证据。
+12. `generated_silent_track` 必须来自 writer diagnostics，不能通过 `mixed_audio_chunk_count == 0` 推断，因为 silent packet count 会覆盖该计数。
+13. capture channel drop count、writer queue full count、writer push failure count 必须进入 diagnostics；音频 drop 不能静默。
+14. FFmpeg writer queue 必须使用 non-blocking send，consumer loop 必须限制每轮 video drain batch，避免编码压力阻塞捕获主链路或饿死音频。
+15. 录制停止/finalize 的 bounded 语义必须覆盖 flush send 和 worker join；只在 `join()` 返回后记录耗时不等于 bounded join。
+16. CPAL lazy timestamp offset 不能用 `0` 同时表示“未初始化”和“真实 offset 为 0”；真实 0 offset 是合法值，必须用单独 initialized flag 或 sentinel。
+17. 蓝牙耳机麦克风会触发 macOS HFP profile 切换；stop 顺序必须 mic first，且需要显式 pause/drop stream、短等待和下一轮重建 mic capture 实例。
+18. 麦克风 UI 电平只能证明 capture callback 有输入，不能作为 source artifact 或 export artifact 有声成功证据。
+19. 请求录制音频源时，必须建立 source/export artifact contract：至少检查 stream presence、decoded sample count、decoded RMS/peak、source-aware before-writer 计数和 writer discard ratio。
+20. 真实设备 manual gate 必须覆盖：只系统音频、只麦克风、系统+麦克风、蓝牙麦克风、低音量输入、停止后蓝牙音质恢复、source 与 export 都可听。
+21. 蓝牙麦克风 stop 必须返回结构化 `CpalMicrophoneStopDiagnostics`（pause_attempted/pause_ok/stream_dropped/callbacks_after_stop/stop_wait_ms），不能只靠 eprintln。
+22. 少量音频 chunk drop（<10% drop ratio）只能进入 diagnostics warning，不能直接导致 stop 失败；hard fail 需基于 drop ratio 阈值或 artifact contract 失败。
+23. writer worker 和 consumer thread 的 join 必须有 bounded timeout（worker 10s、consumer 15s），超时返回结构化错误而非无限阻塞。
+
 ---
 
 ### BUG-005_2: 录制音频 contract 验证失败（audible_min_rms false positive）
@@ -57,10 +83,16 @@ global decoded RMS 被 silence padding 稀释（leading gaps、middle gaps、tai
 
 **预防规则**：
 
-- `audible_min_rms` 不能作为 artifact validation 的硬失败阈值；global decoded RMS 被 silence padding 稀释
-- artifact 静音检测的硬失败只由 `min_rms + min_peak` 联合判断
-- source-aware presence contract 不能以 RMS 作为前置门控条件；低音量请求源的 chunks/windows/frames 非零即视为 source 存在
-- writer discard ratio 检查必须对称覆盖 system 和 mic
+1. `audible_min_rms` 只能作为 warning/diagnostic/manual-gate 阈值，不能作为 source/export artifact validation 的硬失败阈值。
+2. global decoded RMS 会被 leading/middle/tail silence padding 稀释；不能把 aggregate RMS 直接等同于用户听到的响度。
+3. artifact 静音硬失败只能使用保守 Level 1 contract：`rms < min_rms && peak < min_peak`。
+4. 只要 `rms >= min_rms` 或 `peak >= min_peak`，artifact 就不能因为低于 `audible_min_rms` 而失败，只能记录 warning。
+5. source-aware presence contract 不能以 RMS 作为前置门控条件；低音量请求源的 chunks/windows/frames 非零即视为 source 存在。
+6. before-writer diagnostics 必须记录每个源的 windows、frames、RMS；BUG 定位时优先用这些字段区分 capture 缺失、synchronizer 丢失、writer 丢失和 artifact validation 误判。
+7. writer discard ratio 检查必须对称覆盖 system 和 mic，不能只保护其中一路。
+8. low-RMS regression 必须同时覆盖 source artifact 和 export artifact：`RMS≈0.010~0.011` 应通过，near-silent artifact 仍应失败。
+9. 修改任何 RMS/peak 阈值前，必须先查看真实设备日志和 decoded stats，不能只根据合成测试的响度调阈值。
+10. 报错文案必须区分“近乎静音 hard failure”和“低于建议可听阈值 warning”，避免把诊断 warning 展示成录制失败。
 
 ---
 

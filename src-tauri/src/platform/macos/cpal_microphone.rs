@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -10,6 +10,22 @@ use crate::core::capture::{
 };
 use crate::core::clock::SessionClock;
 use crate::core::frame::AudioChunk;
+
+/// Structured diagnostics from the last `stop()` call (Minor 1).
+///
+/// Captures the full stop lifecycle for post-mortem analysis of
+/// Bluetooth HFP profile release issues.
+#[derive(Debug, Clone, Default)]
+pub struct CpalMicrophoneStopDiagnostics {
+    pub stop_requested: bool,
+    pub stream_existed: bool,
+    pub pause_attempted: bool,
+    pub pause_ok: bool,
+    pub pause_error: Option<String>,
+    pub stream_dropped: bool,
+    pub callbacks_after_stop: u64,
+    pub stop_wait_ms: u64,
+}
 
 /// Wrapper to make `cpal::Stream` `Send`.
 ///
@@ -32,6 +48,10 @@ pub struct CpalMicrophoneCapture {
     stream: Option<SendStream>,
     running: Arc<AtomicBool>,
     session_clock: Option<Arc<SessionClock>>,
+    /// Count of callbacks that fired after `running` was set to false.
+    callbacks_after_stop: Arc<AtomicU64>,
+    /// Diagnostics from the last `stop()` call.
+    last_stop_diagnostics: CpalMicrophoneStopDiagnostics,
 }
 
 impl CpalMicrophoneCapture {
@@ -40,7 +60,14 @@ impl CpalMicrophoneCapture {
             stream: None,
             running: Arc::new(AtomicBool::new(false)),
             session_clock: None,
+            callbacks_after_stop: Arc::new(AtomicU64::new(0)),
+            last_stop_diagnostics: CpalMicrophoneStopDiagnostics::default(),
         }
+    }
+
+    /// Returns diagnostics from the last `stop()` call.
+    pub fn last_stop_diagnostics(&self) -> &CpalMicrophoneStopDiagnostics {
+        &self.last_stop_diagnostics
     }
 
     /// Sets the shared session clock so microphone timestamps use the same
@@ -119,6 +146,7 @@ impl AudioCapture for CpalMicrophoneCapture {
 
         let sample_format = supported_config.sample_format();
         let running = self.running.clone();
+        let callbacks_after_stop = self.callbacks_after_stop.clone();
         let sample_rate_val = stream_config.sample_rate.0;
         let channels_val = stream_config.channels;
         let session_clock = self.session_clock.clone();
@@ -131,6 +159,7 @@ impl AudioCapture for CpalMicrophoneCapture {
                 &stream_config,
                 sink.clone(),
                 running.clone(),
+                callbacks_after_stop.clone(),
                 sample_rate_val,
                 channels_val,
                 session_clock.clone(),
@@ -140,6 +169,7 @@ impl AudioCapture for CpalMicrophoneCapture {
                 &stream_config,
                 sink.clone(),
                 running.clone(),
+                callbacks_after_stop.clone(),
                 sample_rate_val,
                 channels_val,
                 session_clock.clone(),
@@ -149,6 +179,7 @@ impl AudioCapture for CpalMicrophoneCapture {
                 &stream_config,
                 sink,
                 running.clone(),
+                callbacks_after_stop,
                 sample_rate_val,
                 channels_val,
                 session_clock,
@@ -173,33 +204,53 @@ impl AudioCapture for CpalMicrophoneCapture {
     fn stop(&mut self) -> AppResult<()> {
         eprintln!("CpalMicrophoneCapture::stop() 开始");
 
+        let mut diag = CpalMicrophoneStopDiagnostics::default();
+        diag.stop_requested = true;
+
+        // Reset callback-after-stop counter.
+        self.callbacks_after_stop.store(0, Ordering::Relaxed);
+
         // Signal running=false first — callbacks check this flag and exit early.
         self.running.store(false, Ordering::Relaxed);
 
         if let Some(send_stream) = self.stream.take() {
+            diag.stream_existed = true;
+
             // Explicit pause before drop — captures CoreAudio stop error.
             // drop() alone silently ignores stop/uninitialize errors.
+            diag.pause_attempted = true;
             match send_stream.0.pause() {
                 Ok(()) => {
+                    diag.pause_ok = true;
                     eprintln!("CpalMicrophoneCapture::pause() 成功");
                 }
                 Err(e) => {
+                    diag.pause_error = Some(format!("{:?}", e));
                     eprintln!("CpalMicrophoneCapture::pause() 失败: {:?}", e);
                 }
             }
 
             // Drop stream to release CoreAudio resources.
             drop(send_stream);
+            diag.stream_dropped = true;
 
             // Bounded wait for CoreAudio to complete device release.
             // Bluetooth HFP profile switching can take 100-300ms.
+            let wait_start = std::time::Instant::now();
             std::thread::sleep(std::time::Duration::from_millis(300));
+            diag.stop_wait_ms = wait_start.elapsed().as_millis() as u64;
 
-            eprintln!("CpalMicrophoneCapture::stop() 完成 — stream_dropped=true, waited=300ms");
+            diag.callbacks_after_stop = self.callbacks_after_stop.load(Ordering::Acquire);
+
+            eprintln!(
+                "CpalMicrophoneCapture::stop() 完成 — stream_dropped={}, pause_ok={}, callbacks_after_stop={}, waited={}ms",
+                diag.stream_dropped, diag.pause_ok, diag.callbacks_after_stop, diag.stop_wait_ms
+            );
         } else {
             eprintln!("CpalMicrophoneCapture::stop() 完成 — 无活跃 stream");
         }
 
+        self.last_stop_diagnostics = diag;
         Ok(())
     }
 
@@ -248,6 +299,7 @@ fn build_input_stream<T: cpal::SizedSample>(
     config: &StreamConfig,
     sink: AudioChunkSink,
     running: Arc<AtomicBool>,
+    callbacks_after_stop: Arc<AtomicU64>,
     sample_rate: u32,
     channels: u16,
     session_clock: Option<Arc<SessionClock>>,
@@ -267,6 +319,7 @@ where
             config,
             move |data: &[T], _info: &cpal::InputCallbackInfo| {
                 if !running.load(Ordering::Relaxed) {
+                    callbacks_after_stop.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
 

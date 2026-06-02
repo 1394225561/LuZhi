@@ -304,7 +304,10 @@ impl MacRecordingService {
         // avoids unnecessary 300ms wait when mic was not used.
         let mic_result = if self.last_requested_microphone {
             eprintln!("麦克风已启动，执行 mic stop...");
-            self.mic_capture.stop()
+            let result = self.mic_capture.stop();
+            let stop_diag = self.mic_capture.last_stop_diagnostics();
+            eprintln!("麦克风停止诊断: {:?}", stop_diag);
+            result
         } else {
             eprintln!("本轮未启动麦克风，跳过 mic stop");
             Ok(())
