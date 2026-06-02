@@ -51,7 +51,9 @@ pub struct MacRecordingService {
     system_audio_receiver: Option<MediaReceiver<AudioChunk>>,
     mic_receiver: Option<MediaReceiver<AudioChunk>>,
     stop_flag: Option<Arc<AtomicBool>>,
-    consumer_handle: Option<thread::JoinHandle<RecordingConsumerOutput>>,
+    consumer_handle: Option<thread::JoinHandle<()>>,
+    /// Receives the consumer thread's result via channel (bounded join, Important 1).
+    consumer_result_rx: Option<std::sync::mpsc::Receiver<RecordingConsumerOutput>>,
     frame_count: Arc<std::sync::atomic::AtomicU64>,
     /// 当前麦克风 RMS 电平值 (0.0 ~ 1.0)，由消费线程周期性更新，外部通过 `mic_level()` 读取。
     mic_level: Arc<Mutex<f64>>,
@@ -120,6 +122,7 @@ impl MacRecordingService {
             mic_receiver: None,
             stop_flag: None,
             consumer_handle: None,
+            consumer_result_rx: None,
             frame_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mic_level: Arc::new(Mutex::new(0.0)),
             cursor_runtime: None,
@@ -255,8 +258,11 @@ impl MacRecordingService {
         self.last_requested_system_audio = requested_system_audio;
         self.last_requested_microphone = requested_microphone;
 
+        let (consumer_result_tx, consumer_result_rx) =
+            std::sync::mpsc::channel::<RecordingConsumerOutput>();
+        self.consumer_result_rx = Some(consumer_result_rx);
         self.consumer_handle = Some(thread::spawn(move || {
-            Self::consume_frames(
+            let output = Self::consume_frames(
                 stop_flag,
                 video_rx,
                 system_audio_rx,
@@ -268,7 +274,8 @@ impl MacRecordingService {
                 requested_system_audio,
                 requested_microphone,
                 microphone_device,
-            )
+            );
+            let _ = consumer_result_tx.send(output);
         }));
 
         Ok(())
@@ -337,10 +344,49 @@ impl MacRecordingService {
             diagnostics: RecordingDiagnostics::default(),
             errors: Vec::new(),
         };
-        let (consumer_output, consumer_panicked) = if let Some(handle) = self.consumer_handle.take()
+        let (consumer_output, consumer_panicked) = if let Some(rx) = self.consumer_result_rx.take()
         {
-            match handle.join() {
+            const CONSUMER_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+            match rx.recv_timeout(CONSUMER_RESULT_TIMEOUT) {
                 Ok(output) => (output, false),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    eprintln!(
+                        "警告: 消费线程超时未返回结果 ({:?})",
+                        CONSUMER_RESULT_TIMEOUT
+                    );
+                    errors.push(format!(
+                        "录制消费线程超时未返回结果 ({:?})",
+                        CONSUMER_RESULT_TIMEOUT
+                    ));
+                    // Try to join the handle to capture any panic info.
+                    if let Some(handle) = self.consumer_handle.take() {
+                        if let Err(panic) = handle.join() {
+                            let msg = extract_panic_message(panic);
+                            eprintln!("录制消费线程异常终止: {msg}");
+                        }
+                    }
+                    (empty_output, true)
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    eprintln!("警告: 消费线程结果通道断开");
+                    errors.push("录制消费线程结果通道断开".to_string());
+                    if let Some(handle) = self.consumer_handle.take() {
+                        if let Err(panic) = handle.join() {
+                            let msg = extract_panic_message(panic);
+                            eprintln!("录制消费线程异常终止: {msg}");
+                        }
+                    }
+                    (empty_output, true)
+                }
+            }
+        } else if let Some(handle) = self.consumer_handle.take() {
+            // Fallback: no result channel — join handle directly.
+            // This shouldn't happen in normal flow.
+            match handle.join() {
+                Ok(()) => {
+                    eprintln!("警告: 消费线程完成但无结果通道");
+                    (empty_output, false)
+                }
                 Err(panic) => {
                     let msg = extract_panic_message(panic);
                     eprintln!("录制消费线程异常终止: {msg}");
@@ -1525,8 +1571,7 @@ mod tests {
         let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mic_level = Arc::new(Mutex::new(0.0f64));
 
-        let writer: Box<dyn RecordingWriter> =
-            Box::new(CountingRecordingWriter::new(None));
+        let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
 
         drop(video_tx);
         drop(audio_tx);

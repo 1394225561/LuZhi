@@ -37,7 +37,9 @@ enum EncoderMessage {
 /// the encoder can't keep up, preventing unbounded memory growth.
 pub struct FfmpegRecordingWriter {
     tx: Option<mpsc::SyncSender<EncoderMessage>>,
-    worker: Option<thread::JoinHandle<AppResult<RecordingResult>>>,
+    worker: Option<thread::JoinHandle<()>>,
+    /// Receives the worker's final result via channel (bounded join, Important 1).
+    result_rx: Option<mpsc::Receiver<AppResult<RecordingResult>>>,
     frame_count: u64,
     mixed_audio_chunk_count: u64,
     /// Number of video queue full events (for diagnostics).
@@ -56,13 +58,18 @@ impl FfmpegRecordingWriter {
         }
 
         let (tx, rx) = mpsc::sync_channel::<EncoderMessage>(ENCODER_QUEUE_CAPACITY);
+        let (result_tx, result_rx) = mpsc::channel::<AppResult<RecordingResult>>();
         let worker_path = output_path.clone();
 
-        let worker = thread::spawn(move || encoder_worker(worker_path, rx));
+        let worker = thread::spawn(move || {
+            let result = encoder_worker(worker_path, rx);
+            let _ = result_tx.send(result);
+        });
 
         Ok(Self {
             tx: Some(tx),
             worker: Some(worker),
+            result_rx: Some(result_rx),
             frame_count: 0,
             mixed_audio_chunk_count: 0,
             video_queue_full_count: 0,
@@ -70,15 +77,65 @@ impl FfmpegRecordingWriter {
         })
     }
 
-    /// Drain the worker handle and return its result.
-    /// Called by `finish()` after sending the Flush message.
+    /// Drain the worker handle and return its result with a bounded timeout.
+    /// Uses a result channel from the worker so we can apply `recv_timeout`.
+    /// Falls back to `handle.join()` if the channel times out, to catch panics.
     fn join_worker(&mut self) -> AppResult<RecordingResult> {
-        let handle = self.worker.take().ok_or(AppError::RecordingWriteFailed {
-            reason: "编码工作线程已被回收".to_string(),
-        })?;
-        handle.join().map_err(|_| AppError::RecordingWriteFailed {
-            reason: "编码工作线程异常退出".to_string(),
-        })?
+        const WORKER_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+        let rx = self
+            .result_rx
+            .take()
+            .ok_or(AppError::RecordingWriteFailed {
+                reason: "编码工作结果通道已被回收".to_string(),
+            })?;
+
+        // Wait for the worker to send its result through the channel.
+        match rx.recv_timeout(WORKER_RESULT_TIMEOUT) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!(
+                    "警告: FFmpeg worker 超时未返回结果 ({:?})，尝试 join",
+                    WORKER_RESULT_TIMEOUT
+                );
+                // Worker may have panicked — try a brief join to capture panic info.
+                if let Some(handle) = self.worker.take() {
+                    match handle.join() {
+                        Ok(()) => {
+                            // Worker completed but didn't send result — shouldn't happen.
+                            Err(AppError::RecordingWriteFailed {
+                                reason: "FFmpeg worker 超时且未返回结果".to_string(),
+                            })
+                        }
+                        Err(_) => Err(AppError::RecordingWriteFailed {
+                            reason: "FFmpeg worker 超时且异常退出".to_string(),
+                        }),
+                    }
+                } else {
+                    Err(AppError::RecordingWriteFailed {
+                        reason: "FFmpeg worker 超时且线程句柄已被回收".to_string(),
+                    })
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // Worker exited without sending result — likely panicked.
+                eprintln!("警告: FFmpeg worker 结果通道断开，尝试 join 获取 panic 信息");
+                if let Some(handle) = self.worker.take() {
+                    match handle.join() {
+                        Ok(()) => Err(AppError::RecordingWriteFailed {
+                            reason: "FFmpeg worker 异常退出且未返回结果".to_string(),
+                        }),
+                        Err(_) => Err(AppError::RecordingWriteFailed {
+                            reason: "FFmpeg worker 异常退出".to_string(),
+                        }),
+                    }
+                } else {
+                    Err(AppError::RecordingWriteFailed {
+                        reason: "FFmpeg worker 结果通道断开且线程句柄已被回收".to_string(),
+                    })
+                }
+            }
+        }
     }
 }
 
