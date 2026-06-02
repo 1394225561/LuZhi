@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-02 | Phase 6 第 10 节 code review 整改完成（source-aware before-writer diagnostics、audible contract、蓝牙 mic pause/reset、synchronizer start grace、writer bounded join）；真实设备 manual gate 仍待完成。
+> 最后更新：2026-06-02 | Phase 6 整改后 code review 整改完成（CPAL lazy offset sentinel、drop warning 分层、source-aware discard 对称化、bounded finalize、蓝牙 mic stop diagnostics）；真实设备 manual gate 仍待完成。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,35 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-02：Phase 6 整改后 code review 整改（CPAL lazy offset、drop 分层、bounded finalize、蓝牙 stop diagnostics）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-02-phase-6-bug-005-post-rectification-code-review.md`
+- `docs/superpowers/plans/2026-06-02-phase-6-bug-005-post-rectification-code-review-rectification.md`
+
+本轮修复（5 个 Phase）：
+
+1. **Phase B CPAL lazy offset sentinel**（Important 2）：`AudioSampleClock` 新增 `offset_initialized: AtomicBool`；`initialize_offset()` 使用 `AtomicBool` CAS 做 first-call-wins，不再用 `0` 做 sentinel；新增 2 个 zero-offset 回归测试。
+2. **Phase C drop warning/error 分层**（Important 3）：system/mic chunk drop 降级为 `eprintln` warning + drop ratio 日志，不再直接进入 errors；新增 10% drop ratio hard fail 阈值；新增 small-drop pass 测试。
+3. **Phase D source-aware discard 对称化**（Important 4）：确认 writer discard ratio 检查已对称覆盖 requested system 和 mic（已有代码）；新增 system discard 和 mic discard 测试验证。
+4. **Phase A 真正 bounded finalize**（Important 1）：writer worker result 通过 `mpsc::channel` 返回，`join_worker` 改为 `recv_timeout(10s)`；consumer thread result 通过 `mpsc::channel` 返回，`stop` 改为 `recv_timeout(15s)`；超时后尝试 `handle.join()` 获取 panic 信息。
+5. **Phase E 蓝牙 mic stop diagnostics**（Minor 1）：新增 `CpalMicrophoneStopDiagnostics` 结构体；`stop()` 记录 pause/drop/wait/callbacks_after_stop；callback 中 `running=false` 时递增计数；BUG.md 补充预防规则 21-23。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **289 unit + 10 integration tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` **236 tests** 通过
+- `npm test -- --run` **52 tests** 通过
+- `cargo fmt --check` 通过
+- `cargo clippy` 通过（既有 warnings）
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/core/clock.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/platform/macos/cpal_microphone.rs`, `src-tauri/src/platform/macos_service.rs`
+
+---
 
 ### 2026-06-02：Phase 6 第 10 节 code review 整改（source-aware before-writer diagnostics、audible contract、蓝牙 mic pause、synchronizer grace、writer bounded join）
 
