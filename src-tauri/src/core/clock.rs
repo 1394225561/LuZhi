@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -80,6 +80,10 @@ pub struct AudioSampleClock {
     /// chunk's timestamp equals the wall-clock elapsed time at callback entry.
     /// Uses AtomicU64 to support lazy initialization from `&self` (via CAS).
     session_offset_nanos: AtomicU64,
+    /// Tracks whether `initialize_offset()` has been called successfully.
+    /// Using a separate flag avoids the ambiguity of `offset=0` meaning
+    /// either "not initialized" or "legitimate zero offset" (Important 2).
+    offset_initialized: AtomicBool,
 }
 
 impl AudioSampleClock {
@@ -92,6 +96,7 @@ impl AudioSampleClock {
             channels,
             emitted_frames: AtomicU64::new(0),
             session_offset_nanos: AtomicU64::new(0),
+            offset_initialized: AtomicBool::new(false),
         }
     }
 
@@ -113,20 +118,29 @@ impl AudioSampleClock {
     /// actually started, preventing the stream-build delay from inflating
     /// the first chunk's timestamp.
     ///
-    /// Uses CAS so only the first call takes effect; subsequent calls are no-ops.
+    /// Uses `AtomicBool` CAS so only the first call takes effect; subsequent
+    /// calls are no-ops. This correctly handles the case where the legitimate
+    /// first offset is 0 (e.g. callback at 5ms with 10ms buffer).
     /// This method is safe to call from `&self` (no `&mut` required).
     pub fn initialize_offset(&self, session: &SessionClock, buffer_frames: u64) {
         let buffer_duration_nanos = buffer_frames * 1_000_000_000 / self.sample_rate as u64;
         let callback_now = session.elapsed_nanos();
         let offset = callback_now.saturating_sub(buffer_duration_nanos);
 
-        // Only set if currently 0 (first-call wins).
-        let _ = self.session_offset_nanos.compare_exchange(
-            0,
-            offset,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
+        // Use AtomicBool guard instead of checking offset==0, because
+        // offset=0 is a legitimate value (callback_start <= buffer_duration).
+        if self
+            .offset_initialized
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.session_offset_nanos.store(offset, Ordering::Release);
+        }
+    }
+
+    /// Returns whether `initialize_offset()` has been called successfully.
+    pub fn offset_initialized(&self) -> bool {
+        self.offset_initialized.load(Ordering::Acquire)
     }
 
     /// Returns the timestamp for the next batch of `sample_count` interleaved samples.
@@ -201,6 +215,38 @@ mod tests {
         let expected_start = session.elapsed_nanos().saturating_sub(10_000_000);
         assert!(first.nanos >= expected_start.saturating_sub(1_000_000));
         assert!(first.nanos <= expected_start + 1_000_000);
+    }
+
+    #[test]
+    fn audio_sample_clock_lazy_offset_zero_is_stable_after_second_callback() {
+        let session = SessionClock::new();
+        // Simulate: first callback at 5ms, buffer 10ms -> offset = max(5ms - 10ms, 0) = 0
+        // The sentinel must accept 0 as a valid initialized value.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let clock = AudioSampleClock::new(48_000, 2);
+        clock.initialize_offset(&session, 960); // 960 frames = 20ms @ 48kHz — larger than elapsed
+        assert!(clock.offset_initialized());
+        assert_eq!(clock.session_offset_nanos.load(Ordering::Acquire), 0);
+
+        // Second callback tries to set offset = 5ms — must be rejected (first-call wins)
+        clock.initialize_offset(&session, 100); // smaller buffer -> nonzero offset
+        assert_eq!(clock.session_offset_nanos.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn audio_sample_clock_lazy_offset_first_call_wins_even_when_zero() {
+        let session = SessionClock::new();
+        let clock = AudioSampleClock::new(48_000, 2);
+
+        // First offset is 0 (buffer_frames very large relative to elapsed)
+        clock.initialize_offset(&session, 960_000); // huge buffer -> offset = 0
+        assert!(clock.offset_initialized());
+        assert_eq!(clock.session_offset_nanos.load(Ordering::Acquire), 0);
+
+        // Second call returns — offset must not change
+        clock.initialize_offset(&session, 100);
+        assert_eq!(clock.session_offset_nanos.load(Ordering::Acquire), 0);
     }
 
     #[test]
