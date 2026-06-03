@@ -97,6 +97,63 @@ export type RecordingResult = {
   effectTimelinePath: string | null
   trimMetadataPath: string | null
   cutTimelinePath: string | null
+  writerDiagnostics: WriterDiagnostics
+  diagnostics: RecordingDiagnostics
+}
+
+export type WriterDiagnostics = {
+  audioChunksReceived: number
+  audioChunksAppended: number
+  audioChunksDiscardedFullOverlap: number
+  audioChunksTrimmedPartialOverlap: number
+  audioRealFramesAppended: number
+  audioSilenceFramesPadded: number
+  audioRealRmsMaxBeforeEncode: number
+  aacFramesEncoded: number
+  silentAacFramesEncoded: number
+  generatedSilentTrack: boolean
+  videoQueueFullCount: number
+  audioQueueFullCount: number
+  systemChunksReceivedByWriter: number
+  micChunksReceivedByWriter: number
+}
+
+export type RecordingDiagnostics = {
+  requestedSystemAudio: boolean
+  requestedMicrophone: boolean
+  microphoneDevice: string | null
+  systemChunksReceived: number
+  micChunksReceived: number
+  systemChunksDropped: number
+  micChunksDropped: number
+  mixedChunksQueued: number
+  writerPushAudioFailures: number
+  systemRmsMax: number
+  micRmsMax: number
+  mixedRmsMax: number
+  generatedSilentTrack: boolean
+  pairedWindowCount: number
+  systemOnlyWindowCount: number
+  micOnlyWindowCount: number
+  sourceTimeoutWindowCount: number
+  systemRmsMaxBeforeWriter: number
+  micRmsMaxBeforeWriter: number
+  systemWindowsBeforeWriter: number
+  micWindowsBeforeWriter: number
+  systemFramesBeforeWriter: number
+  micFramesBeforeWriter: number
+  micStopDiagnostics: CpalMicrophoneStopDiagnostics | null
+}
+
+export type CpalMicrophoneStopDiagnostics = {
+  stopRequested: boolean
+  streamExisted: boolean
+  pauseAttempted: boolean
+  pauseOk: boolean
+  pauseError: string | null
+  streamDropped: boolean
+  callbacksAfterStop: number
+  stopWaitMs: number
 }
 
 
