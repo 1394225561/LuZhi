@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-02 | Phase 6 整改后 code review 整改完成（CPAL lazy offset sentinel、drop warning 分层、source-aware discard 对称化、bounded finalize、蓝牙 mic stop diagnostics）；真实设备 manual gate 仍待完成。
+> 最后更新：2026-06-03 | Phase 6 follow-up code review 整改完成（bounded finalize、drop ratio 分母、mic stop diagnostics、per-source writer diagnostics）；真实设备 manual gate 仍待完成。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,62 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-03：Phase 6 follow-up code review 整改（bounded finalize、drop ratio、mic diagnostics、per-source writer）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-03-phase-6-bug-005-current-rectification-code-review.md`
+- `docs/superpowers/plans/2026-06-03-phase-6-bug-005-follow-up-rectification.md`
+
+本轮修复（6 个 Task）：
+
+1. **Task 1: FFmpeg writer timeout 不再无界 join**（Critical 1）：`join_worker()` timeout 分支移除 `handle.join()`，直接返回 `RecordingWriteFailed` 错误；Disconnected 分支保留 join（worker 已退出）；新增 `extract_panic_message` helper 和 timeout 测试。
+2. **Task 2: Consumer timeout 不再无界 join**（Critical 2）：`join_consumer()` timeout 分支移除 `handle.join()`，使用 `empty_output` 继续 cleanup；fallback 分支也移除无界 join，记录状态不一致错误。
+3. **Task 3: Drop ratio 分母修正**（Important 1）：system/mic drop ratio 分母从 `received` 改为 `received + dropped`（attempted total）；日志中的"总计"改为 attempted total；新增 9.09% pass 和 10.71% fail 边界测试。
+4. **Task 4: 蓝牙 mic stop diagnostics 结构化返回**（Important 2）：新增 `stop_with_diagnostics()` 方法返回 `CpalMicrophoneStopDiagnostics`；`macos_service` 使用 `stop_with_diagnostics()` 并在重建 capture 前保留 diagnostics；`RecordingDiagnostics` 新增 `mic_stop_diagnostics` 字段。
+5. **Task 5: Writer per-source diagnostics**（Important 3）：`WriterDiagnostics` 新增 `system_chunks_received_by_writer` / `mic_chunks_received_by_writer`；`RecordingWriter` trait 新增 `record_source_contribution()` 方法；`consume_frames()` 在每次 `push_audio` 前记录 per-source 贡献；`validate_source_aware_audio_contract()` 新增 per-source writer 检查。
+6. **Task 6: 文档修复与完整回归**：cargo fmt 修复、drop 日志"音频通道"改为"媒体通道"、RAII guard Drop 注释修正、BUG.md 补充预防规则 28-31。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **243 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **297 unit + 10 integration tests** 通过
+- `npm test -- --run` **52 tests** 通过
+- `cargo fmt --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/platform/macos/cpal_microphone.rs`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/core/media_channel.rs`, `BUG.md`, `HANDOFF.md`
+
+---
+
+### 2026-06-02：Phase 6 code review 整改（drop source logging、RAII guard、stop 测试补充）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-02-phase-6-bug-005-post-rectification-code-review.md`
+- `docs/superpowers/plans/2026-06-02-phase-6-bug-005-code-review-rectification.md`
+
+本轮修复（6 个 Task）：
+
+1. **Task 1: Media Channel source-aware drop logging**：`MediaSender` 新增 `source: &'static str` 字段；`bounded_media_channel` 签名增加 source 参数；`try_send_drop_newest()` 在 drop 时打印 source 标识日志（首条 + 每 100 条）；所有调用点更新为传入 "video"/"system"/"mic" 标识。
+2. **Task 2: CPAL callback drop logging**：`cpal_microphone.rs` 移除 `let _ = sink.try_send_drop_newest(chunk)` 的静默忽略，改为直接调用（drop 日志由 MediaSender 层处理）。
+3. **Task 3: RecordingFinalizeGuard RAII 结构体**：新增 `RecordingFinalizeGuard` 结构体，将 `stop()` 的 9 个清理步骤重构为 `stop_captures()` → `join_consumer()` → `write_sidecars()` → `reset_mic()` → `collect_errors()` → `drive_state_machine()` 链式调用；`Drop` impl 确保 panic 时 stop_flag 和 mic_level 仍被重置。
+4. **Task 4: Stop-During-Startup 集成测试**：新增 `consume_frames_respects_stop_flag_set_before_start`（stop_flag 在 consumer 启动前设置）和 `consume_frames_drains_queued_data_on_stop`（active processing 中 stop 后完整 drain）两个测试。
+5. **Task 5: Drop Ratio Hard Fail 测试**：新增 `consume_frames_fails_on_high_audio_drop_ratio` 测试，验证 20% drop ratio > 10% 阈值时触发 hard fail。
+6. **Task 6: BUG.md 预防规则补充**：新增规则 24-27，覆盖 source-aware drop logging、CPAL callback drop、RAII guard、stop-during-startup 测试。
+
+验证结果：
+
+- `cargo test -p luzhi` **239 tests** 通过
+- `cargo clippy` 通过（既有 warnings）
+
+改动文件：
+
+- **修改**: `BUG.md`, `HANDOFF.md`, `src-tauri/src/core/media_channel.rs`, `src-tauri/src/platform/macos/cpal_microphone.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/platform/macos/screen_capture_kit.rs`, `src-tauri/src/app/recording_service.rs`
+
+---
 
 ### 2026-06-02：Phase 6 整改后 code review 整改（CPAL lazy offset、drop 分层、bounded finalize、蓝牙 stop diagnostics）
 

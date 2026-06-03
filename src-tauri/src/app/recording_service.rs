@@ -46,7 +46,7 @@ impl<C: ScreenCapture, A: AudioCapture> RecordingService<C, A> {
         self.state_machine.start()?;
 
         // Start video (and system audio if the capture supports it).
-        let (video_sender, video_receiver) = bounded_media_channel(90);
+        let (video_sender, video_receiver) = bounded_media_channel(90, "video");
         if let Err(error) = self.capture.start(config, video_sender) {
             self.state_machine.fail();
             return Err(error);
@@ -55,7 +55,7 @@ impl<C: ScreenCapture, A: AudioCapture> RecordingService<C, A> {
 
         // Start microphone capture if requested.
         if audio_config.capture_microphone {
-            let (mic_sender, mic_receiver) = bounded_media_channel(256);
+            let (mic_sender, mic_receiver) = bounded_media_channel(256, "mic");
             if let Err(error) = self.audio_capture.start(audio_config.clone(), mic_sender) {
                 // Roll back video capture on mic failure.
                 let _ = self.capture.stop();

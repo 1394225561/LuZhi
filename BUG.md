@@ -62,6 +62,14 @@
 21. 蓝牙麦克风 stop 必须返回结构化 `CpalMicrophoneStopDiagnostics`（pause_attempted/pause_ok/stream_dropped/callbacks_after_stop/stop_wait_ms），不能只靠 eprintln。
 22. 少量音频 chunk drop（<10% drop ratio）只能进入 diagnostics warning，不能直接导致 stop 失败；hard fail 需基于 drop ratio 阈值或 artifact contract 失败。
 23. writer worker 和 consumer thread 的 join 必须有 bounded timeout（worker 10s、consumer 15s），超时返回结构化错误而非无限阻塞。
+24. 音频 channel drop logging 必须标识 source（system/mic/video），不能只记录数量。
+25. CPAL callback 中的 drop 不能用 `let _` 静默忽略，必须配合 channel 层 source logging。
+26. 录制 stop 路径必须使用 RAII guard 或等效机制，确保 panic 时资源仍被释放。
+27. stop-during-startup 场景必须有测试覆盖：stop_flag 在 consumer 启动前设置。
+28. writer worker 和 consumer thread timeout 后绝不能调用无界 join()；timeout 必须直接返回结构化错误并继续 cleanup。
+29. drop ratio 分母必须使用 received + dropped（attempted total），不能只用 received。
+30. mic stop diagnostics 必须在重建 capture 前写入 RecordingDiagnostics，不能依赖 capture 内部字段。
+31. writer diagnostics 必须区分 per-source（system/mic）的 chunks received，不能只用 aggregate。
 
 ---
 

@@ -46,6 +46,9 @@ pub struct FfmpegRecordingWriter {
     video_queue_full_count: u64,
     /// Number of audio queue full events (for diagnostics).
     audio_queue_full_count: u64,
+    // Per-source writer-side counters (Important 3).
+    system_chunks_received_by_writer: u64,
+    mic_chunks_received_by_writer: u64,
 }
 
 impl FfmpegRecordingWriter {
@@ -74,12 +77,20 @@ impl FfmpegRecordingWriter {
             mixed_audio_chunk_count: 0,
             video_queue_full_count: 0,
             audio_queue_full_count: 0,
+            system_chunks_received_by_writer: 0,
+            mic_chunks_received_by_writer: 0,
         })
     }
 
     /// Drain the worker handle and return its result with a bounded timeout.
     /// Uses a result channel from the worker so we can apply `recv_timeout`.
-    /// Falls back to `handle.join()` if the channel times out, to catch panics.
+    ///
+    /// On timeout: returns error immediately WITHOUT calling `handle.join()`.
+    /// The worker may be stuck in FFmpeg flush/muxer IO — joining would block
+    /// the stop path indefinitely, violating BUG.md rules 15 and 23.
+    ///
+    /// On disconnect: worker already exited (likely panicked), safe to join
+    /// to capture panic info.
     fn join_worker(&mut self) -> AppResult<RecordingResult> {
         const WORKER_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -90,44 +101,42 @@ impl FfmpegRecordingWriter {
                 reason: "编码工作结果通道已被回收".to_string(),
             })?;
 
-        // Wait for the worker to send its result through the channel.
         match rx.recv_timeout(WORKER_RESULT_TIMEOUT) {
-            Ok(result) => result,
+            Ok(result) => {
+                // Worker completed — join to clean up thread resources.
+                if let Some(handle) = self.worker.take() {
+                    let _ = handle.join();
+                }
+                result
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Timeout: do NOT call handle.join(). The worker may still be
+                // running (stuck in FFmpeg flush/muxer IO/write_trailer).
+                // Drop the JoinHandle to detach the thread.
+                self.worker.take();
                 eprintln!(
-                    "警告: FFmpeg worker 超时未返回结果 ({:?})，尝试 join",
+                    "警告: FFmpeg worker 超时未返回结果 ({:?})，worker 可能仍在后台执行",
                     WORKER_RESULT_TIMEOUT
                 );
-                // Worker may have panicked — try a brief join to capture panic info.
-                if let Some(handle) = self.worker.take() {
-                    match handle.join() {
-                        Ok(()) => {
-                            // Worker completed but didn't send result — shouldn't happen.
-                            Err(AppError::RecordingWriteFailed {
-                                reason: "FFmpeg worker 超时且未返回结果".to_string(),
-                            })
-                        }
-                        Err(_) => Err(AppError::RecordingWriteFailed {
-                            reason: "FFmpeg worker 超时且异常退出".to_string(),
-                        }),
-                    }
-                } else {
-                    Err(AppError::RecordingWriteFailed {
-                        reason: "FFmpeg worker 超时且线程句柄已被回收".to_string(),
-                    })
-                }
+                Err(AppError::RecordingWriteFailed {
+                    reason: format!("FFmpeg worker 超时未返回结果 ({:?})", WORKER_RESULT_TIMEOUT),
+                })
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 // Worker exited without sending result — likely panicked.
+                // Safe to join to capture panic info.
                 eprintln!("警告: FFmpeg worker 结果通道断开，尝试 join 获取 panic 信息");
                 if let Some(handle) = self.worker.take() {
                     match handle.join() {
                         Ok(()) => Err(AppError::RecordingWriteFailed {
                             reason: "FFmpeg worker 异常退出且未返回结果".to_string(),
                         }),
-                        Err(_) => Err(AppError::RecordingWriteFailed {
-                            reason: "FFmpeg worker 异常退出".to_string(),
-                        }),
+                        Err(panic_payload) => {
+                            let msg = extract_panic_message(&panic_payload);
+                            Err(AppError::RecordingWriteFailed {
+                                reason: format!("FFmpeg worker panic: {}", msg),
+                            })
+                        }
                     }
                 } else {
                     Err(AppError::RecordingWriteFailed {
@@ -252,6 +261,21 @@ impl RecordingWriter for FfmpegRecordingWriter {
         })
     }
 
+    fn record_source_contribution(
+        &mut self,
+        has_system: bool,
+        has_mic: bool,
+        _system_frames: u64,
+        _mic_frames: u64,
+    ) {
+        if has_system {
+            self.system_chunks_received_by_writer += 1;
+        }
+        if has_mic {
+            self.mic_chunks_received_by_writer += 1;
+        }
+    }
+
     fn finish(&mut self) -> AppResult<RecordingResult> {
         // Send flush signal to the worker using try_send with bounded retries.
         // This prevents blocking indefinitely if the encoder queue is full or
@@ -314,7 +338,22 @@ impl RecordingWriter for FfmpegRecordingWriter {
         }
         result.writer_diagnostics.video_queue_full_count += self.video_queue_full_count;
         result.writer_diagnostics.audio_queue_full_count += self.audio_queue_full_count;
+        result.writer_diagnostics.system_chunks_received_by_writer +=
+            self.system_chunks_received_by_writer;
+        result.writer_diagnostics.mic_chunks_received_by_writer +=
+            self.mic_chunks_received_by_writer;
         Ok(result)
+    }
+}
+
+/// Extract a human-readable message from a panic payload.
+fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
     }
 }
 
@@ -1651,6 +1690,30 @@ mod tests {
             inspection.audio_peak.unwrap() > 0.02,
             "audio peak should be > 0.02 after middle gap, got {:?}",
             inspection.audio_peak
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Verifies that dropping a writer without calling finish() completes
+    /// quickly — the worker thread exits when the channel disconnects.
+    /// This tests that the timeout path does not block indefinitely.
+    #[test]
+    fn ffmpeg_writer_drop_completes_quickly_when_worker_exits() {
+        use std::time::Instant;
+
+        let path =
+            crate::test_support::ffmpeg_helpers::unique_media_path("writer-drop-test", "mp4");
+        let writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
+
+        // Drop without finish() — tx drops, worker sees channel disconnect and exits.
+        let start = Instant::now();
+        drop(writer);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_secs() < 5,
+            "Writer drop took {:?}, expected < 5s (worker should exit on channel disconnect)",
+            elapsed
         );
         let _ = std::fs::remove_file(&path);
     }

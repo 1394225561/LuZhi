@@ -39,6 +39,11 @@ pub struct WriterDiagnostics {
     pub video_queue_full_count: u64,
     /// Number of audio queue full events (try_send failed).
     pub audio_queue_full_count: u64,
+    // --- Per-source writer-side diagnostics (Important 3) ---
+    /// Number of mixed audio chunks received by writer that contained system audio.
+    pub system_chunks_received_by_writer: u64,
+    /// Number of mixed audio chunks received by writer that contained mic audio.
+    pub mic_chunks_received_by_writer: u64,
 }
 
 /// Audio diagnostics collected during a recording session.
@@ -95,6 +100,12 @@ pub struct RecordingDiagnostics {
     pub system_frames_before_writer: u64,
     /// Number of mic audio frames that reached writer (before push_audio).
     pub mic_frames_before_writer: u64,
+    /// Structured diagnostics from the last mic stop operation.
+    /// Contains pause/drop/wait/callbacks_after_stop information.
+    /// Only populated when microphone was requested and stop was called.
+    /// Persisted before mic capture is rebuilt (BUG.md rule 21).
+    pub mic_stop_diagnostics:
+        Option<crate::platform::macos::cpal_microphone::CpalMicrophoneStopDiagnostics>,
 }
 
 /// Source-aware audio contract validation.
@@ -231,6 +242,23 @@ pub fn validate_source_aware_audio_contract(
         }
     }
 
+    // --- Per-source writer-level checks (Important 3) ---
+    // Verify that each requested source actually reached the writer.
+    if diagnostics.requested_system_audio && diagnostics.system_windows_before_writer > 0 {
+        if writer_diagnostics.system_chunks_received_by_writer == 0 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: "请求了系统音频，但 writer 未收到任何包含系统音频的 chunk".to_string(),
+            });
+        }
+    }
+    if diagnostics.requested_microphone && diagnostics.mic_windows_before_writer > 0 {
+        if writer_diagnostics.mic_chunks_received_by_writer == 0 {
+            return Err(AppError::RecordingFinalizeFailed {
+                reason: "请求了麦克风，但 writer 未收到任何包含麦克风的 chunk".to_string(),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -255,6 +283,19 @@ pub trait RecordingWriter: Send {
     fn push_video(&mut self, frame: VideoFrameRef) -> AppResult<()>;
     fn push_audio(&mut self, chunk: MixedAudioChunk) -> AppResult<()>;
     fn finish(&mut self) -> AppResult<RecordingResult>;
+
+    /// Record that the next push_audio() call contains data from the given sources.
+    /// Called by consume_frames() before each push_audio() to enable per-source tracking.
+    /// Default implementation is a no-op (for test writers that don't track sources).
+    fn record_source_contribution(
+        &mut self,
+        has_system: bool,
+        has_mic: bool,
+        _system_frames: u64,
+        _mic_frames: u64,
+    ) {
+        let _ = (has_system, has_mic);
+    }
 }
 
 /// Test writer that counts pushed media without encoding.
@@ -623,6 +664,76 @@ mod tests {
         assert!(
             result.is_err(),
             "should reject when mic requested but all chunks discarded by writer"
+        );
+    }
+
+    /// Verifies that per-source writer check rejects when requested mic
+    /// windows exist before writer but writer receives zero mic chunks.
+    #[test]
+    fn source_aware_contract_rejects_when_writer_receives_zero_mic_chunks() {
+        let diag = RecordingDiagnostics {
+            requested_system_audio: false,
+            requested_microphone: true,
+            mic_chunks_received: 80, // passed capture-level check
+            mic_rms_max: 0.10,
+            mic_rms_max_before_writer: 0.05, // passed RMS consistency check
+            mic_only_window_count: 10,       // passed window emission check
+            mic_windows_before_writer: 10,
+            mic_frames_before_writer: 4800,
+            ..Default::default()
+        };
+        let writer_diag = WriterDiagnostics {
+            audio_chunks_received: 80,
+            system_chunks_received_by_writer: 0,
+            mic_chunks_received_by_writer: 0, // writer 未收到 mic
+            ..Default::default()
+        };
+
+        let result = validate_source_aware_audio_contract(&diag, &writer_diag);
+        assert!(
+            result.is_err(),
+            "should reject when mic requested, windows before writer > 0, but writer received 0 mic chunks"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("麦克风"),
+            "error should mention mic, got: {}",
+            err_msg
+        );
+    }
+
+    /// Verifies that per-source writer check rejects when requested system
+    /// windows exist before writer but writer receives zero system chunks.
+    #[test]
+    fn source_aware_contract_rejects_when_writer_receives_zero_system_chunks() {
+        let diag = RecordingDiagnostics {
+            requested_system_audio: true,
+            requested_microphone: false,
+            system_chunks_received: 80, // passed capture-level check
+            system_rms_max: 0.10,
+            system_rms_max_before_writer: 0.05, // passed RMS consistency check
+            system_only_window_count: 10,       // passed window emission check
+            system_windows_before_writer: 10,
+            system_frames_before_writer: 4800,
+            ..Default::default()
+        };
+        let writer_diag = WriterDiagnostics {
+            audio_chunks_received: 80,
+            system_chunks_received_by_writer: 0, // writer 未收到 system
+            mic_chunks_received_by_writer: 0,
+            ..Default::default()
+        };
+
+        let result = validate_source_aware_audio_contract(&diag, &writer_diag);
+        assert!(
+            result.is_err(),
+            "should reject when system requested, windows before writer > 0, but writer received 0 system chunks"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("系统音频"),
+            "error should mention system audio, got: {}",
+            err_msg
         );
     }
 }

@@ -185,8 +185,8 @@ impl MacRecordingService {
         // Create bounded channels for video and system audio.
         const VIDEO_QUEUE_CAPACITY: usize = 90;
         const AUDIO_QUEUE_CAPACITY: usize = 256;
-        let (video_sender, video_receiver) = bounded_media_channel(VIDEO_QUEUE_CAPACITY);
-        let (audio_sender, audio_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY);
+        let (video_sender, video_receiver) = bounded_media_channel(VIDEO_QUEUE_CAPACITY, "video");
+        let (audio_sender, audio_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY, "system");
 
         // Start the unified SCStream with both sinks.
         if let Err(error) = self.screen_capture.start_combined(
@@ -204,7 +204,7 @@ impl MacRecordingService {
 
         // Start microphone capture if requested.
         if audio_config.capture_microphone {
-            let (mic_sender, mic_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY);
+            let (mic_sender, mic_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY, "mic");
             self.mic_capture.set_session_clock(session_clock.clone());
             if let Err(error) = self.mic_capture.start(audio_config.clone(), mic_sender) {
                 // Rollback: stop screen capture.
@@ -280,47 +280,90 @@ impl MacRecordingService {
 
         Ok(())
     }
+}
 
-    /// Stops all captures and finalizes the recording session.
-    ///
-    /// All resource-release steps (capture stop, consumer join, cursor stop,
-    /// mic reset, state machine transition) are executed regardless of
-    /// intermediate errors. Errors are collected and returned together so
-    /// a sidecar write failure never skips cleanup.
-    pub fn stop(&mut self) -> AppResult<RecordingResult> {
-        let mut errors: Vec<String> = Vec::new();
+/// RAII guard that ensures all recording resources are released on drop.
+///
+/// If `finalize()` panics or is never called, the guard still executes
+/// basic cleanup (stop_flag reset, mic level reset) on drop. This prevents
+/// resource leaks when a sidecar write failure or state machine transition
+/// error occurs mid-cleanup.
+struct RecordingFinalizeGuard<'a> {
+    service: &'a mut MacRecordingService,
+    cursor_metadata: Option<crate::media::recording_metadata::RecordingMetadata>,
+    mic_stop_result: AppResult<()>,
+    mic_stop_diag: Option<crate::platform::macos::cpal_microphone::CpalMicrophoneStopDiagnostics>,
+    capture_stop_result: AppResult<()>,
+    consumer_output: Option<RecordingConsumerOutput>,
+    consumer_panicked: bool,
+    errors: Vec<String>,
+}
 
+impl<'a> RecordingFinalizeGuard<'a> {
+    fn new(service: &'a mut MacRecordingService) -> Self {
+        Self {
+            service,
+            cursor_metadata: None,
+            mic_stop_result: Ok(()),
+            mic_stop_diag: None,
+            capture_stop_result: Ok(()),
+            consumer_output: None,
+            consumer_panicked: false,
+            errors: Vec::new(),
+        }
+    }
+
+    /// Execute all cleanup steps regardless of intermediate errors.
+    /// Returns the final RecordingResult or error.
+    fn finalize(mut self) -> AppResult<RecordingResult> {
+        self.stop_captures();
+        self.join_consumer();
+        self.write_sidecars();
+        self.reset_mic();
+        self.collect_errors();
+        self.drive_state_machine()
+    }
+
+    /// Step 1-4: Stop cursor, mic, screen capture, signal consumer.
+    fn stop_captures(&mut self) {
         // Stop cursor runtime BEFORE native captures so the metadata duration
-        // reflects the moment we decided to stop, not the SCK async teardown
-        // (stopCaptureWithCompletionHandler can block for up to 5s).
-        let cursor_metadata = self
+        // reflects the moment we decided to stop, not the SCK async teardown.
+        self.cursor_metadata = self
+            .service
             .cursor_runtime
             .as_mut()
             .and_then(|runtime| runtime.stop());
-        self.cursor_runtime = None;
+        self.service.cursor_runtime = None;
 
         // Stop mic first to release Bluetooth HFP profile ASAP.
-        // Only stop if microphone was actually started this session —
-        // avoids unnecessary 300ms wait when mic was not used.
-        let mic_result = if self.last_requested_microphone {
+        if self.service.last_requested_microphone {
             eprintln!("麦克风已启动，执行 mic stop...");
-            let result = self.mic_capture.stop();
-            let stop_diag = self.mic_capture.last_stop_diagnostics();
-            eprintln!("麦克风停止诊断: {:?}", stop_diag);
-            result
+            match self.service.mic_capture.stop_with_diagnostics() {
+                Ok(diag) => {
+                    eprintln!("麦克风停止诊断: {:?}", diag);
+                    // Persist diagnostics before mic capture is rebuilt in reset_mic().
+                    self.mic_stop_diag = Some(diag);
+                }
+                Err(e) => {
+                    eprintln!("麦克风停止失败: {:?}", e);
+                    self.mic_stop_result = Err(e);
+                }
+            }
         } else {
             eprintln!("本轮未启动麦克风，跳过 mic stop");
-            Ok(())
-        };
-        // Then stop screen capture so no new media can be enqueued.
-        let capture_result = ScreenCapture::stop(&mut self.screen_capture);
-
-        // Signal the consumer thread to stop.
-        if let Some(flag) = &self.stop_flag {
-            flag.store(true, Ordering::Relaxed);
         }
 
-        // Join the consumer thread and get writer result.
+        // Then stop screen capture so no new media can be enqueued.
+        self.capture_stop_result = ScreenCapture::stop(&mut self.service.screen_capture);
+
+        // Signal the consumer thread to stop.
+        if let Some(flag) = &self.service.stop_flag {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Step 5: Join consumer thread with bounded timeout.
+    fn join_consumer(&mut self) {
         let empty_result = RecordingResult {
             duration_secs: 0,
             frame_count: 0,
@@ -347,76 +390,90 @@ impl MacRecordingService {
             diagnostics: RecordingDiagnostics::default(),
             errors: Vec::new(),
         };
-        let (consumer_output, consumer_panicked) = if let Some(rx) = self.consumer_result_rx.take()
-        {
+
+        let (output, panicked) = if let Some(rx) = self.service.consumer_result_rx.take() {
             const CONSUMER_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
             match rx.recv_timeout(CONSUMER_RESULT_TIMEOUT) {
-                Ok(output) => (output, false),
+                Ok(output) => {
+                    // Consumer returned normally — join to clean up thread resources.
+                    if let Some(handle) = self.service.consumer_handle.take() {
+                        let _ = handle.join();
+                    }
+                    (output, false)
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Timeout: do NOT call handle.join(). The consumer may still be
+                    // running (stuck in writer finalize, artifact validation, etc.).
+                    // Drop the JoinHandle to detach the thread.
+                    self.service.consumer_handle.take();
                     eprintln!(
                         "警告: 消费线程超时未返回结果 ({:?})",
                         CONSUMER_RESULT_TIMEOUT
                     );
-                    errors.push(format!(
-                        "录制消费线程超时未返回结果 ({:?})",
+                    self.errors.push(format!(
+                        "录制消费线程超时未返回结果 ({:?})，可能仍在后台执行",
                         CONSUMER_RESULT_TIMEOUT
                     ));
-                    // Try to join the handle to capture any panic info.
-                    if let Some(handle) = self.consumer_handle.take() {
-                        if let Err(panic) = handle.join() {
-                            let msg = extract_panic_message(panic);
-                            eprintln!("录制消费线程异常终止: {msg}");
-                        }
-                    }
                     (empty_output, true)
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    // Consumer exited without sending result — likely panicked.
+                    // Safe to join to capture panic info.
                     eprintln!("警告: 消费线程结果通道断开");
-                    errors.push("录制消费线程结果通道断开".to_string());
-                    if let Some(handle) = self.consumer_handle.take() {
+                    self.errors.push("录制消费线程结果通道断开".to_string());
+                    if let Some(handle) = self.service.consumer_handle.take() {
                         if let Err(panic) = handle.join() {
                             let msg = extract_panic_message(panic);
                             eprintln!("录制消费线程异常终止: {msg}");
+                            self.errors.push(format!("录制消费线程异常终止: {msg}"));
                         }
                     }
                     (empty_output, true)
                 }
             }
-        } else if let Some(handle) = self.consumer_handle.take() {
-            // Fallback: no result channel — join handle directly.
-            // This shouldn't happen in normal flow.
-            match handle.join() {
-                Ok(()) => {
-                    eprintln!("警告: 消费线程完成但无结果通道");
-                    (empty_output, false)
-                }
-                Err(panic) => {
-                    let msg = extract_panic_message(panic);
-                    eprintln!("录制消费线程异常终止: {msg}");
-                    errors.push(format!("录制消费线程异常终止: {msg}"));
-                    (empty_output, true)
-                }
-            }
+        } else if let Some(_handle) = self.service.consumer_handle.take() {
+            // No result channel but handle exists — abnormal state.
+            // Do NOT call handle.join() without a timeout; just log and detach.
+            self.errors
+                .push("消费线程结果通道不存在但句柄存在，状态不一致，已丢弃句柄".to_string());
+            (empty_output, false)
         } else {
             (empty_output, false)
         };
-        let mut result = consumer_output.result;
-        errors.extend(consumer_output.errors);
+
+        self.consumer_output = Some(output);
+        self.consumer_panicked = panicked;
+    }
+
+    /// Step 6-7: Write cursor and trim metadata sidecars.
+    fn write_sidecars(&mut self) {
+        // Persist mic stop diagnostics into consumer output before logging.
+        // This must happen before reset_mic() which rebuilds the capture instance.
+        if let (Some(diag), Some(ref mut output)) =
+            (self.mic_stop_diag.take(), &mut self.consumer_output)
+        {
+            output.diagnostics.mic_stop_diagnostics = Some(diag);
+        }
+
+        let output = match &self.consumer_output {
+            Some(o) => o,
+            None => return,
+        };
 
         // Log diagnostics summary.
-        eprintln!("录制音频诊断摘要: {:?}", consumer_output.diagnostics);
-        eprintln!("写入器诊断摘要: {:?}", result.writer_diagnostics);
+        eprintln!("录制音频诊断摘要: {:?}", output.diagnostics);
+        eprintln!("写入器诊断摘要: {:?}", output.result.writer_diagnostics);
 
-        self.stop_flag = None;
+        self.service.stop_flag = None;
 
-        // Write cursor metadata sidecar (cursor runtime is already stopped).
-        let cursor_metadata_path = match cursor_metadata {
+        // Write cursor metadata sidecar.
+        let cursor_metadata_path = match self.cursor_metadata.take() {
             Some(metadata) => {
                 let path = cursor_metadata_path();
                 match RecordingMetadataWriter::write_metadata(&path, &metadata) {
                     Ok(()) => Some(path.to_string_lossy().to_string()),
                     Err(e) => {
-                        errors.push(format!("光标元数据写入失败: {e}"));
+                        self.errors.push(format!("光标元数据写入失败: {e}"));
                         None
                     }
                 }
@@ -424,64 +481,110 @@ impl MacRecordingService {
             None => None,
         };
 
-        result.cursor_metadata_path = cursor_metadata_path.clone();
-        result.effect_timeline_path = self.last_effect_timeline_path.clone();
-        self.last_cursor_metadata_path = cursor_metadata_path;
-        self.last_recording_output_path = result.output_path.clone();
-
-        // Write trim metadata sidecar for post-recording silence detection.
-        // Skip when consumer panicked — the metadata would be empty/misleading.
-        let trim_metadata_path = if consumer_panicked {
+        // Write trim metadata sidecar. Skip when consumer panicked.
+        let trim_metadata_path = if self.consumer_panicked {
             None
         } else {
             let path = trim_metadata_path();
-            match TrimMetadataWriter::write_metadata(&path, &consumer_output.trim_metadata) {
+            match TrimMetadataWriter::write_metadata(&path, &output.trim_metadata) {
                 Ok(()) => Some(path.to_string_lossy().to_string()),
                 Err(e) => {
-                    errors.push(format!("裁剪元数据写入失败: {e}"));
+                    self.errors.push(format!("裁剪元数据写入失败: {e}"));
                     None
                 }
             }
         };
-        result.trim_metadata_path = trim_metadata_path.clone();
-        self.last_trim_metadata_path = trim_metadata_path;
 
-        // Reset mic level after session ends — always executed.
-        if let Ok(mut guard) = self.mic_level.lock() {
+        // Update service state with sidecar paths.
+        self.service.last_cursor_metadata_path = cursor_metadata_path.clone();
+        self.service.last_recording_output_path = output.result.output_path.clone();
+        self.service.last_trim_metadata_path = trim_metadata_path;
+    }
+
+    /// Step 8: Reset mic level and capture instance.
+    fn reset_mic(&mut self) {
+        if let Ok(mut guard) = self.service.mic_level.lock() {
             *guard = 0.0;
         }
-
-        // Reset mic capture instance to avoid stale device handle.
-        // Next recording session will re-select the device fresh.
-        if self.last_requested_microphone {
-            self.mic_capture = CpalMicrophoneCapture::new();
+        if self.service.last_requested_microphone {
+            self.service.mic_capture = CpalMicrophoneCapture::new();
         }
+    }
 
-        // Collect capture/mic stop errors.
-        if let Err(e) = capture_result {
-            errors.push(format!("屏幕录制停止失败: {e}"));
+    /// Step 9: Collect capture/mic stop errors.
+    fn collect_errors(&mut self) {
+        if let Err(e) = std::mem::replace(&mut self.capture_stop_result, Ok(())) {
+            self.errors.push(format!("屏幕录制停止失败: {e}"));
         }
-        if let Err(e) = mic_result {
-            errors.push(format!("麦克风停止失败: {e}"));
+        if let Err(e) = std::mem::replace(&mut self.mic_stop_result, Ok(())) {
+            self.errors.push(format!("麦克风停止失败: {e}"));
         }
+    }
 
-        // Always drive state machine to a terminal state.
-        if errors.is_empty() {
-            if let Err(e) = self.state_machine.stop() {
-                self.state_machine.fail();
+    /// Step 10: Drive state machine to terminal state and return result.
+    fn drive_state_machine(&mut self) -> AppResult<RecordingResult> {
+        let output = match self.consumer_output.take() {
+            Some(o) => o,
+            None => {
+                return Err(crate::app::error::AppError::RecordingFinalizeFailed {
+                    reason: "消费线程输出缺失".to_string(),
+                })
+            }
+        };
+
+        let mut result = output.result;
+        self.errors.extend(output.errors);
+
+        // Update result with sidecar paths from service state.
+        result.cursor_metadata_path = self.service.last_cursor_metadata_path.clone();
+        result.effect_timeline_path = self.service.last_effect_timeline_path.clone();
+        result.trim_metadata_path = self.service.last_trim_metadata_path.clone();
+
+        if self.errors.is_empty() {
+            if let Err(e) = self.service.state_machine.stop() {
+                self.service.state_machine.fail();
                 return Err(e);
             }
-            if let Err(e) = self.state_machine.complete() {
-                self.state_machine.fail();
+            if let Err(e) = self.service.state_machine.complete() {
+                self.service.state_machine.fail();
                 return Err(e);
             }
             Ok(result)
         } else {
-            self.state_machine.fail();
+            self.service.state_machine.fail();
             Err(crate::app::error::AppError::RecordingFinalizeFailed {
-                reason: errors.join("; "),
+                reason: self.errors.join("; "),
             })
         }
+    }
+}
+
+/// Safety net: ensures basic cleanup happens even if `finalize()` panics.
+///
+/// This Drop impl only resets `stop_flag` and `mic_level` — it does NOT
+/// stop screen capture, stop mic, or join consumer thread. Those require
+/// the explicit `finalize()` path. This is a last-resort safety net,
+/// not a complete resource release mechanism.
+impl Drop for RecordingFinalizeGuard<'_> {
+    fn drop(&mut self) {
+        self.service.stop_flag = None;
+        if let Ok(mut guard) = self.service.mic_level.lock() {
+            *guard = 0.0;
+        }
+    }
+}
+
+impl MacRecordingService {
+    /// Stops all captures and finalizes the recording session.
+    ///
+    /// Uses RAII guard to ensure all cleanup steps execute even on panic.
+    /// All resource-release steps (capture stop, consumer join, cursor stop,
+    /// mic reset, state machine transition) are executed regardless of
+    /// intermediate errors. Errors are collected and returned together so
+    /// a sidecar write failure never skips cleanup.
+    pub fn stop(&mut self) -> AppResult<RecordingResult> {
+        let guard = RecordingFinalizeGuard::new(self);
+        guard.finalize()
     }
 
     pub fn pause(&mut self) -> AppResult<()> {
@@ -670,6 +773,13 @@ impl MacRecordingService {
                                 audio_dropped += 1;
                             }
                         }
+                        // Record per-source contribution before pushing to writer.
+                        writer.record_source_contribution(
+                            synced.has_system,
+                            synced.has_mic,
+                            synced.system_frames,
+                            synced.mic_frames,
+                        );
                         if let Err(e) = writer.push_audio(synced.mixed) {
                             diagnostics.writer_push_audio_failures += 1;
                             let msg = format!("写入混音音频失败: {e}");
@@ -804,6 +914,13 @@ impl MacRecordingService {
                     audio_dropped += 1;
                 }
             }
+            // Record per-source contribution before pushing to writer.
+            writer.record_source_contribution(
+                synchronized.has_system,
+                synchronized.has_mic,
+                synchronized.system_frames,
+                synchronized.mic_frames,
+            );
             if let Err(e) = writer.push_audio(synchronized.mixed) {
                 diagnostics.writer_push_audio_failures += 1;
                 let msg = format!("写入混音音频失败: {e}");
@@ -860,15 +977,19 @@ impl MacRecordingService {
             errors.push(msg);
         }
         // Drop warnings: small drops are diagnostics-only (not errors).
-        // Hard fail only when drop ratio exceeds threshold (Important 3).
+        // Hard fail only when drop ratio exceeds threshold (BUG-005 rule 22).
+        // Denominator is received + dropped (attempted total), not just received.
         const AUDIO_DROP_RATIO_HARD_FAIL: f64 = 0.10; // 10%
         if requested_system_audio && diagnostics.system_chunks_dropped > 0 {
-            let total = diagnostics.system_chunks_received.max(1) as f64;
-            let ratio = diagnostics.system_chunks_dropped as f64 / total;
+            let attempted = diagnostics
+                .system_chunks_received
+                .saturating_add(diagnostics.system_chunks_dropped)
+                .max(1) as f64;
+            let ratio = diagnostics.system_chunks_dropped as f64 / attempted;
             eprintln!(
                 "警告: 系统音频通道丢弃了 {} 个音频块 (总计 {}，丢弃率 {:.1}%)",
                 diagnostics.system_chunks_dropped,
-                diagnostics.system_chunks_received,
+                attempted as u64,
                 ratio * 100.0,
             );
             if ratio > AUDIO_DROP_RATIO_HARD_FAIL {
@@ -880,12 +1001,15 @@ impl MacRecordingService {
             }
         }
         if requested_microphone && diagnostics.mic_chunks_dropped > 0 {
-            let total = diagnostics.mic_chunks_received.max(1) as f64;
-            let ratio = diagnostics.mic_chunks_dropped as f64 / total;
+            let attempted = diagnostics
+                .mic_chunks_received
+                .saturating_add(diagnostics.mic_chunks_dropped)
+                .max(1) as f64;
+            let ratio = diagnostics.mic_chunks_dropped as f64 / attempted;
             eprintln!(
                 "警告: 麦克风通道丢弃了 {} 个音频块 (总计 {}，丢弃率 {:.1}%)",
                 diagnostics.mic_chunks_dropped,
-                diagnostics.mic_chunks_received,
+                attempted as u64,
                 ratio * 100.0,
             );
             if ratio > AUDIO_DROP_RATIO_HARD_FAIL {
@@ -1276,8 +1400,8 @@ mod tests {
     fn consume_frames_writer_finish_failure_records_error() {
         use crate::media::recording_writer::FailingRecordingWriter;
 
-        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1);
-        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(1);
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(1, "test");
         let stop_flag = Arc::new(AtomicBool::new(true)); // immediate stop
         let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mic_level = Arc::new(Mutex::new(0.0f64));
@@ -1321,8 +1445,8 @@ mod tests {
         use crate::core::frame::{FrameBuffer, PixelFormat, VideoFrame};
         use crate::media::recording_writer::FailingRecordingWriter;
 
-        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(2);
-        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(1);
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(2, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(1, "test");
         let stop_flag = Arc::new(AtomicBool::new(false));
         let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mic_level = Arc::new(Mutex::new(0.0f64));
@@ -1383,8 +1507,8 @@ mod tests {
     fn consume_frames_writer_push_audio_failure_records_error() {
         use crate::media::recording_writer::FailingRecordingWriter;
 
-        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1);
-        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(2);
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(2, "test");
         let stop_flag = Arc::new(AtomicBool::new(false));
         let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mic_level = Arc::new(Mutex::new(0.0f64));
@@ -1488,8 +1612,8 @@ mod tests {
     /// Verifies that audio diagnostics tracks requested audio sources.
     #[test]
     fn audio_diagnostics_tracks_requested_sources() {
-        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1);
-        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(1);
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(1, "test");
         let stop_flag = Arc::new(AtomicBool::new(true)); // immediate stop
         let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mic_level = Arc::new(Mutex::new(0.0f64));
@@ -1548,8 +1672,8 @@ mod tests {
 
         // Create channel with capacity 11. Send 11 items to fill, then 1 more = 1 drop.
         // Drop ratio = 1/11 ≈ 9%, below the 10% threshold.
-        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1);
-        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(11);
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(11, "test");
 
         // Fill the channel with 11 chunks.
         for i in 0..11 {
@@ -1607,6 +1731,337 @@ mod tests {
         assert!(
             drop_errors.is_empty(),
             "small drop ratio (9%) should not cause hard fail, got: {:?}",
+            output.errors
+        );
+    }
+
+    /// Verifies that high audio drop ratio (>10%) causes recording failure.
+    /// This is the counterpart to consume_frames_warns_but_does_not_fail_on_small_audio_drop.
+    /// Uses correct denominator: dropped / (received + dropped).
+    #[test]
+    fn consume_frames_fails_on_high_audio_drop_ratio() {
+        use crate::media::recording_writer::CountingRecordingWriter;
+
+        // Create channel with capacity 10. Send 10 items to fill, then 2 more = 2 drops.
+        // Drop ratio = 2 / (10 + 2) = 16.7%, above the 10% threshold.
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(10, "test");
+
+        // Fill the channel with 10 chunks.
+        for i in 0..10 {
+            let chunk = AudioChunk {
+                timestamp: MediaTimestamp::from_nanos(i * 10_000_000),
+                sample_rate: 48000,
+                channels: 2,
+                samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+            };
+            assert!(audio_tx.try_send_drop_newest(chunk));
+        }
+        // These 2 will be dropped (channel full).
+        for i in 10..12 {
+            let overflow_chunk = AudioChunk {
+                timestamp: MediaTimestamp::from_nanos(i * 10_000_000),
+                sample_rate: 48000,
+                channels: 2,
+                samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+            };
+            assert!(!audio_tx.try_send_drop_newest(overflow_chunk));
+        }
+
+        let stop_flag = Arc::new(AtomicBool::new(true)); // immediate stop
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
+
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+            true,  // requested_system_audio
+            false, // requested_microphone
+            None,
+        );
+
+        // Should have received 10 chunks in final drain.
+        assert_eq!(output.diagnostics.system_chunks_received, 10);
+        // Should have 2 drops.
+        assert_eq!(output.diagnostics.system_chunks_dropped, 2);
+
+        // Drop ratio 2/(10+2) = 16.7% > 10% → should be in errors.
+        let drop_errors: Vec<_> = output
+            .errors
+            .iter()
+            .filter(|e| e.contains("丢弃率过高"))
+            .collect();
+        assert!(
+            !drop_errors.is_empty(),
+            "high drop ratio (20%) should cause hard fail, got: {:?}",
+            output.errors
+        );
+    }
+
+    /// Verifies that stop_flag set before consumer thread starts is respected.
+    /// This covers the timing window where stop() is called during startup,
+    /// before the consumer thread enters its main loop.
+    #[test]
+    fn consume_frames_respects_stop_flag_set_before_start() {
+        use crate::media::recording_writer::CountingRecordingWriter;
+
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(10, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(10, "test");
+
+        // Set stop_flag BEFORE starting consumer — simulates stop-during-startup.
+        let stop_flag = Arc::new(AtomicBool::new(true));
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
+
+        // Send some data — consumer should drain these in final drain.
+        for i in 0..5 {
+            let chunk = AudioChunk {
+                timestamp: MediaTimestamp::from_nanos(i * 10_000_000),
+                sample_rate: 48000,
+                channels: 2,
+                samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+            };
+            assert!(audio_tx.try_send_drop_newest(chunk));
+        }
+
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+            true,
+            false,
+            None,
+        );
+
+        // Consumer should have drained the 5 chunks in final drain.
+        assert_eq!(output.diagnostics.system_chunks_received, 5);
+        // No errors expected — clean stop.
+        assert!(
+            output.errors.is_empty(),
+            "stop-before-start should not produce errors, got: {:?}",
+            output.errors
+        );
+    }
+
+    /// Verifies that calling stop while captures are actively producing data
+    /// results in a clean drain and no data loss for already-queued frames.
+    #[test]
+    fn consume_frames_drains_queued_data_on_stop() {
+        use crate::media::recording_writer::CountingRecordingWriter;
+
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(100, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(100, "test");
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        // Send 20 audio chunks while consumer is running.
+        for i in 0..20 {
+            let chunk = AudioChunk {
+                timestamp: MediaTimestamp::from_nanos(i * 10_000_000),
+                sample_rate: 48000,
+                channels: 2,
+                samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+            };
+            assert!(audio_tx.try_send_drop_newest(chunk));
+        }
+
+        let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
+
+        // Stop after a brief delay to let consumer process some frames.
+        let flag_clone = stop_flag.clone();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            flag_clone.store(true, Ordering::Relaxed);
+        });
+
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+            true,
+            false,
+            None,
+        );
+
+        stopper.join().unwrap();
+
+        // All 20 chunks should have been received (some in loop, rest in final drain).
+        assert_eq!(output.diagnostics.system_chunks_received, 20);
+        // No drop errors expected.
+        let drop_errors: Vec<_> = output
+            .errors
+            .iter()
+            .filter(|e| e.contains("丢弃率过高"))
+            .collect();
+        assert!(
+            drop_errors.is_empty(),
+            "no drop errors expected for 20/20 chunks, got: {:?}",
+            output.errors
+        );
+    }
+
+    /// Verifies that drop ratio just below 10% does NOT cause hard fail.
+    /// Uses the correct denominator: dropped / (received + dropped).
+    /// 10 drops / 110 attempted = 9.09% < 10%.
+    #[test]
+    fn consume_frames_passes_when_attempted_drop_ratio_below_10_percent() {
+        use crate::media::recording_writer::CountingRecordingWriter;
+
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(100, "test");
+
+        for i in 0..100 {
+            let chunk = AudioChunk {
+                timestamp: MediaTimestamp::from_nanos(i * 10_000_000),
+                sample_rate: 48000,
+                channels: 2,
+                samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+            };
+            assert!(audio_tx.try_send_drop_newest(chunk));
+        }
+        // 10 drops: channel capacity is 100, already full.
+        for i in 100..110 {
+            let chunk = AudioChunk {
+                timestamp: MediaTimestamp::from_nanos(i * 10_000_000),
+                sample_rate: 48000,
+                channels: 2,
+                samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+            };
+            assert!(!audio_tx.try_send_drop_newest(chunk));
+        }
+
+        let stop_flag = Arc::new(AtomicBool::new(true));
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+        let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
+
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+            true,
+            false,
+            None,
+        );
+
+        assert_eq!(output.diagnostics.system_chunks_received, 100);
+        assert_eq!(output.diagnostics.system_chunks_dropped, 10);
+
+        // 10 / (100 + 10) = 9.09% < 10% → should NOT be in errors.
+        let drop_errors: Vec<_> = output
+            .errors
+            .iter()
+            .filter(|e| e.contains("丢弃率过高"))
+            .collect();
+        assert!(
+            drop_errors.is_empty(),
+            "9.09% drop ratio should not cause hard fail, got: {:?}",
+            output.errors
+        );
+    }
+
+    /// Verifies that drop ratio just above 10% DOES cause hard fail.
+    /// Uses the correct denominator: dropped / (received + dropped).
+    /// 12 drops / 112 attempted = 10.71% > 10%.
+    #[test]
+    fn consume_frames_fails_when_attempted_drop_ratio_above_10_percent() {
+        use crate::media::recording_writer::CountingRecordingWriter;
+
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(1, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(100, "test");
+
+        for i in 0..100 {
+            let chunk = AudioChunk {
+                timestamp: MediaTimestamp::from_nanos(i * 10_000_000),
+                sample_rate: 48000,
+                channels: 2,
+                samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+            };
+            assert!(audio_tx.try_send_drop_newest(chunk));
+        }
+        // 12 drops: channel capacity is 100, already full.
+        for i in 100..112 {
+            let chunk = AudioChunk {
+                timestamp: MediaTimestamp::from_nanos(i * 10_000_000),
+                sample_rate: 48000,
+                channels: 2,
+                samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+            };
+            assert!(!audio_tx.try_send_drop_newest(chunk));
+        }
+
+        let stop_flag = Arc::new(AtomicBool::new(true));
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+        let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
+
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            writer,
+            mic_level,
+            "medium",
+            true,
+            false,
+            None,
+        );
+
+        assert_eq!(output.diagnostics.system_chunks_received, 100);
+        assert_eq!(output.diagnostics.system_chunks_dropped, 12);
+
+        // 12 / (100 + 12) = 10.71% > 10% → should be in errors.
+        let drop_errors: Vec<_> = output
+            .errors
+            .iter()
+            .filter(|e| e.contains("丢弃率过高"))
+            .collect();
+        assert!(
+            !drop_errors.is_empty(),
+            "10.71% drop ratio should cause hard fail, got: {:?}",
             output.errors
         );
     }

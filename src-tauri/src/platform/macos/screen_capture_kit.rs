@@ -805,7 +805,7 @@ impl ScreenCapture for MacScreenCapture {
         // Audio sink must be injected before start via AudioCapture::start().
         // If not set, create a dummy bounded channel that drops all audio.
         let audio_sink = self.audio_sink.take().unwrap_or_else(|| {
-            let (tx, _rx) = crate::core::media_channel::bounded_media_channel(1);
+            let (tx, _rx) = crate::core::media_channel::bounded_media_channel(1, "audio_fallback");
             tx
         });
 

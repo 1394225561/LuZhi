@@ -15,7 +15,7 @@ use crate::core::frame::AudioChunk;
 ///
 /// Captures the full stop lifecycle for post-mortem analysis of
 /// Bluetooth HFP profile release issues.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct CpalMicrophoneStopDiagnostics {
     pub stop_requested: bool,
     pub stream_existed: bool,
@@ -68,6 +68,64 @@ impl CpalMicrophoneCapture {
     /// Returns diagnostics from the last `stop()` call.
     pub fn last_stop_diagnostics(&self) -> &CpalMicrophoneStopDiagnostics {
         &self.last_stop_diagnostics
+    }
+
+    /// Stop microphone capture and return structured diagnostics.
+    ///
+    /// This is the preferred method for callers that need to preserve
+    /// stop diagnostics (e.g., for RecordingResult or bug investigation).
+    /// The trait method `stop()` calls this internally but discards the return value.
+    pub fn stop_with_diagnostics(&mut self) -> AppResult<CpalMicrophoneStopDiagnostics> {
+        eprintln!("CpalMicrophoneCapture::stop_with_diagnostics() 开始");
+
+        let mut diag = CpalMicrophoneStopDiagnostics::default();
+        diag.stop_requested = true;
+
+        // Reset callback-after-stop counter.
+        self.callbacks_after_stop.store(0, Ordering::Relaxed);
+
+        // Signal running=false first — callbacks check this flag and exit early.
+        self.running.store(false, Ordering::Relaxed);
+
+        if let Some(send_stream) = self.stream.take() {
+            diag.stream_existed = true;
+
+            // Explicit pause before drop — captures CoreAudio stop error.
+            // drop() alone silently ignores stop/uninitialize errors.
+            diag.pause_attempted = true;
+            match send_stream.0.pause() {
+                Ok(()) => {
+                    diag.pause_ok = true;
+                    eprintln!("CpalMicrophoneCapture::pause() 成功");
+                }
+                Err(e) => {
+                    diag.pause_error = Some(format!("{:?}", e));
+                    eprintln!("CpalMicrophoneCapture::pause() 失败: {:?}", e);
+                }
+            }
+
+            // Drop stream to release CoreAudio resources.
+            drop(send_stream);
+            diag.stream_dropped = true;
+
+            // Bounded wait for CoreAudio to complete device release.
+            // Bluetooth HFP profile switching can take 100-300ms.
+            let wait_start = std::time::Instant::now();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            diag.stop_wait_ms = wait_start.elapsed().as_millis() as u64;
+
+            diag.callbacks_after_stop = self.callbacks_after_stop.load(Ordering::Acquire);
+
+            eprintln!(
+                "CpalMicrophoneCapture::stop_with_diagnostics() 完成 — stream_dropped={}, pause_ok={}, callbacks_after_stop={}, waited={}ms",
+                diag.stream_dropped, diag.pause_ok, diag.callbacks_after_stop, diag.stop_wait_ms
+            );
+        } else {
+            eprintln!("CpalMicrophoneCapture::stop_with_diagnostics() 完成 — 无活跃 stream");
+        }
+
+        self.last_stop_diagnostics = diag.clone();
+        Ok(diag)
     }
 
     /// Sets the shared session clock so microphone timestamps use the same
@@ -202,55 +260,7 @@ impl AudioCapture for CpalMicrophoneCapture {
     }
 
     fn stop(&mut self) -> AppResult<()> {
-        eprintln!("CpalMicrophoneCapture::stop() 开始");
-
-        let mut diag = CpalMicrophoneStopDiagnostics::default();
-        diag.stop_requested = true;
-
-        // Reset callback-after-stop counter.
-        self.callbacks_after_stop.store(0, Ordering::Relaxed);
-
-        // Signal running=false first — callbacks check this flag and exit early.
-        self.running.store(false, Ordering::Relaxed);
-
-        if let Some(send_stream) = self.stream.take() {
-            diag.stream_existed = true;
-
-            // Explicit pause before drop — captures CoreAudio stop error.
-            // drop() alone silently ignores stop/uninitialize errors.
-            diag.pause_attempted = true;
-            match send_stream.0.pause() {
-                Ok(()) => {
-                    diag.pause_ok = true;
-                    eprintln!("CpalMicrophoneCapture::pause() 成功");
-                }
-                Err(e) => {
-                    diag.pause_error = Some(format!("{:?}", e));
-                    eprintln!("CpalMicrophoneCapture::pause() 失败: {:?}", e);
-                }
-            }
-
-            // Drop stream to release CoreAudio resources.
-            drop(send_stream);
-            diag.stream_dropped = true;
-
-            // Bounded wait for CoreAudio to complete device release.
-            // Bluetooth HFP profile switching can take 100-300ms.
-            let wait_start = std::time::Instant::now();
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            diag.stop_wait_ms = wait_start.elapsed().as_millis() as u64;
-
-            diag.callbacks_after_stop = self.callbacks_after_stop.load(Ordering::Acquire);
-
-            eprintln!(
-                "CpalMicrophoneCapture::stop() 完成 — stream_dropped={}, pause_ok={}, callbacks_after_stop={}, waited={}ms",
-                diag.stream_dropped, diag.pause_ok, diag.callbacks_after_stop, diag.stop_wait_ms
-            );
-        } else {
-            eprintln!("CpalMicrophoneCapture::stop() 完成 — 无活跃 stream");
-        }
-
-        self.last_stop_diagnostics = diag;
+        self.stop_with_diagnostics()?;
         Ok(())
     }
 
@@ -345,7 +355,10 @@ where
                     samples: Arc::from(samples.into_boxed_slice()),
                 };
 
-                let _ = sink.try_send_drop_newest(chunk);
+                // Drop logging is handled by MediaSender with source="mic".
+                // Don't use `let _` — the return value is intentionally not needed here
+                // but we avoid silent ignore to satisfy BUG-005 rule 25.
+                sink.try_send_drop_newest(chunk);
             },
             |err| {
                 // Audio stream error — log but don't panic.
