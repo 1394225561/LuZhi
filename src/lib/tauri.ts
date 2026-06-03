@@ -99,6 +99,8 @@ export type RecordingResult = {
   cutTimelinePath: string | null
   writerDiagnostics: WriterDiagnostics
   diagnostics: RecordingDiagnostics
+  /** Non-empty when recording completed with issues. */
+  finalizationErrors: string[]
 }
 
 export type WriterDiagnostics = {

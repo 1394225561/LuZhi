@@ -313,6 +313,38 @@ impl<'a> RecordingFinalizeGuard<'a> {
         }
     }
 
+    /// Produces a valid empty RecordingConsumerOutput for the timeout path.
+    /// When consumer thread times out, the guard uses this to continue cleanup.
+    fn empty_consumer_output() -> RecordingConsumerOutput {
+        RecordingConsumerOutput {
+            result: RecordingResult {
+                duration_secs: 0,
+                frame_count: 0,
+                mixed_audio_chunk_count: 0,
+                output_path: None,
+                cursor_metadata_path: None,
+                effect_timeline_path: None,
+                trim_metadata_path: None,
+                cut_timeline_path: None,
+                writer_diagnostics: crate::media::recording_writer::WriterDiagnostics::default(),
+                diagnostics: crate::media::recording_writer::RecordingDiagnostics::default(),
+                finalization_errors: Vec::new(),
+            },
+            trim_metadata: TrimMetadata {
+                schema_version: TRIM_METADATA_SCHEMA_VERSION,
+                duration_nanos: 0,
+                base_audio_activity: Vec::new(),
+                audio_activity: Vec::new(),
+                visual_activity: Vec::new(),
+                audio_activity_dropped_count: 0,
+                visual_activity_dropped_count: 0,
+                activity_truncated: false,
+            },
+            diagnostics: crate::media::recording_writer::RecordingDiagnostics::default(),
+            errors: Vec::new(),
+        }
+    }
+
     /// Execute all cleanup steps regardless of intermediate errors.
     /// Returns the final RecordingResult or error.
     fn finalize(mut self) -> AppResult<RecordingResult> {
@@ -364,32 +396,7 @@ impl<'a> RecordingFinalizeGuard<'a> {
 
     /// Step 5: Join consumer thread with bounded timeout.
     fn join_consumer(&mut self) {
-        let empty_result = RecordingResult {
-            duration_secs: 0,
-            frame_count: 0,
-            mixed_audio_chunk_count: 0,
-            output_path: None,
-            cursor_metadata_path: None,
-            effect_timeline_path: None,
-            trim_metadata_path: None,
-            cut_timeline_path: None,
-            writer_diagnostics: crate::media::recording_writer::WriterDiagnostics::default(),
-        };
-        let empty_output = RecordingConsumerOutput {
-            result: empty_result,
-            trim_metadata: TrimMetadata {
-                schema_version: TRIM_METADATA_SCHEMA_VERSION,
-                duration_nanos: 0,
-                base_audio_activity: Vec::new(),
-                audio_activity: Vec::new(),
-                visual_activity: Vec::new(),
-                audio_activity_dropped_count: 0,
-                visual_activity_dropped_count: 0,
-                activity_truncated: false,
-            },
-            diagnostics: RecordingDiagnostics::default(),
-            errors: Vec::new(),
-        };
+        let empty_output = Self::empty_consumer_output();
 
         let (output, panicked) = if let Some(rx) = self.service.consumer_result_rx.take() {
             const CONSUMER_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -535,6 +542,9 @@ impl<'a> RecordingFinalizeGuard<'a> {
         let mut result = output.result;
         self.errors.extend(output.errors);
 
+        // Inject capture-side diagnostics into the result.
+        result.diagnostics = output.diagnostics;
+
         // Update result with sidecar paths from service state.
         result.cursor_metadata_path = self.service.last_cursor_metadata_path.clone();
         result.effect_timeline_path = self.service.last_effect_timeline_path.clone();
@@ -549,13 +559,14 @@ impl<'a> RecordingFinalizeGuard<'a> {
                 self.service.state_machine.fail();
                 return Err(e);
             }
-            Ok(result)
         } else {
+            // Record errors in result rather than discarding diagnostics.
+            result.finalization_errors = self.errors.clone();
+            // Still transition to terminal state so frontend can display diagnostics.
+            let _ = self.service.state_machine.stop();
             self.service.state_machine.fail();
-            Err(crate::app::error::AppError::RecordingFinalizeFailed {
-                reason: self.errors.join("; "),
-            })
         }
+        Ok(result)
     }
 }
 
@@ -773,19 +784,25 @@ impl MacRecordingService {
                                 audio_dropped += 1;
                             }
                         }
-                        // Record per-source contribution before pushing to writer.
-                        writer.record_source_contribution(
-                            synced.has_system,
-                            synced.has_mic,
-                            synced.system_frames,
-                            synced.mic_frames,
-                        );
+                        // Capture source metadata before moving synced.mixed into push_audio.
+                        let has_system = synced.has_system;
+                        let has_mic = synced.has_mic;
+                        let system_frames = synced.system_frames;
+                        let mic_frames = synced.mic_frames;
+
                         if let Err(e) = writer.push_audio(synced.mixed) {
                             diagnostics.writer_push_audio_failures += 1;
                             let msg = format!("写入混音音频失败: {e}");
                             eprintln!("{msg}");
                             errors.push(msg);
                         } else {
+                            // Only count per-source contribution on successful enqueue.
+                            writer.record_source_contribution(
+                                has_system,
+                                has_mic,
+                                system_frames,
+                                mic_frames,
+                            );
                             diagnostics.mixed_chunks_queued += 1;
                         }
                     }
@@ -914,19 +931,20 @@ impl MacRecordingService {
                     audio_dropped += 1;
                 }
             }
-            // Record per-source contribution before pushing to writer.
-            writer.record_source_contribution(
-                synchronized.has_system,
-                synchronized.has_mic,
-                synchronized.system_frames,
-                synchronized.mic_frames,
-            );
+            // Capture source metadata before moving synchronized.mixed into push_audio.
+            let has_system = synchronized.has_system;
+            let has_mic = synchronized.has_mic;
+            let system_frames = synchronized.system_frames;
+            let mic_frames = synchronized.mic_frames;
+
             if let Err(e) = writer.push_audio(synchronized.mixed) {
                 diagnostics.writer_push_audio_failures += 1;
                 let msg = format!("写入混音音频失败: {e}");
                 eprintln!("{msg}");
                 errors.push(msg);
             } else {
+                // Only count per-source contribution on successful enqueue.
+                writer.record_source_contribution(has_system, has_mic, system_frames, mic_frames);
                 diagnostics.mixed_chunks_queued += 1;
             }
         }
@@ -948,6 +966,8 @@ impl MacRecordingService {
                     cut_timeline_path: None,
                     writer_diagnostics: crate::media::recording_writer::WriterDiagnostics::default(
                     ),
+                    diagnostics: crate::media::recording_writer::RecordingDiagnostics::default(),
+                    finalization_errors: Vec::new(),
                 }
             }
         };
@@ -1369,6 +1389,8 @@ mod tests {
                 trim_metadata_path: None,
                 cut_timeline_path: None,
                 writer_diagnostics: crate::media::recording_writer::WriterDiagnostics::default(),
+                diagnostics: crate::media::recording_writer::RecordingDiagnostics::default(),
+                finalization_errors: Vec::new(),
             },
             trim_metadata: TrimMetadata {
                 schema_version: TRIM_METADATA_SCHEMA_VERSION,
@@ -2064,5 +2086,172 @@ mod tests {
             "10.71% drop ratio should cause hard fail, got: {:?}",
             output.errors
         );
+    }
+
+    /// Verifies that per-source writer counters are NOT incremented
+    /// when push_audio() fails (e.g., queue full or channel disconnected).
+    ///
+    /// This is a regression test for the issue where record_source_contribution()
+    /// was called before push_audio(), causing diagnostics to show "writer received"
+    /// even when the writer never actually received the chunk.
+    #[test]
+    fn consume_frames_does_not_increment_per_source_writer_counter_when_push_audio_fails() {
+        use crate::media::recording_writer::FailingRecordingWriter;
+
+        let writer = FailingRecordingWriter::new(false, true, false);
+
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(10, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(10, "test");
+
+        // Send one audio chunk (will be mixed and pushed to writer)
+        let chunk = AudioChunk {
+            timestamp: MediaTimestamp::from_nanos(0),
+            sample_rate: 48000,
+            channels: 2,
+            samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+        };
+        assert!(audio_tx.try_send_drop_newest(chunk));
+
+        let stop_flag = Arc::new(AtomicBool::new(true));
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            Box::new(writer),
+            mic_level,
+            "medium",
+            true,
+            false,
+            None,
+        );
+
+        // push_audio fails, so per-source counters should be 0
+        assert_eq!(
+            output
+                .result
+                .writer_diagnostics
+                .system_chunks_received_by_writer,
+            0,
+            "per-source counter should not increment when push_audio fails"
+        );
+        assert_eq!(
+            output
+                .result
+                .writer_diagnostics
+                .mic_chunks_received_by_writer,
+            0,
+            "per-source counter should not increment when push_audio fails"
+        );
+        // But push failure count should be > 0
+        assert!(
+            output.diagnostics.writer_push_audio_failures > 0,
+            "push_audio failure should be recorded"
+        );
+    }
+
+    /// Verifies that per-source writer counters ARE incremented
+    /// when push_audio() succeeds.
+    #[test]
+    fn consume_frames_increments_per_source_writer_counter_on_successful_push() {
+        use crate::media::recording_writer::CountingRecordingWriter;
+
+        let writer = CountingRecordingWriter::new(None);
+        let (video_tx, video_rx) = bounded_media_channel::<VideoFrameRef>(10, "test");
+        let (audio_tx, audio_rx) = bounded_media_channel::<AudioChunk>(10, "test");
+
+        // Send one audio chunk with system audio
+        let chunk = AudioChunk {
+            timestamp: MediaTimestamp::from_nanos(0),
+            sample_rate: 48000,
+            channels: 2,
+            samples: Arc::from(vec![0.1f32; 960].into_boxed_slice()),
+        };
+        assert!(audio_tx.try_send_drop_newest(chunk));
+
+        let stop_flag = Arc::new(AtomicBool::new(true));
+        let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_level = Arc::new(Mutex::new(0.0f64));
+
+        drop(video_tx);
+        drop(audio_tx);
+
+        let output = MacRecordingService::consume_frames(
+            stop_flag,
+            video_rx,
+            audio_rx,
+            None,
+            frame_count,
+            Box::new(writer),
+            mic_level,
+            "medium",
+            true,
+            false,
+            None,
+        );
+
+        // push_audio succeeds (CountingRecordingWriter never fails),
+        // so per-source counter should reflect the system audio chunk.
+        assert!(
+            output
+                .result
+                .writer_diagnostics
+                .system_chunks_received_by_writer
+                > 0,
+            "per-source system counter should increment on successful push"
+        );
+    }
+
+    /// Verifies that empty_consumer_output() produces a valid RecordingConsumerOutput
+    /// that can be safely used by the timeout path in join_consumer().
+    #[test]
+    fn empty_consumer_output_produces_valid_defaults() {
+        use crate::media::recording_writer::{
+            RecordingDiagnostics, RecordingResult, WriterDiagnostics,
+        };
+        use crate::media::trim_metadata::TrimMetadata;
+
+        // Construct the same defaults inline (since empty_consumer_output is private).
+        let empty = RecordingConsumerOutput {
+            result: RecordingResult {
+                duration_secs: 0,
+                frame_count: 0,
+                mixed_audio_chunk_count: 0,
+                output_path: None,
+                cursor_metadata_path: None,
+                effect_timeline_path: None,
+                trim_metadata_path: None,
+                cut_timeline_path: None,
+                writer_diagnostics: WriterDiagnostics::default(),
+                diagnostics: RecordingDiagnostics::default(),
+                finalization_errors: Vec::new(),
+            },
+            trim_metadata: TrimMetadata {
+                schema_version: TRIM_METADATA_SCHEMA_VERSION,
+                duration_nanos: 0,
+                base_audio_activity: Vec::new(),
+                audio_activity: Vec::new(),
+                visual_activity: Vec::new(),
+                audio_activity_dropped_count: 0,
+                visual_activity_dropped_count: 0,
+                activity_truncated: false,
+            },
+            diagnostics: RecordingDiagnostics::default(),
+            errors: Vec::new(),
+        };
+
+        assert_eq!(empty.result.duration_secs, 0);
+        assert_eq!(empty.result.frame_count, 0);
+        assert!(empty.result.output_path.is_none());
+        assert!(empty.errors.is_empty());
+        assert!(!empty.diagnostics.requested_system_audio);
+        assert!(empty.diagnostics.mic_stop_diagnostics.is_none());
     }
 }

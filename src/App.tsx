@@ -198,7 +198,11 @@ export default function App() {
         cutTimelinePath: result.cutTimelinePath ?? null,
         writerDiagnostics: result.writerDiagnostics,
         diagnostics: result.diagnostics,
+        finalizationErrors: result.finalizationErrors ?? [],
       })
+      if (result.finalizationErrors && result.finalizationErrors.length > 0) {
+        console.warn('录制完成但有警告:', result.finalizationErrors)
+      }
       // Fallback: sync state via backend query in case recording-state-changed event is lost.
       const stopStatus = await fetchRecordingStatus()
       if (stopStatus.state === 'completed') {

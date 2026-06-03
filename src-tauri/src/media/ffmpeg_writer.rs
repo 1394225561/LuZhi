@@ -804,6 +804,8 @@ fn encoder_worker(
             trim_metadata_path: None,
             cut_timeline_path: None,
             writer_diagnostics: writer_diag,
+            diagnostics: crate::media::recording_writer::RecordingDiagnostics::default(),
+            finalization_errors: Vec::new(),
         });
     }
 
@@ -972,6 +974,8 @@ fn encoder_worker(
         trim_metadata_path: None,
         cut_timeline_path: None,
         writer_diagnostics: writer_diag,
+        diagnostics: crate::media::recording_writer::RecordingDiagnostics::default(),
+        finalization_errors: Vec::new(),
     })
 }
 
@@ -1716,5 +1720,22 @@ mod tests {
             elapsed
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Verifies that extract_panic_message correctly extracts messages
+    /// from different panic payload types.
+    #[test]
+    fn extract_panic_message_handles_various_payloads() {
+        // &str payload
+        let payload: Box<dyn std::any::Any + Send> = Box::new("test panic message");
+        assert_eq!(extract_panic_message(&payload), "test panic message");
+
+        // String payload
+        let payload: Box<dyn std::any::Any + Send> = Box::new("owned panic message".to_string());
+        assert_eq!(extract_panic_message(&payload), "owned panic message");
+
+        // Unknown payload
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        assert_eq!(extract_panic_message(&payload), "unknown panic payload");
     }
 }

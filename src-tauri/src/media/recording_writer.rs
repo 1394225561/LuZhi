@@ -276,6 +276,14 @@ pub struct RecordingResult {
     pub cut_timeline_path: Option<String>,
     /// Diagnostics from the FFmpeg writer worker thread.
     pub writer_diagnostics: WriterDiagnostics,
+    /// Capture-side and synchronizer-side diagnostics.
+    /// Includes mic stop diagnostics, drop counts, RMS levels, etc.
+    pub diagnostics: RecordingDiagnostics,
+    /// Errors encountered during finalization. Empty when successful.
+    /// When non-empty, the recording completed with issues (e.g., push failures,
+    /// contract violations) but diagnostics are still available for triage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finalization_errors: Vec<String>,
 }
 
 /// Trait for writing recorded media to a file or other sink.
@@ -284,8 +292,8 @@ pub trait RecordingWriter: Send {
     fn push_audio(&mut self, chunk: MixedAudioChunk) -> AppResult<()>;
     fn finish(&mut self) -> AppResult<RecordingResult>;
 
-    /// Record that the next push_audio() call contains data from the given sources.
-    /// Called by consume_frames() before each push_audio() to enable per-source tracking.
+    /// Record that a successfully enqueued audio chunk contained data from the given sources.
+    /// Must be called only after push_audio() succeeds so diagnostics do not count failed enqueue attempts.
     /// Default implementation is a no-op (for test writers that don't track sources).
     fn record_source_contribution(
         &mut self,
@@ -304,6 +312,8 @@ pub struct CountingRecordingWriter {
     frame_count: u64,
     audio_count: u64,
     output_path: Option<PathBuf>,
+    system_chunks_received: u64,
+    mic_chunks_received: u64,
 }
 
 impl CountingRecordingWriter {
@@ -312,6 +322,8 @@ impl CountingRecordingWriter {
             frame_count: 0,
             audio_count: 0,
             output_path,
+            system_chunks_received: 0,
+            mic_chunks_received: 0,
         }
     }
 }
@@ -327,7 +339,25 @@ impl RecordingWriter for CountingRecordingWriter {
         Ok(())
     }
 
+    fn record_source_contribution(
+        &mut self,
+        has_system: bool,
+        has_mic: bool,
+        _system_frames: u64,
+        _mic_frames: u64,
+    ) {
+        if has_system {
+            self.system_chunks_received += 1;
+        }
+        if has_mic {
+            self.mic_chunks_received += 1;
+        }
+    }
+
     fn finish(&mut self) -> AppResult<RecordingResult> {
+        let mut writer_diagnostics = WriterDiagnostics::default();
+        writer_diagnostics.system_chunks_received_by_writer = self.system_chunks_received;
+        writer_diagnostics.mic_chunks_received_by_writer = self.mic_chunks_received;
         Ok(RecordingResult {
             duration_secs: 0,
             frame_count: self.frame_count,
@@ -340,7 +370,9 @@ impl RecordingWriter for CountingRecordingWriter {
             effect_timeline_path: None,
             trim_metadata_path: None,
             cut_timeline_path: None,
-            writer_diagnostics: WriterDiagnostics::default(),
+            writer_diagnostics,
+            diagnostics: RecordingDiagnostics::default(),
+            finalization_errors: Vec::new(),
         })
     }
 }
@@ -408,6 +440,8 @@ impl RecordingWriter for FailingRecordingWriter {
                 trim_metadata_path: None,
                 cut_timeline_path: None,
                 writer_diagnostics: WriterDiagnostics::default(),
+                diagnostics: RecordingDiagnostics::default(),
+                finalization_errors: Vec::new(),
             })
         }
     }
@@ -460,6 +494,8 @@ mod tests {
             trim_metadata_path: Some("/tmp/trim-metadata.json".to_string()),
             cut_timeline_path: Some("/tmp/cut-timeline.json".to_string()),
             writer_diagnostics: WriterDiagnostics::default(),
+            diagnostics: RecordingDiagnostics::default(),
+            finalization_errors: Vec::new(),
         };
 
         let json = serde_json::to_string(&result).unwrap();
@@ -734,6 +770,98 @@ mod tests {
             err_msg.contains("系统音频"),
             "error should mention system audio, got: {}",
             err_msg
+        );
+    }
+
+    /// Verifies that RecordingResult serializes diagnostics as camelCase.
+    #[test]
+    fn recording_result_serializes_diagnostics_as_camel_case() {
+        use crate::platform::macos::cpal_microphone::CpalMicrophoneStopDiagnostics;
+
+        let result = RecordingResult {
+            duration_secs: 10,
+            frame_count: 300,
+            mixed_audio_chunk_count: 50,
+            output_path: None,
+            cursor_metadata_path: None,
+            effect_timeline_path: None,
+            trim_metadata_path: None,
+            cut_timeline_path: None,
+            writer_diagnostics: WriterDiagnostics::default(),
+            diagnostics: RecordingDiagnostics {
+                requested_system_audio: true,
+                mic_stop_diagnostics: Some(CpalMicrophoneStopDiagnostics {
+                    stop_requested: true,
+                    stream_existed: true,
+                    pause_attempted: true,
+                    pause_ok: true,
+                    pause_error: None,
+                    stream_dropped: true,
+                    callbacks_after_stop: 2,
+                    stop_wait_ms: 300,
+                }),
+                ..Default::default()
+            },
+            finalization_errors: Vec::new(),
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["diagnostics"]["requestedSystemAudio"], true);
+        assert_eq!(
+            json["diagnostics"]["micStopDiagnostics"]["stopRequested"],
+            true
+        );
+        assert_eq!(
+            json["diagnostics"]["micStopDiagnostics"]["callbacksAfterStop"],
+            2
+        );
+    }
+
+    /// Verifies that RecordingResult with finalization_errors serializes correctly.
+    #[test]
+    fn recording_result_serializes_finalization_errors() {
+        let result = RecordingResult {
+            duration_secs: 10,
+            frame_count: 300,
+            mixed_audio_chunk_count: 50,
+            output_path: None,
+            cursor_metadata_path: None,
+            effect_timeline_path: None,
+            trim_metadata_path: None,
+            cut_timeline_path: None,
+            writer_diagnostics: WriterDiagnostics::default(),
+            diagnostics: RecordingDiagnostics::default(),
+            finalization_errors: vec!["写入混音音频失败: queue full".to_string()],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            json["finalizationErrors"][0],
+            "写入混音音频失败: queue full"
+        );
+    }
+
+    /// Verifies that RecordingResult with empty finalization_errors omits the field.
+    #[test]
+    fn recording_result_omits_empty_finalization_errors() {
+        let result = RecordingResult {
+            duration_secs: 10,
+            frame_count: 300,
+            mixed_audio_chunk_count: 50,
+            output_path: None,
+            cursor_metadata_path: None,
+            effect_timeline_path: None,
+            trim_metadata_path: None,
+            cut_timeline_path: None,
+            writer_diagnostics: WriterDiagnostics::default(),
+            diagnostics: RecordingDiagnostics::default(),
+            finalization_errors: Vec::new(),
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(
+            json.get("finalizationErrors").is_none(),
+            "empty finalizationErrors should be skipped in serialization"
         );
     }
 }
