@@ -456,9 +456,7 @@ impl<'a> RecordingFinalizeGuard<'a> {
                 }
             }
         } else if let Some(_h) = handle.take() {
-            errors.push(
-                "消费线程结果通道不存在但句柄存在，状态不一致，已丢弃句柄".to_string(),
-            );
+            errors.push("消费线程结果通道不存在但句柄存在，状态不一致，已丢弃句柄".to_string());
             (empty_output, false)
         } else {
             (empty_output, false)

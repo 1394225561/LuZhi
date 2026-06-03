@@ -73,6 +73,8 @@
 32. per-source writer counter 必须在 push_audio() 成功后递增，不能在 push 前递增。
 33. RecordingResult 必须携带 RecordingDiagnostics，不能仅靠 eprintln 暴露诊断信息。
 34. stop 失败时 RecordingResult 必须携带 finalization_errors 和完整 diagnostics，不能将 diagnostics 丢失在 Err(String) 中。
+35. stop 命令必须返回结构化 `StopRecordingResponse`（含 `result` + `failed`），不能把 hard finalize failure 包装成 command success。`failed=true` 时前端必须进入 failed UI，不能进入 preview。
+36. timeout 回归测试必须调用生产 timeout helper（`join_worker_with_timeout` / `receive_consumer_output_with_timeout`），不能只验证标准库 `recv_timeout()` 行为。测试用 parked thread + never-send channel 触发真实 timeout 分支，断言 elapsed 远小于生产 timeout 且 handle 被 detach。
 
 ---
 

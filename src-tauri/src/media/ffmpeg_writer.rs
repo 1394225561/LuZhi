@@ -1839,5 +1839,4 @@ mod tests {
             "worker handle should be taken (detached) on timeout"
         );
     }
-
 }

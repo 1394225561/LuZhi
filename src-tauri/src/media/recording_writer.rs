@@ -873,9 +873,9 @@ mod tests {
         };
 
         let json = serde_json::to_value(&result).unwrap();
-        let errors = json.get("finalizationErrors").expect(
-            "finalizationErrors should always be present (even when empty)"
-        );
+        let errors = json
+            .get("finalizationErrors")
+            .expect("finalizationErrors should always be present (even when empty)");
         assert!(
             errors.as_array().unwrap().is_empty(),
             "finalizationErrors should be an empty array"
