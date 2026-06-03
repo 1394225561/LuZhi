@@ -1,7 +1,7 @@
 # Phase 6 BUG-005 / BUG-005_2 整改后 Code Review Findings
 
-> 日期：2026-06-02  
-> 审查范围：`e77b9ab9d1b75b060e43a0e4a58e76ebeeccdb72..caf6cb400d6d2a29128d5242244b30b7cdb2cc2b`  
+> 日期：2026-06-02
+> 审查范围：`e77b9ab9d1b75b060e43a0e4a58e76ebeeccdb72..caf6cb400d6d2a29128d5242244b30b7cdb2cc2b`
 > 审查目标：复审 Phase 6 音频链路相关整改，确认 BUG-005 / BUG-005_2 修复方案，并记录后续编码需要处理的风险点。
 
 ## 1. 输入依据

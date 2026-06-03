@@ -1,6 +1,6 @@
 # Phase 6 BUG-005 Current Rectification Code Review
 
-> 日期：2026-06-03  
+> 日期：2026-06-03
 > 审查范围：当前工作区未提交改动，基线为 `HEAD = 5c505770660abb97d86ece1e20deaeaddef6cfd4`
 
 ## 1. 总体结论
@@ -505,26 +505,26 @@ cargo clippy
 
 本轮仍未满足或未完全满足的预防规则：
 
-1. **规则 15**：录制停止/finalize 的 bounded 语义必须覆盖 flush send 和 worker join。  
+1. **规则 15**：录制停止/finalize 的 bounded 语义必须覆盖 flush send 和 worker join。
    当前 `ffmpeg_writer.rs` timeout 后仍 join，不满足。
 
-2. **规则 21**：蓝牙麦克风 stop 必须返回结构化 diagnostics，不能只靠 eprintln。  
+2. **规则 21**：蓝牙麦克风 stop 必须返回结构化 diagnostics，不能只靠 eprintln。
    当前 diagnostics 只保存在 mic capture 内部并打印，reset 后丢失，不满足。
 
-3. **规则 22**：少量音频 chunk drop 只能 warning，hard fail 需基于 drop ratio 阈值。  
+3. **规则 22**：少量音频 chunk drop 只能 warning，hard fail 需基于 drop ratio 阈值。
    当前已按 ratio hard fail，但 denominator 错误，阈值附近会误判，部分满足。
 
-4. **规则 23**：writer worker 和 consumer thread 的 join 必须有 bounded timeout，超时返回结构化错误而非无限阻塞。  
+4. **规则 23**：writer worker 和 consumer thread 的 join 必须有 bounded timeout，超时返回结构化错误而非无限阻塞。
    当前 writer 和 consumer timeout 后都仍可能无界 join，不满足。
 
-5. **规则 24**：音频 channel drop logging 必须标识 source。  
+5. **规则 24**：音频 channel drop logging 必须标识 source。
    当前已做到 source 标识，但日志文案对 video source 不准确，基本满足但需 polish。
 
-6. **规则 25**：CPAL callback 中的 drop 不能用 `let _` 静默忽略。  
+6. **规则 25**：CPAL callback 中的 drop 不能用 `let _` 静默忽略。
    当前已移除 `let _`，满足。
 
-7. **规则 26**：录制 stop 路径必须使用 RAII guard 或等效机制，确保 panic 时资源仍被释放。  
+7. **规则 26**：录制 stop 路径必须使用 RAII guard 或等效机制，确保 panic 时资源仍被释放。
    当前已有 guard，但 Drop 只做 basic cleanup，注释与实际能力不一致，部分满足。
 
-8. **规则 27**：stop-during-startup 场景必须有测试覆盖。  
+8. **规则 27**：stop-during-startup 场景必须有测试覆盖。
    当前新增 `consume_frames_respects_stop_flag_set_before_start`，满足基础覆盖。

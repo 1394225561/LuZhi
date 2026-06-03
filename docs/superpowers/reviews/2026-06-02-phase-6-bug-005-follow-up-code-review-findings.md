@@ -1,7 +1,7 @@
 # Phase 6 BUG-005 Follow-up Code Review Findings
 
-> 日期：2026-06-02  
-> 审查范围：`caf6cb400d6d2a29128d5242244b30b7cdb2cc2b..5c505770660abb97d86ece1e20deaeaddef6cfd4`  
+> 日期：2026-06-02
+> 审查范围：`caf6cb400d6d2a29128d5242244b30b7cdb2cc2b..5c505770660abb97d86ece1e20deaeaddef6cfd4`
 > 关联提交：
 >
 > 1. `8fb60b6` - CPAL lazy offset sentinel (`AtomicBool` 替代 `0` 做 sentinel)
