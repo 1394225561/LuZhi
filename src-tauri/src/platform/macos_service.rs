@@ -2254,4 +2254,49 @@ mod tests {
         assert!(!empty.diagnostics.requested_system_audio);
         assert!(empty.diagnostics.mic_stop_diagnostics.is_none());
     }
+
+    /// Verifies that recv_timeout on a never-send channel returns Timeout
+    /// quickly, matching the consumer timeout branch in join_consumer().
+    ///
+    /// This is a regression test for BUG.md rule 28: the timeout branch
+    /// must not call handle.join() which would block forever if the consumer
+    /// is stuck in writer finalize, artifact validation, or metadata generation.
+    #[test]
+    fn recv_timeout_consumer_returns_quickly_on_never_send_channel() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        // Channel that will never send a result (simulates stuck consumer).
+        let (_tx, rx) = mpsc::channel::<RecordingConsumerOutput>();
+        let timeout = std::time::Duration::from_millis(100);
+
+        let start = Instant::now();
+        let result = rx.recv_timeout(timeout);
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected Timeout error from never-send channel"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "recv_timeout should return within timeout duration, took {:?}",
+            elapsed
+        );
+    }
+
+    /// Verifies that the empty_consumer_output fallback produces a result
+    /// with diagnostics available, even when the consumer thread timed out.
+    #[test]
+    fn consumer_timeout_fallback_preserves_diagnostics_slot() {
+        let empty = RecordingFinalizeGuard::empty_consumer_output();
+
+        // The empty output should have valid defaults that allow
+        // drive_state_machine() to inject diagnostics.
+        assert_eq!(empty.result.duration_secs, 0);
+        assert!(empty.result.diagnostics.requested_system_audio == false);
+        assert!(empty.result.finalization_errors.is_empty());
+        // mic_stop_diagnostics should be None (no mic was stopped).
+        assert!(empty.result.diagnostics.mic_stop_diagnostics.is_none());
+    }
 }

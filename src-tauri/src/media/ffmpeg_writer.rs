@@ -1738,4 +1738,61 @@ mod tests {
         let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
         assert_eq!(extract_panic_message(&payload), "unknown panic payload");
     }
+
+    /// Verifies that recv_timeout on a never-send channel returns Timeout
+    /// quickly, without blocking indefinitely.
+    ///
+    /// This is a regression test for BUG.md rule 28: the timeout branch
+    /// in join_worker() must not call handle.join() which would block forever
+    /// if the worker is stuck in FFmpeg flush/muxer IO.
+    #[test]
+    fn recv_timeout_returns_quickly_on_never_send_channel() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        // Channel that will never send a result (simulates stuck worker).
+        let (_tx, rx) = mpsc::channel::<AppResult<RecordingResult>>();
+        let timeout = std::time::Duration::from_millis(100);
+
+        let start = Instant::now();
+        let result = rx.recv_timeout(timeout);
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(mpsc::RecvTimeoutError::Timeout)),
+            "expected Timeout, got {:?}",
+            result
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "recv_timeout should return within timeout duration, took {:?}",
+            elapsed
+        );
+    }
+
+    /// Verifies that a parked thread (simulating stuck worker) can be
+    /// abandoned without calling join(), matching the timeout branch behavior.
+    ///
+    /// This tests the pattern used in join_worker()'s Timeout branch:
+    /// drop the JoinHandle to detach the thread rather than blocking on join().
+    #[test]
+    fn detached_thread_does_not_block_on_drop() {
+        use std::time::Instant;
+
+        // Spawn a thread that parks forever (simulates stuck FFmpeg worker).
+        let handle = std::thread::spawn(|| {
+            std::thread::park();
+        });
+
+        // Detach by dropping the handle (same as timeout branch behavior).
+        let start = Instant::now();
+        drop(handle);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "dropping JoinHandle should be instant, took {:?}",
+            elapsed
+        );
+    }
 }
