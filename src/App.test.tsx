@@ -619,7 +619,19 @@ describe('App', () => {
     await screen.findByText('预览与美化')
   })
 
-  it('enters failed state when stop response has failed=true', async () => {
+  it('stop failed response displays finalization error detail', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    const stateCallbacks: Array<(status: { state: string }) => void> = []
+
+    vi.mocked(listen).mockImplementation(
+      (event: string, callback: (event: { event: string; id: number; payload: unknown }) => void) => {
+        if (event === 'recording-state-changed') {
+          stateCallbacks.push((status) => callback({ event, id: 0, payload: status }))
+        }
+        return Promise.resolve(() => {})
+      },
+    )
+
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
       if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
@@ -627,7 +639,19 @@ describe('App', () => {
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
       if (command === 'stop_recording') return Promise.resolve({
-        result: { durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: null, effectTimelinePath: null, trimMetadataPath: null, cutTimelinePath: null, writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 }, diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null }, finalizationErrors: ['消费线程超时'] },
+        result: {
+          durationSecs: 1,
+          frameCount: 30,
+          mixedAudioChunkCount: 10,
+          outputPath: null,
+          cursorMetadataPath: null,
+          effectTimelinePath: null,
+          trimMetadataPath: null,
+          cutTimelinePath: null,
+          writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 },
+          diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null },
+          finalizationErrors: ['消费线程超时'],
+        },
         failed: true,
       })
       return Promise.reject(new Error(`unexpected command ${command}`))
@@ -635,10 +659,124 @@ describe('App', () => {
 
     render(<App />)
 
-    // Verify the mock returns the correct StopRecordingResponse shape.
-    const stopResponse = await invokeMock('stop_recording')
-    expect(stopResponse.failed).toBe(true)
-    expect(stopResponse.result.finalizationErrors).toContain('消费线程超时')
+    // 1. Start recording
+    const startButtons = await screen.findAllByText('开始录制')
+    fireEvent.click(startButtons[0])
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('start_recording', undefined)
+    })
+
+    // 2. Enter recording state
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'recording' })
+      }
+    })
+
+    // 3. Click stop button
+    await vi.waitFor(() => {
+      const buttons = screen.getAllByRole('button')
+      expect(buttons.length).toBeGreaterThan(0)
+    })
+    const buttons = screen.getAllByRole('button')
+    const stopButton = buttons[buttons.length - 1]
+    await act(async () => {
+      fireEvent.click(stopButton)
+    })
+
+    // 4. Assert stop_recording was called
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('stop_recording', undefined)
+    })
+
+    // 5. Assert error page shows specific finalization error
+    await screen.findByText('消费线程超时')
+    expect(screen.getByText('消费线程超时')).toBeTruthy()
+    // 6. Assert does NOT enter preview
+    expect(screen.queryByText('预览与美化')).toBeNull()
+  })
+
+  it('late failed state event does not overwrite finalization error detail', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    const stateCallbacks: Array<(status: { state: string }) => void> = []
+
+    vi.mocked(listen).mockImplementation(
+      (event: string, callback: (event: { event: string; id: number; payload: unknown }) => void) => {
+        if (event === 'recording-state-changed') {
+          stateCallbacks.push((status) => callback({ event, id: 0, payload: status }))
+        }
+        return Promise.resolve(() => {})
+      },
+    )
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      if (command === 'stop_recording') return Promise.resolve({
+        result: {
+          durationSecs: 1,
+          frameCount: 30,
+          mixedAudioChunkCount: 10,
+          outputPath: null,
+          cursorMetadataPath: null,
+          effectTimelinePath: null,
+          trimMetadataPath: null,
+          cutTimelinePath: null,
+          writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 },
+          diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null },
+          finalizationErrors: ['消费线程超时'],
+        },
+        failed: true,
+      })
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    // 1. Start recording
+    const startButtons = await screen.findAllByText('开始录制')
+    fireEvent.click(startButtons[0])
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('start_recording', undefined)
+    })
+
+    // 2. Enter recording state
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'recording' })
+      }
+    })
+
+    // 3. Click stop button
+    await vi.waitFor(() => {
+      const buttons = screen.getAllByRole('button')
+      expect(buttons.length).toBeGreaterThan(0)
+    })
+    const buttons = screen.getAllByRole('button')
+    const stopButton = buttons[buttons.length - 1]
+    await act(async () => {
+      fireEvent.click(stopButton)
+    })
+
+    // 4. Wait for specific error to appear
+    await screen.findByText('消费线程超时')
+    expect(screen.getByText('消费线程超时')).toBeTruthy()
+
+    // 5. Simulate late failed state event AFTER response was already processed
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'failed' })
+      }
+    })
+
+    // 6. Specific error must still be shown, not overwritten by generic message
+    expect(screen.getByText('消费线程超时')).toBeTruthy()
+    expect(screen.queryByText('录制过程中发生错误')).toBeNull()
   })
 
   it('clears mic volume when returning to idle', async () => {
