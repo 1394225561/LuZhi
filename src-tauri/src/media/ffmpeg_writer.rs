@@ -12,6 +12,10 @@ use crate::media::recording_writer::{RecordingResult, RecordingWriter, WriterDia
 /// Uses non-blocking send to avoid stalling the capture consumer thread.
 const ENCODER_QUEUE_CAPACITY: usize = 64;
 
+/// Timeout for the encoder worker to return its result after receiving Flush.
+/// BUG.md rule 28: timeout must not call unbounded join().
+const WORKER_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Message sent from the front writer to the encoder worker.
 enum EncoderMessage {
     Video {
@@ -92,41 +96,47 @@ impl FfmpegRecordingWriter {
     /// On disconnect: worker already exited (likely panicked), safe to join
     /// to capture panic info.
     fn join_worker(&mut self) -> AppResult<RecordingResult> {
-        const WORKER_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        Self::join_worker_with_timeout(
+            &mut self.worker,
+            self.result_rx.take(),
+            WORKER_RESULT_TIMEOUT,
+        )
+    }
 
-        let rx = self
-            .result_rx
-            .take()
-            .ok_or(AppError::RecordingWriteFailed {
-                reason: "编码工作结果通道已被回收".to_string(),
-            })?;
+    /// Testable helper: receive the worker result with a bounded timeout.
+    ///
+    /// On timeout, the worker handle is detached (dropped without join) to
+    /// avoid blocking the stop path. On disconnect, the handle is joined to
+    /// extract any panic message.
+    fn join_worker_with_timeout(
+        worker: &mut Option<thread::JoinHandle<()>>,
+        result_rx: Option<mpsc::Receiver<AppResult<RecordingResult>>>,
+        timeout: std::time::Duration,
+    ) -> AppResult<RecordingResult> {
+        let rx = result_rx.ok_or(AppError::RecordingWriteFailed {
+            reason: "编码工作结果通道已被回收".to_string(),
+        })?;
 
-        match rx.recv_timeout(WORKER_RESULT_TIMEOUT) {
+        match rx.recv_timeout(timeout) {
             Ok(result) => {
-                // Worker completed — join to clean up thread resources.
-                if let Some(handle) = self.worker.take() {
+                if let Some(handle) = worker.take() {
                     let _ = handle.join();
                 }
                 result
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Timeout: do NOT call handle.join(). The worker may still be
-                // running (stuck in FFmpeg flush/muxer IO/write_trailer).
-                // Drop the JoinHandle to detach the thread.
-                self.worker.take();
+                worker.take();
                 eprintln!(
                     "警告: FFmpeg worker 超时未返回结果 ({:?})，worker 可能仍在后台执行",
-                    WORKER_RESULT_TIMEOUT
+                    timeout
                 );
                 Err(AppError::RecordingWriteFailed {
-                    reason: format!("FFmpeg worker 超时未返回结果 ({:?})", WORKER_RESULT_TIMEOUT),
+                    reason: format!("FFmpeg worker 超时未返回结果 ({:?})", timeout),
                 })
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // Worker exited without sending result — likely panicked.
-                // Safe to join to capture panic info.
                 eprintln!("警告: FFmpeg worker 结果通道断开，尝试 join 获取 panic 信息");
-                if let Some(handle) = self.worker.take() {
+                if let Some(handle) = worker.take() {
                     match handle.join() {
                         Ok(()) => Err(AppError::RecordingWriteFailed {
                             reason: "FFmpeg worker 异常退出且未返回结果".to_string(),
