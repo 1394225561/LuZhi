@@ -21,7 +21,9 @@ use crate::media::mic_level::MicLevelDetector;
 use crate::media::recording_metadata::RecordingMetadataWriter;
 #[cfg(not(feature = "ffmpeg"))]
 use crate::media::recording_writer::CountingRecordingWriter;
-use crate::media::recording_writer::{RecordingDiagnostics, RecordingResult, RecordingWriter};
+use crate::media::recording_writer::{
+    RecordingDiagnostics, RecordingResult, RecordingWriter, StopRecordingResponse,
+};
 use crate::media::silence_detector::FrameDiffAnalyzer;
 use crate::media::trim_audio_activity::BaseAudioActivityAnalyzer;
 use crate::media::trim_metadata::{TrimMetadata, TrimMetadataWriter, TRIM_METADATA_SCHEMA_VERSION};
@@ -347,7 +349,7 @@ impl<'a> RecordingFinalizeGuard<'a> {
 
     /// Execute all cleanup steps regardless of intermediate errors.
     /// Returns the final RecordingResult or error.
-    fn finalize(mut self) -> AppResult<RecordingResult> {
+    fn finalize(mut self) -> AppResult<StopRecordingResponse> {
         self.stop_captures();
         self.join_consumer();
         self.write_sidecars();
@@ -529,7 +531,7 @@ impl<'a> RecordingFinalizeGuard<'a> {
     }
 
     /// Step 10: Drive state machine to terminal state and return result.
-    fn drive_state_machine(&mut self) -> AppResult<RecordingResult> {
+    fn drive_state_machine(&mut self) -> AppResult<StopRecordingResponse> {
         let output = match self.consumer_output.take() {
             Some(o) => o,
             None => {
@@ -550,7 +552,7 @@ impl<'a> RecordingFinalizeGuard<'a> {
         result.effect_timeline_path = self.service.last_effect_timeline_path.clone();
         result.trim_metadata_path = self.service.last_trim_metadata_path.clone();
 
-        if self.errors.is_empty() {
+        let failed = if self.errors.is_empty() {
             if let Err(e) = self.service.state_machine.stop() {
                 self.service.state_machine.fail();
                 return Err(e);
@@ -559,14 +561,17 @@ impl<'a> RecordingFinalizeGuard<'a> {
                 self.service.state_machine.fail();
                 return Err(e);
             }
+            false
         } else {
             // Record errors in result rather than discarding diagnostics.
             result.finalization_errors = self.errors.clone();
             // Still transition to terminal state so frontend can display diagnostics.
             let _ = self.service.state_machine.stop();
             self.service.state_machine.fail();
-        }
-        Ok(result)
+            true
+        };
+
+        Ok(StopRecordingResponse { result, failed })
     }
 }
 
@@ -593,7 +598,7 @@ impl MacRecordingService {
     /// mic reset, state machine transition) are executed regardless of
     /// intermediate errors. Errors are collected and returned together so
     /// a sidecar write failure never skips cleanup.
-    pub fn stop(&mut self) -> AppResult<RecordingResult> {
+    pub fn stop(&mut self) -> AppResult<StopRecordingResponse> {
         let guard = RecordingFinalizeGuard::new(self);
         guard.finalize()
     }
