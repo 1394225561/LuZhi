@@ -70,6 +70,9 @@
 29. drop ratio 分母必须使用 received + dropped（attempted total），不能只用 received。
 30. mic stop diagnostics 必须在重建 capture 前写入 RecordingDiagnostics，不能依赖 capture 内部字段。
 31. writer diagnostics 必须区分 per-source（system/mic）的 chunks received，不能只用 aggregate。
+32. per-source writer counter 必须在 push_audio() 成功后递增，不能在 push 前递增。
+33. RecordingResult 必须携带 RecordingDiagnostics，不能仅靠 eprintln 暴露诊断信息。
+34. stop 失败时 RecordingResult 必须携带 finalization_errors 和完整 diagnostics，不能将 diagnostics 丢失在 Err(String) 中。
 
 ---
 

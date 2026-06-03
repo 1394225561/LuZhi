@@ -81,6 +81,62 @@ W1-W12 Phase：
 
 ## 工作任务记录
 
+### 2026-06-03：Phase 6 second follow-up code review 整改（前端构建修复、before-writer 类型、失败路径 diagnostics、timeout 测试）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-03-phase-6-bug-005-second-follow-up-rectification-code-review-findings.md`
+- `docs/superpowers/plans/2026-06-03-phase-6-bug-005-second-follow-up-rectification-code-review-rectification.md`
+
+本轮修复（5 个 Phase）：
+
+1. **Phase A: 前端构建 blocker 修复**（Critical 1）：`App.tsx` 的 `setRecordingResult()` 透传 `writerDiagnostics` 和 `diagnostics` 字段；`App.test.tsx` 3 处 stop mock 补齐完整 diagnostics 结构；event mock 签名对齐 Tauri `Event<T>` 类型。
+2. **Phase B: TS RecordingDiagnostics 补齐 before-writer 字段**（Important 2）：`src/lib/tauri.ts` 新增 6 个 before-writer 字段（`systemRmsMaxBeforeWriter` 等），与 Rust serde shape 完全对齐。
+3. **Phase C: 失败路径保留结构化 diagnostics**（Important 1 + Minor 1）：`RecordingResult` 新增 `finalization_errors` 字段（`serde skip_serializing_if = "Vec::is_empty"`）；`drive_state_machine()` 有 errors 时写入 `result.finalization_errors` 而非丢弃 result；前端类型同步更新；`record_source_contribution()` trait 注释修正。
+4. **Phase D: timeout 分支直接回归测试**（Important 3）：新增 `recv_timeout_returns_quickly_on_never_send_channel`（writer 侧）、`recv_timeout_consumer_returns_quickly_on_never_send_channel`（consumer 侧）、`detached_thread_does_not_block_on_drop`、`consumer_timeout_fallback_preserves_diagnostics_slot`。
+5. **Phase E: 文档与门禁收口**（Important 4）：HANDOFF.md 验证结果更新、BUG.md 预防规则补充。
+
+验证结果：
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml` **251 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **308 unit + 10 integration tests** 通过
+- `npm run build` 通过
+- `npm test -- --run` **52 tests** 通过
+
+改动文件：
+
+- **修改**: `src/App.tsx`, `src/App.test.tsx`, `src/lib/tauri.ts`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/platform/macos_service.rs`, `BUG.md`, `HANDOFF.md`
+
+---
+
+### 2026-06-03：Phase 6 follow-up code review 整改（第二轮）（per-source counter timing、diagnostics 暴露、timeout 测试）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-03-phase-6-bug-005-follow-up-rectification-code-review.md`
+- `docs/superpowers/plans/2026-06-03-phase-6-bug-005-follow-up-rectification-code-review-rectification.md`
+
+本轮修复（4 个 Phase）：
+
+1. **Phase A: per-source writer counter 时序修正**（Important 1）：`record_source_contribution()` 从 `push_audio()` 前移到 `Ok` 分支；push_audio 失败时 per-source counters 不再虚假递增；新增 2 个回归测试。
+2. **Phase B: RecordingResult 暴露 RecordingDiagnostics**（Important 2）：`RecordingResult` 新增 `diagnostics` 字段（含 `mic_stop_diagnostics`）；`drive_state_machine()` 将 capture diagnostics 写入 result；前端 TypeScript 类型同步更新；新增序列化 camelCase 测试。
+3. **Phase C: timeout 分支回归测试**（Minor 1）：`empty_consumer_output()` 方法提取并验证默认值安全；`extract_panic_message` 覆盖 &str/String/unknown payload 测试。
+4. **Phase D: 文档清理**（Minor 2）：review 文档尾部空白清理；BUG.md 补充预防规则 32-33；HANDOFF.md 更新。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **247 tests** 通过
+- `npm test -- --run` **52 tests** 通过
+- `cargo fmt --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/platform/macos/cpal_microphone.rs`, `src/lib/tauri.ts`, `BUG.md`, `HANDOFF.md`
+- **清理**: `docs/superpowers/reviews/*.md`（尾部空白）
+
+---
+
 ### 2026-06-03：Phase 6 follow-up code review 整改（bounded finalize、drop ratio、mic diagnostics、per-source writer）
 
 输入文件：
