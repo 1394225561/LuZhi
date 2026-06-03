@@ -282,8 +282,21 @@ pub struct RecordingResult {
     /// Errors encountered during finalization. Empty when successful.
     /// When non-empty, the recording completed with issues (e.g., push failures,
     /// contract violations) but diagnostics are still available for triage.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub finalization_errors: Vec<String>,
+}
+
+/// Structured response from the stop_recording command.
+///
+/// Always carries the full `RecordingResult` (including diagnostics) so the
+/// frontend can display error details even on finalize failure. The `failed`
+/// flag indicates whether finalization encountered hard errors — when `true`,
+/// the frontend should enter the failed UI rather than the preview UI.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopRecordingResponse {
+    pub result: RecordingResult,
+    pub failed: bool,
 }
 
 /// Trait for writing recorded media to a file or other sink.
@@ -841,9 +854,10 @@ mod tests {
         );
     }
 
-    /// Verifies that RecordingResult with empty finalization_errors omits the field.
+    /// Verifies that RecordingResult always serializes finalizationErrors
+    /// (even when empty) so the TypeScript type contract stays honest.
     #[test]
-    fn recording_result_omits_empty_finalization_errors() {
+    fn recording_result_always_includes_finalization_errors() {
         let result = RecordingResult {
             duration_secs: 10,
             frame_count: 300,
@@ -859,9 +873,12 @@ mod tests {
         };
 
         let json = serde_json::to_value(&result).unwrap();
+        let errors = json.get("finalizationErrors").expect(
+            "finalizationErrors should always be present (even when empty)"
+        );
         assert!(
-            json.get("finalizationErrors").is_none(),
-            "empty finalizationErrors should be skipped in serialization"
+            errors.as_array().unwrap().is_empty(),
+            "finalizationErrors should be an empty array"
         );
     }
 }
