@@ -90,7 +90,7 @@ export default function App() {
       }
       else if (status.state === 'failed') {
         setAppState('failed')
-        setErrorMessage('录制过程中发生错误')
+        setErrorMessage((current) => current || '录制过程中发生错误')
         setMicVolume(0)
         isStartingRef.current = false
         isStoppingRef.current = false
