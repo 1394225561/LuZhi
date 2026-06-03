@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-03 | Phase 6 follow-up code review 整改完成（bounded finalize、drop ratio 分母、mic stop diagnostics、per-source writer diagnostics）；真实设备 manual gate 仍待完成。
+> 最后更新：2026-06-03 | Phase 6 fourth follow-up code review 整改完成（StopRecordingResponse 结构化响应、生产 timeout 分支测试、finalizationErrors 类型契约对齐）；真实设备 manual gate 仍待完成。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,33 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-03：Phase 6 fourth follow-up code review 整改（结构化 stop 响应、生产 timeout 测试、类型契约对齐）
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-03-phase-6-bug-005-third-follow-up-rectification-code-review-findings.md`
+- `docs/superpowers/plans/2026-06-03-phase-6-bug-005-fourth-follow-up-rectification-code-review-rectification.md`
+
+本轮修复（3 个 Issue）：
+
+1. **Important 1: 结构化 stop 响应**（`StopRecordingResponse`）：新增 `StopRecordingResponse { result, failed }` 结构体；`drive_state_machine()` 有 errors 时 `failed=true`，前端进入 failed UI 展示具体 `finalizationErrors`，不再把 hard failure 当 warning 仅 `console.warn`。
+2. **Important 2: 生产 timeout 分支回归测试**：提取 `join_worker_with_timeout()` 和 `receive_consumer_output_with_timeout()` 可测试 helper；新增 3 个回归测试（`join_worker_timeout_returns_without_joining_parked_worker`、`join_consumer_timeout_detaches_parked_consumer`、`join_consumer_timeout_records_error_and_preserves_empty_output`），使用 parked thread + never-send channel 触发真实 timeout 分支。
+3. **Minor 1: finalizationErrors 类型契约对齐**：Rust 移除 `skip_serializing_if = "Vec::is_empty"`，JSON 始终包含 `finalizationErrors`（空数组），与 TypeScript 必填类型一致。
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **253 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **311 tests** 通过
+- `npm test -- --run` **53 tests** 通过
+- `npm run build` 通过
+- `cargo fmt --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/recording_writer.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/media/ffmpeg_writer.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri.ts`, `src/App.tsx`, `src/App.test.tsx`, `BUG.md`, `HANDOFF.md`
+
+---
 
 ### 2026-06-03：Phase 6 second follow-up code review 整改（前端构建修复、before-writer 类型、失败路径 diagnostics、timeout 测试）
 
