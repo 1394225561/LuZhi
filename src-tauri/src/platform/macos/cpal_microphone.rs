@@ -16,6 +16,7 @@ use crate::core::frame::AudioChunk;
 /// Captures the full stop lifecycle for post-mortem analysis of
 /// Bluetooth HFP profile release issues.
 #[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CpalMicrophoneStopDiagnostics {
     pub stop_requested: bool,
     pub stream_existed: bool,
