@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-03 | Phase 6 fourth follow-up code review 整改完成（StopRecordingResponse 结构化响应、生产 timeout 分支测试、finalizationErrors 类型契约对齐）；真实设备 manual gate 仍待完成。
+> 最后更新：2026-06-03 | BUG-0010/0011/0012 实施计划完成（光标坐标归一化、CursorKind 与 glyph 渲染、导出进度粒度升级）；计划已审阅，待选择执行方式后开始实施。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,55 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-03：BUG-0010/0011/0012 实施计划编写
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-03-bug-0010-0011-0012-root-cause-and-fix-plan.md`
+- `reference/tasks/0-bug-fix-task.md`
+- `BUG.md`
+
+已完成：
+
+- 完成三条未解决 bug 的根因分析和详细实施计划
+- 计划保存至 `docs/superpowers/plans/2026-06-03-bug-0010-0011-0012-fix-plan.md`
+
+三条 bug 根因：
+
+1. **BUG-0010（光标偏移）**：`MacCursorSource.snapshot()` 返回 macOS 全局屏幕坐标（`CGEventGetLocation`），但 `CursorOverlayRenderer` 假设坐标已在源视频像素空间。缺少 display origin/contentRect/pointPixelScale/stream size 的坐标归一化。
+2. **BUG-0011（光标不好看）**：`CursorSample`/`CursorFrame` 没有 `kind` 字段，`CursorOverlayRenderer` 固定画白色圆点。需要 `CursorKind` 枚举（Arrow/Hand/IBeam）和 glyph 渲染替换。
+3. **BUG-0012（进度不优雅）**：`FfmpegTrimExporter` 按 keep segment 上报进度（`(seg_idx+1)*99/total_keeps`），自动裁剪关闭时只有一个 keep segment，表现为 0% 停很久然后直接完成。
+
+推荐修复顺序：BUG-0010 → BUG-0011 → BUG-0012（坐标正确性优先于形态美化，形态美化优先于体验优化）。
+
+计划结构（16 个 Task，3 个 Phase）：
+
+- **Phase 1（Task 1-7）**：BUG-0010 — 新增 `CaptureGeometry`、`CursorCoordinateMapper`，从 SCDisplay 读取显示几何信息，在 `CursorMetadataRecorder` 中归一化坐标
+- **Phase 2（Task 8-12）**：BUG-0011 — 新增 `CursorKind` 枚举，扩展 `CursorSample`/`CursorFrame`，保留 kind 通过引擎管线，用 glyph 渲染替换圆点
+- **Phase 3（Task 13-16）**：BUG-0012 — frame/time 级进度上报、准备阶段进度（0→5→10%）、范围映射、前端 terminal error 显示
+
+关键待确认项：
+
+1. SCDisplay 的 `pointPixelScale` 不在 `SCDisplay` 上，可能需要通过 `SCShareableContentInfo` 获取，或通过 `stream_width / display.frame().width` 推算
+2. `CGEventGetLocation()` 的 Y 轴方向需实测确认（计划假设 bottom-up，可能需要 flip）
+3. 手形和 I-beam 的像素级 glyph 数据需要设计（arrow 24×24 完整 bitmap 已在计划中提供）
+4. Task 3 涉及 `objc2-screen-capture-kit` FFI 调用读取 SCDisplay 几何属性，**必须人工审查内存安全**
+
+下一步：
+
+1. 用户审阅计划，选择执行方式（Subagent-Driven 或 Inline）
+2. 按 Phase 1 → Phase 2 → Phase 3 顺序执行
+3. Phase 1 Task 3 完成后，需在真实设备上验证 `SCDisplay.frame()` 返回值的坐标系
+
+改动文件：
+
+- **新增**: `docs/superpowers/plans/2026-06-03-bug-0010-0011-0012-fix-plan.md`
+- **新增**: `docs/superpowers/reviews/2026-06-03-bug-0010-0011-0012-root-cause-and-fix-plan.md`
+- **新增**: `reference/tasks/0-bug-fix-task.md`
+- **修改**: `BUG.md`（新增 BUG-0010/0011/0012 未解决条目）
+
+---
 
 ### 2026-06-03：Phase 6 fourth follow-up code review 整改（结构化 stop 响应、生产 timeout 测试、类型契约对齐）
 
@@ -1043,6 +1092,49 @@ Round 2 复审发现的问题（已进入 Round 3 修复）：
 ---
 
 ## 冬眠记录
+
+### 2026-06-03：BUG-0010/0011/0012 实施计划编写完成冬眠
+
+#### 1. 当前任务上下文
+
+完成 BUG-0010（光标偏移）、BUG-0011（光标不好看）、BUG-0012（导出进度不优雅）三条未解决 bug 的根因分析和详细实施计划编写。当前在 `feat/architecture-planning` 分支。
+
+#### 2. 已完成进度
+
+- 完成三条 bug 的静态链路审查和根因定位（无代码修改）
+- 编写 16 个 Task 的详细实施计划，保存至 `docs/superpowers/plans/2026-06-03-bug-0010-0011-0012-fix-plan.md`
+- 计划包含完整代码、测试、验证命令、commit 消息
+- 更新 BUG.md 新增 BUG-0010/0011/0012 未解决条目
+- Git 已提交（`556ad79`），未 push
+
+#### 3. 中断时的处置决策
+
+休眠触发时，计划编写刚完成，未开始任何代码修改。选择"直接冬眠"：无需回滚或额外收尾，状态完全稳定。
+
+#### 4. 架构与关键决策
+
+- **坐标归一化在 recorder 层完成**：`CursorMetadataRuntime` 接收 `CaptureGeometry`，`CursorMetadataRecorder` 内部持有 `CursorCoordinateMapper`，在 `record_snapshot()` 时将全局屏幕坐标归一化为源视频像素坐标。`CursorOverlayRenderer` 不变。
+- **CursorKind 使用 `#[serde(default)]`**：旧 timeline JSON 没有 `kind` 字段时默认为 `Arrow`，保证向后兼容。
+- **glyph 渲染使用静态 bitmask**：不引入图片解码依赖，arrow/hand/ibeam 的像素数据编译为 Rust 静态数组。
+- **导出进度分段**：准备阶段占 0-10%，FFmpeg 导出占 10-99%，validation 成功后报 100%。
+
+#### 5. 立即执行清单
+
+1. 用户审阅计划，选择执行方式（Subagent-Driven 或 Inline）
+2. 按 Phase 1 → Phase 2 → Phase 3 顺序执行 16 个 Task
+3. Phase 1 Task 3 完成后，在真实设备上验证 `SCDisplay.frame()` 返回值
+
+#### 6. 当前报错/阻碍
+
+无阻塞报错。
+
+待确认项：
+
+- SCDisplay 的 `pointPixelScale` 不在 `SCDisplay` 上，需确认获取方式
+- `CGEventGetLocation()` Y 轴方向需实测
+- 手形和 I-beam 的 glyph 像素数据需设计
+
+---
 
 ### 2026-05-24：端到端流水线连接完成冬眠
 
