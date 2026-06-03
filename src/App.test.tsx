@@ -172,7 +172,7 @@ describe('App', () => {
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
-      if (command === 'stop_recording') return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: '/tmp/cursor.json', effectTimelinePath: null, trimMetadataPath: null, cutTimelinePath: null })
+      if (command === 'stop_recording') return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: '/tmp/cursor.json', effectTimelinePath: null, trimMetadataPath: null, cutTimelinePath: null, writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 }, diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null } })
       return Promise.reject(new Error(`unexpected command ${command}`))
     })
 
@@ -471,6 +471,10 @@ describe('App', () => {
           outputPath: '/tmp/test.mp4',
           cursorMetadataPath: '/tmp/cursor.json',
           effectTimelinePath: null,
+          trimMetadataPath: null,
+          cutTimelinePath: null,
+          writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 },
+          diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null },
         })
       }
       return Promise.reject(new Error(`unexpected command ${command}`))
@@ -573,7 +577,7 @@ describe('App', () => {
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
       if (command === 'stop_recording') {
-        return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: null, effectTimelinePath: null, trimMetadataPath: null, cutTimelinePath: null })
+        return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: null, effectTimelinePath: null, trimMetadataPath: null, cutTimelinePath: null, writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 }, diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null } })
       }
       return Promise.reject(new Error(`unexpected command ${command}`))
     })
@@ -891,9 +895,9 @@ describe('App', () => {
     // R5: When no-FFmpeg gate emits terminal progress (cancellable=false,
     // outputPath=null), the UI must clear exporting state and not show
     // a cancel button or success file path.
-    const listenCallbacks: Record<string, (event: { payload: unknown }) => void> = {}
+    const listenCallbacks: Record<string, (event: { event: string; id: number; payload: unknown }) => void> = {}
     const { listen } = await import('@tauri-apps/api/event')
-    vi.mocked(listen).mockImplementation((event: string, cb: (event: { payload: unknown }) => void) => {
+    vi.mocked(listen).mockImplementation((event: string, cb: (event: { event: string; id: number; payload: unknown }) => void) => {
       listenCallbacks[event] = cb
       return Promise.resolve(() => { delete listenCallbacks[event] })
     })
@@ -914,6 +918,8 @@ describe('App', () => {
     // Simulate terminal progress event (no-FFmpeg gate: cancellable=false, outputPath=null).
     await act(async () => {
       listenCallbacks['export-progress']?.({
+        event: 'export-progress',
+        id: 0,
         payload: {
           preset: 'bilibili',
           progress: 0,

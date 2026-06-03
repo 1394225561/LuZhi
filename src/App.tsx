@@ -196,6 +196,8 @@ export default function App() {
         effectTimelinePath: result.effectTimelinePath ?? null,
         trimMetadataPath: result.trimMetadataPath ?? null,
         cutTimelinePath: result.cutTimelinePath ?? null,
+        writerDiagnostics: result.writerDiagnostics,
+        diagnostics: result.diagnostics,
       })
       // Fallback: sync state via backend query in case recording-state-changed event is lost.
       const stopStatus = await fetchRecordingStatus()
