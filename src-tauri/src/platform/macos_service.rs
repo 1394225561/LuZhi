@@ -2315,4 +2315,77 @@ mod tests {
         // mic_stop_diagnostics should be None (no mic was stopped).
         assert!(empty.result.diagnostics.mic_stop_diagnostics.is_none());
     }
+
+    /// Regression test for BUG.md rule 28: the production consumer timeout
+    /// branch must not call handle.join() which would block forever.
+    ///
+    /// This test calls the actual production helper
+    /// `receive_consumer_output_with_timeout` with a never-send channel
+    /// and a parked thread. If the helper were to call handle.join() on
+    /// the timeout path, this test would hang.
+    #[test]
+    fn join_consumer_timeout_detaches_parked_consumer() {
+        use std::time::Instant;
+
+        let (_tx, rx) = mpsc::channel::<RecordingConsumerOutput>();
+        let handle = thread::spawn(|| thread::park());
+        let mut consumer_handle = Some(handle);
+        let mut errors = Vec::new();
+
+        let start = Instant::now();
+        let (output, panicked) = RecordingFinalizeGuard::receive_consumer_output_with_timeout(
+            Some(rx),
+            &mut consumer_handle,
+            std::time::Duration::from_millis(50),
+            &mut errors,
+        );
+
+        let elapsed = start.elapsed();
+        assert!(panicked, "timeout should set panicked flag");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "timeout should return quickly, took {:?}",
+            elapsed
+        );
+        assert!(
+            consumer_handle.is_none(),
+            "consumer handle should be taken (detached) on timeout"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("超时")),
+            "should record timeout error, got: {:?}",
+            errors
+        );
+        assert_eq!(
+            output.result.duration_secs, 0,
+            "empty output should have zero duration"
+        );
+    }
+
+    /// Verifies that on timeout, the empty fallback output carries valid
+    /// diagnostics and the error is recorded for finalization_errors.
+    #[test]
+    fn join_consumer_timeout_records_error_and_preserves_empty_output() {
+        let (_tx, rx) = mpsc::channel::<RecordingConsumerOutput>();
+        let handle = thread::spawn(|| thread::park());
+        let mut consumer_handle = Some(handle);
+        let mut errors = Vec::new();
+
+        let (output, _) = RecordingFinalizeGuard::receive_consumer_output_with_timeout(
+            Some(rx),
+            &mut consumer_handle,
+            std::time::Duration::from_millis(50),
+            &mut errors,
+        );
+
+        assert!(!errors.is_empty(), "timeout should record error");
+        assert!(
+            output.diagnostics.mic_stop_diagnostics.is_none(),
+            "empty output should have None mic_stop_diagnostics"
+        );
+        assert!(
+            output.result.finalization_errors.is_empty(),
+            "finalization_errors populated later by drive_state_machine"
+        );
+    }
 }

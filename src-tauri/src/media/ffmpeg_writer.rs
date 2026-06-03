@@ -1805,4 +1805,39 @@ mod tests {
             elapsed
         );
     }
+
+    /// Regression test for BUG.md rule 28: the production timeout branch
+    /// must not call handle.join() which would block forever on a stuck worker.
+    ///
+    /// This test calls the actual production helper `join_worker_with_timeout`
+    /// with a never-send channel and a parked thread. If the helper were to
+    /// call handle.join() on the timeout path, this test would hang.
+    #[test]
+    fn join_worker_timeout_returns_without_joining_parked_worker() {
+        use std::time::Instant;
+
+        let (_tx, rx) = mpsc::channel::<AppResult<RecordingResult>>();
+        let handle = thread::spawn(|| thread::park());
+        let mut worker = Some(handle);
+
+        let start = Instant::now();
+        let result = FfmpegRecordingWriter::join_worker_with_timeout(
+            &mut worker,
+            Some(rx),
+            std::time::Duration::from_millis(50),
+        );
+
+        assert!(result.is_err(), "timeout should return Err");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "timeout should return quickly, took {:?}",
+            elapsed
+        );
+        assert!(
+            worker.is_none(),
+            "worker handle should be taken (detached) on timeout"
+        );
+    }
+
 }
