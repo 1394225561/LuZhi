@@ -28,7 +28,7 @@ use core::timeline::{BeautifyConfigSnapshot, EffectTimeline};
 use media::cursor_engine::{ClickAnimationConfig, CursorEffectEngine};
 use media::export_paths::export_output_path;
 use media::recording_metadata::{RecordingMetadata, RecordingMetadataWriter};
-use media::recording_writer::{RecordingResult, StopRecordingResponse};
+use media::recording_writer::StopRecordingResponse;
 use media::silence_detector::SilenceDetectorEngine;
 use media::trim_exporter::ExportProgressReporter;
 use media::trim_metadata::TrimMetadataWriter;
