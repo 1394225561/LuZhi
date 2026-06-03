@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -284,6 +285,10 @@ impl MacRecordingService {
     }
 }
 
+/// Timeout for the consumer thread to return its result after stop.
+/// BUG.md rule 28: timeout must not call unbounded join().
+const CONSUMER_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// RAII guard that ensures all recording resources are released on drop.
 ///
 /// If `finalize()` panics or is never called, the guard still executes
@@ -398,60 +403,66 @@ impl<'a> RecordingFinalizeGuard<'a> {
 
     /// Step 5: Join consumer thread with bounded timeout.
     fn join_consumer(&mut self) {
+        let (output, panicked) = Self::receive_consumer_output_with_timeout(
+            self.service.consumer_result_rx.take(),
+            &mut self.service.consumer_handle,
+            CONSUMER_RESULT_TIMEOUT,
+            &mut self.errors,
+        );
+        self.consumer_output = Some(output);
+        self.consumer_panicked = panicked;
+    }
+
+    /// Testable helper: receive consumer output with a bounded timeout.
+    ///
+    /// On timeout, the consumer handle is detached (dropped without join).
+    /// On disconnect, the handle is joined to extract any panic message.
+    fn receive_consumer_output_with_timeout(
+        result_rx: Option<mpsc::Receiver<RecordingConsumerOutput>>,
+        handle: &mut Option<thread::JoinHandle<()>>,
+        timeout: std::time::Duration,
+        errors: &mut Vec<String>,
+    ) -> (RecordingConsumerOutput, bool) {
         let empty_output = Self::empty_consumer_output();
 
-        let (output, panicked) = if let Some(rx) = self.service.consumer_result_rx.take() {
-            const CONSUMER_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-            match rx.recv_timeout(CONSUMER_RESULT_TIMEOUT) {
+        if let Some(rx) = result_rx {
+            match rx.recv_timeout(timeout) {
                 Ok(output) => {
-                    // Consumer returned normally — join to clean up thread resources.
-                    if let Some(handle) = self.service.consumer_handle.take() {
-                        let _ = handle.join();
+                    if let Some(h) = handle.take() {
+                        let _ = h.join();
                     }
                     (output, false)
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Timeout: do NOT call handle.join(). The consumer may still be
-                    // running (stuck in writer finalize, artifact validation, etc.).
-                    // Drop the JoinHandle to detach the thread.
-                    self.service.consumer_handle.take();
-                    eprintln!(
-                        "警告: 消费线程超时未返回结果 ({:?})",
-                        CONSUMER_RESULT_TIMEOUT
-                    );
-                    self.errors.push(format!(
+                    handle.take();
+                    eprintln!("警告: 消费线程超时未返回结果 ({:?})", timeout);
+                    errors.push(format!(
                         "录制消费线程超时未返回结果 ({:?})，可能仍在后台执行",
-                        CONSUMER_RESULT_TIMEOUT
+                        timeout
                     ));
                     (empty_output, true)
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    // Consumer exited without sending result — likely panicked.
-                    // Safe to join to capture panic info.
                     eprintln!("警告: 消费线程结果通道断开");
-                    self.errors.push("录制消费线程结果通道断开".to_string());
-                    if let Some(handle) = self.service.consumer_handle.take() {
-                        if let Err(panic) = handle.join() {
+                    errors.push("录制消费线程结果通道断开".to_string());
+                    if let Some(h) = handle.take() {
+                        if let Err(panic) = h.join() {
                             let msg = extract_panic_message(panic);
                             eprintln!("录制消费线程异常终止: {msg}");
-                            self.errors.push(format!("录制消费线程异常终止: {msg}"));
+                            errors.push(format!("录制消费线程异常终止: {msg}"));
                         }
                     }
                     (empty_output, true)
                 }
             }
-        } else if let Some(_handle) = self.service.consumer_handle.take() {
-            // No result channel but handle exists — abnormal state.
-            // Do NOT call handle.join() without a timeout; just log and detach.
-            self.errors
-                .push("消费线程结果通道不存在但句柄存在，状态不一致，已丢弃句柄".to_string());
+        } else if let Some(_h) = handle.take() {
+            errors.push(
+                "消费线程结果通道不存在但句柄存在，状态不一致，已丢弃句柄".to_string(),
+            );
             (empty_output, false)
         } else {
             (empty_output, false)
-        };
-
-        self.consumer_output = Some(output);
-        self.consumer_panicked = panicked;
+        }
     }
 
     /// Step 6-7: Write cursor and trim metadata sidecars.
