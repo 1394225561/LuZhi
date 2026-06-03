@@ -103,6 +103,12 @@ export type RecordingResult = {
   finalizationErrors: string[]
 }
 
+/** Structured response from stop_recording command. */
+export type StopRecordingResponse = {
+  result: RecordingResult
+  failed: boolean
+}
+
 export type WriterDiagnostics = {
   audioChunksReceived: number
   audioChunksAppended: number
@@ -181,8 +187,8 @@ export async function resumeRecording(): Promise<void> {
   return invoke('resume_recording')
 }
 
-export async function stopRecording(): Promise<RecordingResult> {
-  return invoke<RecordingResult>('stop_recording')
+export async function stopRecording(): Promise<StopRecordingResponse> {
+  return invoke<StopRecordingResponse>('stop_recording')
 }
 
 export async function setCaptureMode(config: CaptureConfig): Promise<void> {

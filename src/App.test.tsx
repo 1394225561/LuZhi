@@ -172,7 +172,7 @@ describe('App', () => {
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
-      if (command === 'stop_recording') return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: '/tmp/cursor.json', effectTimelinePath: null, trimMetadataPath: null, cutTimelinePath: null, writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 }, diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null }, finalizationErrors: [] })
+      if (command === 'stop_recording') return Promise.resolve({ result: { durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: '/tmp/cursor.json', effectTimelinePath: null, trimMetadataPath: null, cutTimelinePath: null, writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 }, diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null }, finalizationErrors: [] }, failed: false })
       return Promise.reject(new Error(`unexpected command ${command}`))
     })
 
@@ -465,17 +465,20 @@ describe('App', () => {
       if (command === 'start_recording') return Promise.resolve()
       if (command === 'stop_recording') {
         return Promise.resolve({
-          durationSecs: 5,
-          frameCount: 150,
-          mixedAudioChunkCount: 50,
-          outputPath: '/tmp/test.mp4',
-          cursorMetadataPath: '/tmp/cursor.json',
-          effectTimelinePath: null,
-          trimMetadataPath: null,
-          cutTimelinePath: null,
-          writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 },
-          diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null },
-          finalizationErrors: [],
+          result: {
+            durationSecs: 5,
+            frameCount: 150,
+            mixedAudioChunkCount: 50,
+            outputPath: '/tmp/test.mp4',
+            cursorMetadataPath: '/tmp/cursor.json',
+            effectTimelinePath: null,
+            trimMetadataPath: null,
+            cutTimelinePath: null,
+            writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 },
+            diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null },
+            finalizationErrors: [],
+          },
+          failed: false,
         })
       }
       return Promise.reject(new Error(`unexpected command ${command}`))
@@ -578,7 +581,7 @@ describe('App', () => {
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
       if (command === 'stop_recording') {
-        return Promise.resolve({ durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: null, effectTimelinePath: null, trimMetadataPath: null, cutTimelinePath: null, writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 }, diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null }, finalizationErrors: [] })
+        return Promise.resolve({ result: { durationSecs: 1, frameCount: 30, mixedAudioChunkCount: 10, outputPath: null, cursorMetadataPath: null, effectTimelinePath: null, trimMetadataPath: null, cutTimelinePath: null, writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 }, diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null }, finalizationErrors: [] }, failed: false })
       }
       return Promise.reject(new Error(`unexpected command ${command}`))
     })

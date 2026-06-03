@@ -186,7 +186,8 @@ export default function App() {
     if (appState !== 'recording' || isStoppingRef.current) return
     isStoppingRef.current = true
     try {
-      const result = await stopRecording()
+      const response = await stopRecording()
+      const result = response.result
       setRecordingResult({
         durationSecs: result.durationSecs,
         frameCount: result.frameCount,
@@ -200,6 +201,14 @@ export default function App() {
         diagnostics: result.diagnostics,
         finalizationErrors: result.finalizationErrors ?? [],
       })
+      if (response.failed) {
+        // Hard finalize failure — enter failed state with specific error details.
+        const errorDetail = result.finalizationErrors?.join('; ') || '录制完成但存在错误'
+        setAppState('failed')
+        setErrorMessage(errorDetail)
+        isStoppingRef.current = false
+        return
+      }
       if (result.finalizationErrors && result.finalizationErrors.length > 0) {
         console.warn('录制完成但有警告:', result.finalizationErrors)
       }
