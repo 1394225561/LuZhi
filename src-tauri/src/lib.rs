@@ -28,7 +28,7 @@ use core::timeline::{BeautifyConfigSnapshot, EffectTimeline};
 use media::cursor_engine::{ClickAnimationConfig, CursorEffectEngine};
 use media::export_paths::export_output_path;
 use media::recording_metadata::{RecordingMetadata, RecordingMetadataWriter};
-use media::recording_writer::RecordingResult;
+use media::recording_writer::{RecordingResult, StopRecordingResponse};
 use media::silence_detector::SilenceDetectorEngine;
 use media::trim_exporter::ExportProgressReporter;
 use media::trim_metadata::TrimMetadataWriter;
@@ -239,7 +239,7 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
 async fn stop_recording(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-) -> Result<RecordingResult, String> {
+) -> Result<StopRecordingResponse, String> {
     // Stop the tick runtime first.
     if let Some(mut tick) = state
         .tick_runtime
@@ -252,11 +252,11 @@ async fn stop_recording(
 
     let service = state.service.clone();
 
-    let (new_state, result) = tauri::async_runtime::spawn_blocking(move || {
+    let (new_state, response) = tauri::async_runtime::spawn_blocking(move || {
         let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
-        let result = service.stop();
+        let response = service.stop();
         let new_state = service.state();
-        Ok::<_, String>((new_state, result))
+        Ok::<_, String>((new_state, response))
     })
     .await
     .map_err(|e| format!("停止录制任务失败: {e}"))??;
@@ -277,7 +277,7 @@ async fn stop_recording(
 
     emit_state_changed(&app, new_state);
 
-    result.map_err(|e| e.to_string())
+    response.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
