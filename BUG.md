@@ -4,11 +4,22 @@
 
 ## 未解决
 
-### BUG-0010: 导出的视频光标定位不对
+### BUG-0010: 导出的视频光标定位不对 ✅ 已修复-待人工验证
 
 **现象**：经过美化后导出的视频，光标的定位显示向左上方产生偏移了。
 
 **期望**：美化的光标与源视频的光标是精确定位，没有偏移。
+
+**根因**：`MacCursorSource.snapshot()` 返回 macOS 全局屏幕坐标（`CGEventGetLocation`），但 `CursorOverlayRenderer` 假设坐标已在源视频像素空间。缺少 display origin/contentRect/pointPixelScale/stream size 的坐标归一化。
+
+**修复**：新增 `CaptureGeometry`、`CursorCoordinateMapper`，从 SCDisplay 读取显示几何信息，在 `CursorMetadataRecorder` 中归一化坐标。
+
+**预防规则**：
+
+1. cursor metadata 必须保存或使用与 source video 一致的坐标空间，不能把全局屏幕坐标直接交给 exporter。
+2. ScreenCaptureKit display origin、contentRect、pointPixelScale、stream output size 必须进入 cursor 坐标归一化。
+3. cursor glyph 绘制必须以 hotspot 对齐目标点，不能以图标左上角或视觉中心对齐。
+4. 多显示器、Retina scale、CenterCrop/FitWithBars 必须有坐标回归测试或人工门禁。
 
 ---
 
