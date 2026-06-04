@@ -196,6 +196,16 @@ unsafe fn handle_video_frame(delegate: &StreamOutput, sample_buffer: &CMSampleBu
     let base_address = cvpixelbuffer_get_base_address(image_buffer);
     let bytes_per_row = cvpixelbuffer_get_bytes_per_row(image_buffer);
 
+    // First-frame diagnostics: log actual CVPixelBuffer size for coordinate mapping verification.
+    static FIRST_FRAME_DIAGNOSED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !FIRST_FRAME_DIAGNOSED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "[sck-first-frame] actual_buffer={}×{} bytes_per_row={}",
+            width, height, bytes_per_row
+        );
+    }
+
     if base_address.is_null() {
         cvpixelbuffer_unlock_base_address(image_buffer, 0);
         return;
