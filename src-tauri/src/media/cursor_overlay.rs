@@ -63,6 +63,31 @@ const T: GlyphPixel = GlyphPixel::Transparent;
 
 // Arrow: 24×24 diagonal arrow. Hotspot at tip (0,0).
 // Colors: white outline (W), black fill (B) — matches macOS standard arrow.
+// Row layout (24 values per row, 24 rows = 576 total):
+//   Row 0:  W T T T T T T T T T T T T T T T T T T T T T T T
+//   Row 1:  W W T T T T T T T T T T T T T T T T T T T T T T
+//   Row 2:  W B W T T T T T T T T T T T T T T T T T T T T T
+//   Row 3:  W B B W T T T T T T T T T T T T T T T T T T T T
+//   Row 4:  W B B B W T T T T T T T T T T T T T T T T T T T
+//   Row 5:  W B B B B W T T T T T T T T T T T T T T T T T T
+//   Row 6:  W B B B B B W T T T T T T T T T T T T T T T T T
+//   Row 7:  W B B B B B B W T T T T T T T T T T T T T T T T
+//   Row 8:  W B B B B B B B W T T T T T T T T T T T T T T T
+//   Row 9:  W B B B B B B B B W T T T T T T T T T T T T T T
+//   Row 10: W B B B B B B B B B W T T T T T T T T T T T T T
+//   Row 11: W B B B B B B B B B B W T T T T T T T T T T T T
+//   Row 12: W B B B B B B B B B B B W T T T T T T T T T T T
+//   Row 13: W B B B B B B B B B B B B W T T T T T T T T T T
+//   Row 14: W B B B B B B B B B B B B B W T T T T T T T T T
+//   Row 15: W B B B B B B B B B B B B B B W T T T T T T T T
+//   Row 16: W B B B B B B B B B B B B B B B W T T T T T T T
+//   Row 17: W B B B B B B B B B B B B B B B B W T T T T T T
+//   Row 18: W B B B B B B B B B B B B B B B B B W T T T T T
+//   Row 19: W B B W W W W W W W W W W W W W W W W T T T T T
+//   Row 20: W B W T T T T T T T T T T T T T T T T T T T T T
+//   Row 21: W W T T T T T T T T T T T T T T T T T T T T T T
+//   Row 22: W T T T T T T T T T T T T T T T T T T T T T T T
+//   Row 23: T T T T T T T T T T T T T T T T T T T T T T T T
 static ARROW_GLYPH: CursorGlyph = CursorGlyph {
     width: 24,
     height: 24,
@@ -71,25 +96,56 @@ static ARROW_GLYPH: CursorGlyph = CursorGlyph {
     pixels: &ARROW_PIXELS,
 };
 
+#[rustfmt::skip]
 static ARROW_PIXELS: [GlyphPixel; 576] = [
-    W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, W, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    W, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, W, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    W, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B,
-    B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T,
-    W, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B,
-    B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T,
-    T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T,
-    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B,
-    B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B,
-    B, B, W, T, T, T, T, T, W, B, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, T, T, T, T, T, W,
-    B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, W, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 0
+    W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 1
+    W, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 2
+    W, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 3
+    W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 4
+    W, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 5
+    W, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 6
+    W, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 7
+    W, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 8
+    W, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 9
+    W, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 10
+    W, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 11
+    W, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 12
+    W, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 13
+    W, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T,
+    // Row 14
+    W, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T,
+    // Row 15
+    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T,
+    // Row 16
+    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T,
+    // Row 17
+    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T,
+    // Row 18
+    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T,
+    // Row 19
+    W, B, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, T, T, T, T, T,
+    // Row 20
+    W, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 21
+    W, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 22
+    W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 23
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
 ];
 
 // Hand: 24×24 open hand silhouette. Hotspot at fingertip (12, 4).
@@ -132,19 +188,56 @@ static IBEAM_GLYPH: CursorGlyph = CursorGlyph {
     pixels: &IBEAM_PIXELS,
 };
 
+#[rustfmt::skip]
 static IBEAM_PIXELS: [GlyphPixel; 384] = [
-    T, T, T, T, W, W, W, W, W, W, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T,
-    T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, W, W, B, B, W, W, T, T, T, T, T, T,
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, W, W, B, B, W, W, T, T, T, T, T, T,
-    T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T,
+    // Row 0: top serif
+    T, T, T, T, W, W, W, W, W, W, T, T, T, T, T, T,
+    // Row 1: top cap
+    T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T,
+    // Row 2: top transition
+    T, T, T, W, W, B, B, W, W, T, T, T, T, T, T, T,
+    // Row 3
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 4
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 5
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 6
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 7
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 8
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 9
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 10
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 11
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 12
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 13
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 14
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 15
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 16
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 17
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 18
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 19
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 20: bottom transition
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    // Row 21: bottom serifs
+    T, T, T, T, W, W, B, B, W, W, T, T, T, T, T, T,
+    // Row 22: bottom cap
+    T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T,
+    // Row 23: bottom serif
+    T, T, T, W, W, W, W, W, W, W, W, T, T, T, T, T,
 ];
 
 /// Renders cursor overlay onto YUV420P video frames during export.
@@ -879,6 +972,88 @@ mod tests {
         assert!(
             y_plane.iter().all(|&b| b == 0),
             "infinite cursor should not draw"
+        );
+    }
+
+    #[test]
+    fn arrow_glyph_has_white_outline_and_black_fill() {
+        let glyph = &ARROW_GLYPH;
+        // Arrow tip pixel (0,0) should be white outline.
+        let tip = &glyph.pixels[0];
+        assert!(
+            matches!(tip, GlyphPixel::White(_)),
+            "arrow tip should be white outline"
+        );
+        // Interior pixel (row 10, col 5 — well inside the arrow body) should be black fill.
+        let interior = &glyph.pixels[10 * glyph.width + 5];
+        assert!(
+            matches!(interior, GlyphPixel::Black(_)),
+            "arrow interior should be black fill"
+        );
+    }
+
+    #[test]
+    fn hand_glyph_has_white_fill_and_black_outline() {
+        let glyph = &HAND_GLYPH;
+        // Find a white fill pixel (interior of hand).
+        let has_white = glyph.pixels.iter().any(|p| matches!(p, GlyphPixel::White(_)));
+        assert!(has_white, "hand should have white fill pixels");
+        // Find a black outline pixel.
+        let has_black = glyph.pixels.iter().any(|p| matches!(p, GlyphPixel::Black(_)));
+        assert!(has_black, "hand should have black outline pixels");
+    }
+
+    #[test]
+    fn ibeam_glyph_has_black_body_and_white_outline() {
+        let glyph = &IBEAM_GLYPH;
+        // Top bar edge should be white outline.
+        let top_edge = &glyph.pixels[4]; // Row 0, col 4.
+        assert!(
+            matches!(top_edge, GlyphPixel::White(_)),
+            "ibeam top edge should be white outline"
+        );
+        // Vertical stem should be black body.
+        let stem = &glyph.pixels[5 * glyph.width + 7]; // Row 5, col 7 (center of stem).
+        assert!(
+            matches!(stem, GlyphPixel::Black(_)),
+            "ibeam stem should be black body"
+        );
+    }
+
+    #[test]
+    fn rendered_arrow_has_correct_y_plane_values() {
+        let timeline = make_timeline(vec![cursor_frame(0, 960.0, 540.0)], true);
+        let renderer = CursorOverlayRenderer::new(
+            timeline,
+            1920, 1080, 1920, 1080,
+            ExportScalePolicy::FitWithBars,
+            None,
+            Some((1920, 1080)),
+        ).unwrap();
+
+        let mut frame = ffmpeg_next::util::frame::Video::new(
+            ffmpeg_next::util::format::Pixel::YUV420P,
+            1920, 1080,
+        );
+        renderer.draw_on_frame(&mut frame, 0, 30);
+
+        let y_plane = frame.data(0);
+        let linesize = y_plane.len() / 1080;
+
+        // Arrow tip at (960, 540) should be white outline (Y≈235).
+        let tip_offset = 540 * linesize + 960;
+        assert!(
+            y_plane[tip_offset] > 200,
+            "arrow tip should be white (Y>200), got {}",
+            y_plane[tip_offset]
+        );
+
+        // Arrow interior (e.g., 960+5, 540+10 — row 10 has wide interior) should be black fill (Y≈16).
+        let interior_offset = (540 + 10) * linesize + (960 + 5);
+        assert!(
+            y_plane[interior_offset] < 50,
+            "arrow interior should be black (Y<50), got {}",
+            y_plane[interior_offset]
         );
     }
 }
