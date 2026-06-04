@@ -15,8 +15,8 @@ use objc2::{AnyThread, DefinedClass};
 use objc2_core_media::{CMSampleBuffer, CMTimeFlags};
 use objc2_foundation::NSError;
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
-    SCStreamOutput, SCStreamOutputType,
+    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
+    SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
 };
 
 use crate::app::error::{AppError, AppResult};
@@ -25,6 +25,7 @@ use crate::core::capture::{
     ScreenCapture, VideoFrameSink,
 };
 use crate::core::config::CaptureConfig;
+use crate::core::timeline::CaptureGeometry;
 use crate::core::frame::{AudioChunk, FrameBuffer, PixelFormat, VideoFrame};
 
 // ---------------------------------------------------------------------------
@@ -590,6 +591,7 @@ pub struct MacScreenCapture {
     /// is false so the caller can attempt a fresh start.
     needs_reset: bool,
     audio_sink: Option<AudioChunkSink>,
+    last_capture_geometry: Option<CaptureGeometry>,
 }
 
 impl MacScreenCapture {
@@ -600,7 +602,44 @@ impl MacScreenCapture {
             running: false,
             needs_reset: false,
             audio_sink: None,
+            last_capture_geometry: None,
         }
+    }
+
+    /// Read display geometry from the selected SCDisplay for cursor
+    /// coordinate normalization.
+    ///
+    /// # Safety
+    /// Caller must ensure `display` is a valid SCDisplay reference.
+    unsafe fn read_display_geometry(
+        display: &SCDisplay,
+        stream_width: u32,
+        stream_height: u32,
+    ) -> CaptureGeometry {
+        let display_id = display.displayID();
+        let frame = display.frame();
+        // pointPixelScale is not on SCDisplay; derive from stream vs display point size.
+        let point_pixel_scale = if frame.size.width > 0.0 {
+            stream_width as f32 / frame.size.width as f32
+        } else {
+            1.0
+        };
+
+        CaptureGeometry {
+            display_id,
+            content_origin_x: frame.origin.x as f32,
+            content_origin_y: frame.origin.y as f32,
+            content_width: frame.size.width as f32,
+            content_height: frame.size.height as f32,
+            point_pixel_scale,
+            stream_width,
+            stream_height,
+        }
+    }
+
+    /// Returns the capture geometry from the last `start_stream()` call.
+    pub fn last_capture_geometry(&self) -> Option<CaptureGeometry> {
+        self.last_capture_geometry
     }
 
     /// Creates and starts an SCStream with the given configuration.
@@ -637,6 +676,12 @@ impl MacScreenCapture {
         }
 
         let display = unsafe { displays.objectAtIndex(0) };
+
+        // Read display geometry for cursor coordinate normalization.
+        let capture_geometry = unsafe {
+            Self::read_display_geometry(&display, config.width, config.height)
+        };
+        self.last_capture_geometry = Some(capture_geometry);
 
         // Create content filter: capture the entire display.
         let empty_windows: Retained<NSArray<objc2_screen_capture_kit::SCWindow>> =
