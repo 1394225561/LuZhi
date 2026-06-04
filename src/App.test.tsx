@@ -1099,6 +1099,48 @@ describe('App', () => {
     expect(cancelButtons).toHaveLength(0)
   })
 
+  it('shows terminal export error in beautifyError', async () => {
+    const listenCallbacks: Record<string, (event: { event: string; id: number; payload: unknown }) => void> = {}
+    const { listen } = await import('@tauri-apps/api/event')
+    vi.mocked(listen).mockImplementation((event: string, cb: (event: { event: string; id: number; payload: unknown }) => void) => {
+      listenCallbacks[event] = cb
+      return Promise.resolve(() => { delete listenCallbacks[event] })
+    })
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 10, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+
+    // Simulate terminal error event (cancellable=false, error present).
+    await act(async () => {
+      listenCallbacks['export-progress']?.({
+        event: 'export-progress',
+        id: 0,
+        payload: {
+          preset: 'bilibili',
+          progress: 50,
+          cancellable: false,
+          error: 'FFmpeg 编码失败：内存不足',
+        },
+      })
+    })
+
+    // The error should be displayed in the UI.
+    expect(screen.getByText(/FFmpeg 编码失败/)).toBeTruthy()
+    // The exporting state should be cleared — no cancel button visible.
+    const cancelButtons = screen.queryAllByRole('button', { name: '取消' })
+    expect(cancelButtons).toHaveLength(0)
+  })
+
   it('debounces consecutive beautify changes into a single timeline build', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
