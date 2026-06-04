@@ -32,7 +32,12 @@ impl SmoothingConfig {
     }
 }
 
-/// Adaptive moving-average smoother for cursor samples.
+/// Exponential moving average smoother for cursor samples.
+///
+/// EMA converges faster than simple moving average after the cursor stops,
+/// because it gives exponentially more weight to recent samples. The alpha
+/// parameter controls the smoothing strength: higher alpha = less smoothing
+/// but faster response.
 pub struct CursorSmoother {
     config: SmoothingConfig,
 }
@@ -43,38 +48,41 @@ impl CursorSmoother {
     }
 
     pub fn smooth(&self, samples: &[CursorSample]) -> Vec<CursorSample> {
-        if samples.len() <= 1 {
+        if samples.is_empty() {
+            return samples.to_vec();
+        }
+        if samples.len() == 1 {
             return samples.to_vec();
         }
 
-        let radius = self.config.window_size / 2;
         let jump_threshold = self.config.jump_threshold_pixels as f32;
+        // EMA alpha: higher values = faster convergence but less smoothing.
+        // alpha=0.4 settles in ~3-4 frames after cursor stops, which combined
+        // with monotone Hermite interpolation eliminates visible drift.
+        let alpha = 0.4_f32;
 
-        samples
-            .iter()
-            .enumerate()
-            .map(|(index, sample)| {
-                if is_large_jump(samples, index, jump_threshold) {
-                    return *sample;
-                }
+        let mut result = Vec::with_capacity(samples.len());
+        // First sample: no smoothing.
+        result.push(samples[0]);
 
-                let start = index.saturating_sub(radius);
-                let end = (index + radius + 1).min(samples.len());
-                let window = &samples[start..end];
+        for i in 1..samples.len() {
+            if is_large_jump(samples, i, jump_threshold) {
+                result.push(samples[i]);
+                continue;
+            }
 
-                let (sum_x, sum_y) = window.iter().fold((0.0f32, 0.0f32), |acc, item| {
-                    (acc.0 + item.x, acc.1 + item.y)
-                });
-                let count = window.len() as f32;
+            let prev = result[i - 1];
+            let curr = samples[i];
 
-                CursorSample {
-                    timestamp: sample.timestamp,
-                    x: sum_x / count,
-                    y: sum_y / count,
-                    kind: sample.kind,
-                }
-            })
-            .collect()
+            result.push(CursorSample {
+                timestamp: curr.timestamp,
+                x: prev.x + alpha * (curr.x - prev.x),
+                y: prev.y + alpha * (curr.y - prev.y),
+                kind: curr.kind,
+            });
+        }
+
+        result
     }
 }
 
@@ -161,19 +169,12 @@ impl BezierInterpolator {
         let t =
             ((timestamp.saturating_sub(p1.timestamp.nanos)) as f32 / span as f32).clamp(0.0, 1.0);
 
-        let distance = distance_between(p1, p2);
-        let strength = (distance / 240.0).clamp(0.15, 0.65);
-
-        let c1 = (
-            p1.x + (p2.x - p0.x) * strength / 3.0,
-            p1.y + (p2.y - p0.y) * strength / 3.0,
-        );
-        let c2 = (
-            p2.x - (p3.x - p1.x) * strength / 3.0,
-            p2.y - (p3.y - p1.y) * strength / 3.0,
-        );
-
-        let (x, y) = cubic_bezier((p1.x, p1.y), c1, c2, (p2.x, p2.y), t);
+        // Monotone cubic Hermite interpolation (Fritsch-Carlson method).
+        // Unlike Catmull-Rom, this guarantees the interpolated curve never
+        // overshoots the bounding box of consecutive sample values, preventing
+        // cumulative drift when the cursor changes direction or stops.
+        let (x, y) =
+            monotone_cubic_hermite((p0.x, p0.y), (p1.x, p1.y), (p2.x, p2.y), (p3.x, p3.y), t);
 
         CursorSample {
             timestamp: MediaTimestamp::from_nanos(timestamp),
@@ -184,29 +185,74 @@ impl BezierInterpolator {
     }
 }
 
-fn distance_between(a: CursorSample, b: CursorSample) -> f32 {
-    let dx = b.x - a.x;
-    let dy = b.y - a.y;
-    (dx * dx + dy * dy).sqrt()
-}
-
-fn cubic_bezier(
+/// Monotone cubic Hermite interpolation (Fritsch-Carlson method).
+///
+/// Given four points p0, p1, p2, p3, interpolates between p1 and p2 at
+/// parameter t ∈ [0, 1] using cubic Hermite basis functions. The tangent
+/// at each endpoint is derived from the secant slope of neighboring segments,
+/// then constrained (Fritsch-Carlson) to guarantee monotonicity: the
+/// interpolated value never overshoots min(p1, p2) or max(p1, p2).
+///
+/// This prevents the cumulative drift that Catmull-Rom Bezier causes when
+/// the cursor changes direction or decelerates.
+fn monotone_cubic_hermite(
     p0: (f32, f32),
-    c1: (f32, f32),
-    c2: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
     p3: (f32, f32),
     t: f32,
 ) -> (f32, f32) {
-    let inv = 1.0 - t;
-    let b0 = inv * inv * inv;
-    let b1 = 3.0 * inv * inv * t;
-    let b2 = 3.0 * inv * t * t;
-    let b3 = t * t * t;
+    let x = monotone_hermite_1d(p0.0, p1.0, p2.0, p3.0, t);
+    let y = monotone_hermite_1d(p0.1, p1.1, p2.1, p3.1, t);
+    (x, y)
+}
 
-    (
-        b0 * p0.0 + b1 * c1.0 + b2 * c2.0 + b3 * p3.0,
-        b0 * p0.1 + b1 * c1.1 + b2 * c2.1 + b3 * p3.1,
-    )
+/// 1D monotone cubic Hermite interpolation.
+///
+/// Computes tangents at p1 and p2 from neighboring secant slopes, then
+/// applies Fritsch-Carlson monotonicity constraint: if the tangent and
+/// secant have opposite signs, the tangent is zeroed; otherwise, the
+/// tangent is clamped to 3× the secant slope magnitude.
+fn monotone_hermite_1d(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    // Secant slope between p1 and p2.
+    let delta = p2 - p1;
+
+    // If p1 == p2, the segment is flat — return p1 regardless of t.
+    if delta.abs() < f32::EPSILON {
+        return p1;
+    }
+
+    // Tangent at p1: average of secants (p0→p1) and (p1→p2).
+    let d01 = p1 - p0;
+    let d12 = p2 - p1;
+    let d23 = p3 - p2;
+
+    let m1 = (d01 + d12) * 0.5;
+    let m2 = (d12 + d23) * 0.5;
+
+    // Fritsch-Carlson monotonicity constraint.
+    // If tangent and delta have opposite signs, zero the tangent.
+    // Otherwise, clamp tangent to 3× |delta| to prevent overshoot.
+    let m1 = if m1 * delta < 0.0 {
+        0.0
+    } else {
+        m1.signum() * m1.abs().min(3.0 * delta.abs())
+    };
+    let m2 = if m2 * delta < 0.0 {
+        0.0
+    } else {
+        m2.signum() * m2.abs().min(3.0 * delta.abs())
+    };
+
+    // Hermite basis functions.
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+
+    h00 * p1 + h10 * m1 + h01 * p2 + h11 * m2
 }
 
 const EXPAND_NANOS: u64 = 120_000_000;
@@ -969,5 +1015,128 @@ mod tests {
             "midpoint y should be ~100, got {}",
             mid_frame.y
         );
+    }
+
+    #[test]
+    fn smoothing_no_overshoot_after_rapid_movement_stop() {
+        // Simulate: cursor moves right quickly for 10 samples, then stops.
+        // BUG-0010_7: After rapid movement, overlay drifts in the direction
+        // of movement. The smoothed+interpolated position should converge
+        // to the final sample position within a few frames, without overshoot.
+        let mut samples = Vec::new();
+        // Rapid rightward movement: 100px per sample for 10 samples.
+        for i in 0..10 {
+            samples.push(sample(i * 16_666_667, 100.0 + i as f32 * 100.0, 540.0));
+        }
+        // Cursor stops at x=1100 for 20 more samples.
+        for i in 10..30 {
+            samples.push(sample(i * 16_666_667, 1100.0, 540.0));
+        }
+
+        let engine = CursorEffectEngine::default();
+        let timeline = engine
+            .build_timeline(&samples, &[], 60, 500_000_000)
+            .unwrap();
+
+        // After the cursor stops (t > 166ms), the overlay should converge
+        // to x≈1100 without overshooting. Check frames well after the stop
+        // (t=300ms = ~18 frames in) to allow convergence.
+        let frames_after_stop: Vec<_> = timeline
+            .frames
+            .iter()
+            .filter(|f| f.timestamp.nanos >= 300_000_000)
+            .collect();
+
+        for frame in &frames_after_stop {
+            assert!(
+                frame.x <= 1110.0,
+                "overlay overshot after stop: x={} at t={}ms (should be ≤1110)",
+                frame.x,
+                frame.timestamp.nanos / 1_000_000
+            );
+            assert!(
+                frame.x >= 1090.0,
+                "overlay undershot after stop: x={} at t={}ms (should be ≥1090)",
+                frame.x,
+                frame.timestamp.nanos / 1_000_000
+            );
+        }
+    }
+
+    #[test]
+    fn smoothing_no_cumulative_drift_on_direction_reversal() {
+        // Simulate: cursor moves right, then reverses left.
+        // The overlay should follow without accumulating drift in either direction.
+        let mut samples = Vec::new();
+        // Move right for 10 samples.
+        for i in 0..10 {
+            samples.push(sample(i * 16_666_667, 100.0 + i as f32 * 50.0, 540.0));
+        }
+        // Move left for 10 samples (reverse direction).
+        for i in 10..20 {
+            samples.push(sample(
+                i * 16_666_667,
+                600.0 - (i - 10) as f32 * 50.0,
+                540.0,
+            ));
+        }
+        // Stop at x=100 for 10 more samples.
+        for i in 20..30 {
+            samples.push(sample(i * 16_666_667, 100.0, 540.0));
+        }
+
+        let engine = CursorEffectEngine::default();
+        let timeline = engine
+            .build_timeline(&samples, &[], 60, 500_000_000)
+            .unwrap();
+
+        // After final stop (t > 400ms), overlay should be near x=100.
+        let frames_after_stop: Vec<_> = timeline
+            .frames
+            .iter()
+            .filter(|f| f.timestamp.nanos >= 400_000_000)
+            .collect();
+
+        for frame in &frames_after_stop {
+            assert!(
+                (frame.x - 100.0).abs() < 20.0,
+                "cumulative drift after reversal: x={} at t={}ms (should be ≈100)",
+                frame.x,
+                frame.timestamp.nanos / 1_000_000
+            );
+        }
+    }
+
+    #[test]
+    fn monotone_hermite_no_overshoot_on_step_function() {
+        // Step function: sudden jump from 100 to 500, then stay at 500.
+        // Monotone interpolation should never go below 100 or above 500.
+        let samples = vec![
+            sample(0, 100.0, 100.0),
+            sample(16_666_667, 100.0, 100.0),
+            sample(33_333_334, 500.0, 500.0),
+            sample(50_000_001, 500.0, 500.0),
+            sample(66_666_668, 500.0, 500.0),
+        ];
+
+        let engine = CursorEffectEngine::default();
+        let timeline = engine
+            .build_timeline(&samples, &[], 60, 80_000_000)
+            .unwrap();
+
+        for frame in &timeline.frames {
+            assert!(
+                frame.x >= 99.0 && frame.x <= 501.0,
+                "monotone overshoot: x={} at t={}ms",
+                frame.x,
+                frame.timestamp.nanos / 1_000_000
+            );
+            assert!(
+                frame.y >= 99.0 && frame.y <= 501.0,
+                "monotone overshoot: y={} at t={}ms",
+                frame.y,
+                frame.timestamp.nanos / 1_000_000
+            );
+        }
     }
 }

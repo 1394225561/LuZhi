@@ -49,6 +49,28 @@ static KIND_IBEAM_COUNT: AtomicU64 = AtomicU64::new(0);
 type CFTypeRef = *const std::ffi::c_void;
 type AXUIElementRef = *const std::ffi::c_void;
 type CFStringRef = *const std::ffi::c_void;
+type CGDirectDisplayID = u32;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -66,6 +88,12 @@ extern "C" {
         value: *mut CFTypeRef,
     ) -> i32;
     fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFTypeRef) -> i32;
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGMainDisplayID() -> CGDirectDisplayID;
+    fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -193,18 +221,31 @@ pub trait CursorKindProvider: Send + 'static {
 ///
 /// Uses `AXUIElementCreateSystemWide()` for cross-app hit-testing.
 /// Rate-limited to 10Hz (100ms cache TTL).
+///
+/// The AX API (`AXUIElementCopyElementAtPosition`) uses a coordinate space
+/// where Y increases upward (bottom-left origin), while `CGEventGetLocation`
+/// returns coordinates where Y increases downward (top-left origin).
+/// The provider flips the Y coordinate using the main display height.
 pub struct MacCursorKindProvider {
     kind_cache_ttl: Duration,
     cached_kind: CursorKind,
     last_query_at: Instant,
+    /// Main display height in points, used to flip Y coordinate for AX API.
+    display_height: f64,
 }
 
 impl MacCursorKindProvider {
     pub fn new() -> Self {
+        let display_height = unsafe {
+            let main_display = CGMainDisplayID();
+            let bounds = CGDisplayBounds(main_display);
+            bounds.size.height
+        };
         Self {
             kind_cache_ttl: Duration::from_millis(100),
             cached_kind: CursorKind::Arrow,
             last_query_at: Instant::now() - Duration::from_secs(1),
+            display_height,
         }
     }
 }
@@ -221,7 +262,9 @@ impl CursorKindProvider for MacCursorKindProvider {
         if now.duration_since(self.last_query_at) < self.kind_cache_ttl {
             return self.cached_kind;
         }
-        self.cached_kind = query_cursor_kind(global_x, global_y);
+        // Flip Y: CGEventGetLocation uses top-down, AX API uses bottom-up.
+        let ax_y = self.display_height - global_y as f64;
+        self.cached_kind = query_cursor_kind(global_x, ax_y);
         self.last_query_at = now;
         self.cached_kind
     }
@@ -267,7 +310,7 @@ fn maybe_log_classification(log: &AxClassificationLog, point: (f32, f32)) {
     );
 }
 
-/// Query the cursor kind at the given global screen position.
+/// Query the cursor kind at the given position.
 ///
 /// Uses `AXUIElementCreateSystemWide()` to create a system-wide accessibility
 /// object, then `AXUIElementCopyElementAtPosition()` to find the UI element
@@ -275,7 +318,12 @@ fn maybe_log_classification(log: &AxClassificationLog, point: (f32, f32)) {
 ///
 /// Falls back to `Arrow` on any failure (no accessibility permission, timeout,
 /// unexpected role, etc.).
-pub fn query_cursor_kind(global_x: f32, global_y: f32) -> CursorKind {
+///
+/// **Coordinate space**: The AX API expects coordinates in its own coordinate
+/// space (bottom-left origin, Y increases upward). The caller is responsible
+/// for flipping the Y coordinate from CGEvent space (top-left origin) before
+/// calling this function.
+pub fn query_cursor_kind(global_x: f32, ax_y: f64) -> CursorKind {
     let query_start = Instant::now();
     unsafe {
         // Use the proper system-wide accessibility object for cross-app hit-testing.
@@ -290,12 +338,7 @@ pub fn query_cursor_kind(global_x: f32, global_y: f32) -> CursorKind {
         AXUIElementSetMessagingTimeout(system, 0.05); // 50ms
 
         let mut element: AXUIElementRef = std::ptr::null();
-        let result = AXUIElementCopyElementAtPosition(
-            system,
-            global_x as f64,
-            global_y as f64,
-            &mut element,
-        );
+        let result = AXUIElementCopyElementAtPosition(system, global_x as f64, ax_y, &mut element);
         CFRelease(system);
 
         if result != K_AX_ERROR_SUCCESS || element.is_null() {
@@ -316,7 +359,7 @@ pub fn query_cursor_kind(global_x: f32, global_y: f32) -> CursorKind {
                 classified_kind: kind,
                 query_duration_nanos: query_duration,
             },
-            (global_x, global_y),
+            (global_x, ax_y as f32),
         );
 
         // Update kind distribution counters.

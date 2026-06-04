@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-04 | BUG-0010/0011 第四轮整改完成（Accessibility 权限、AX 诊断落盘、CursorKindProvider 注入、MediaTimelineDiagnostics、overlay PTS origin 对齐、raw positioning mode、Arrow 把柄、AX 采样日志）；12 个 Task 全部完成，待人工验证。
+> 最后更新：2026-06-04 | BUG-0010/0011 第五轮整改完成（EMA + 单调 Hermite 插值修复漂移；AX 坐标 Y 轴翻转修复 cursor kind 分类）；待人工验证。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,44 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-04：BUG-0010/0011 第五轮整改（光标漂移 + AX 坐标修复）
+
+输入文件：
+
+- 用户终端日志：cursor-kind-classify 始终返回 `role_chain=["AXMenuBar", "AXApplication"]`
+- 用户确认：漂移仅在开启平滑/贝塞尔时出现；光标在所有情况下都是箭头
+
+已完成：
+
+**BUG-0010（漂移）**：
+1. 移动平均替换为 EMA（alpha=0.4）— 停止后 ~2-3 帧收敛
+2. Catmull-Rom Bezier 替换为单调三次 Hermite 插值（Fritsch-Carlson）— 数学保证不过冲
+3. 新增 3 个漂移回归测试
+4. 清理未使用的 `distance_between` 函数
+
+**BUG-0011（光标分类）**：
+5. `MacCursorKindProvider` 新增 Y 轴翻转 — CGEvent top-down → AX bottom-up
+6. 通过 `CGDisplayBounds(CGMainDisplayID())` 获取显示器高度
+7. 更新 BUG.md 和 HANDOFF.md
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` **288 tests** 通过
+- `npm test -- --run` **55 tests** 通过
+- `cargo fmt --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/cursor_engine.rs`, `BUG.md`, `HANDOFF.md`
+
+人工验证门禁（第五轮）：
+
+1. BUG-0010 smooth：大浮动向左移动后静止，光标水平方向不向左偏移
+2. BUG-0010 smooth：大浮动向右移动后静止，光标水平方向不向右偏移
+3. BUG-0010 smooth：多次方向变化后静止，光标无累积漂移
+
+---
 
 ### 2026-06-04：BUG-0010/0011 第四轮整改完成
 
