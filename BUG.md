@@ -23,7 +23,7 @@
 
 ---
 
-### BUG-0011: 美化后的光标不好看
+### BUG-0011: 美化后的光标不好看 ✅ 已修复-待人工验证
 
 **现象**：经过美化后导出的视频，显示的光标是个白色的圆，不好看。
 
@@ -33,7 +33,16 @@
 2. 可点击区域时，形状为白底黑边的手的形状
 3. 输入框区域，形状为黑底白边的 "I" 的形状
 
-**补充**：如果无法通过代码绘制，需要借助 icon 的话，告诉我。
+**根因**：`CursorSample`/`CursorFrame` 没有 `kind` 字段，`CursorOverlayRenderer` 固定画白色圆点。
+
+**修复**：新增 `CursorKind` 枚举（Arrow/Hand/IBeam），扩展 `CursorSample`/`CursorFrame`，保留 kind 通过引擎管线，用静态 bitmask glyph 渲染替换圆点。
+
+**预防规则**：
+
+1. cursor timeline 必须携带稳定的 cursor kind 或 glyph 信息；renderer 不得固定画圆点冒充系统 cursor。
+2. target-aware cursor 识别失败时必须 fallback 为 Arrow，不能阻塞录制或导出。
+3. cursor glyph 必须有 hotspot metadata，并由测试验证 hotspot 对齐。
+4. cursor asset/bitmask 更新必须配套像素级或 snapshot-like 回归测试。
 
 ---
 
