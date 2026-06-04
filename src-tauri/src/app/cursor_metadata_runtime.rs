@@ -260,12 +260,11 @@ impl CursorMetadataRuntime {
             let mut recorder =
                 CursorMetadataRecorder::new(fps.max(1), beautify_snapshot, capture_geometry);
             while !thread_stop.load(Ordering::Relaxed) {
+                // Record timestamp BEFORE snapshot() to avoid AX query delay pollution.
+                let sample_timestamp = MediaTimestamp::from_nanos(session_clock.elapsed_nanos());
                 match source.snapshot() {
                     Ok(snapshot) => {
-                        recorder.record_snapshot(
-                            MediaTimestamp::from_nanos(session_clock.elapsed_nanos()),
-                            snapshot,
-                        );
+                        recorder.record_snapshot(sample_timestamp, snapshot);
                     }
                     Err(_) => {
                         recorder.record_snapshot_failure();
