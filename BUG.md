@@ -46,11 +46,26 @@
 
 ---
 
-### BUG-0012: 点击导出按钮后的交互不够优雅
+### BUG-0012: 点击导出按钮后的交互不够优雅 ✅ 已修复-待人工验证
 
 **现象**：点击导出，没有进度条反馈，直接从 0% 变成导出完成。
 
 **期望**：能够在界面上显示导出的百分比进度。
+
+**根因**：`FfmpegTrimExporter` 按 keep segment 上报进度（`(seg_idx+1)*99/total_keeps`），自动裁剪关闭时只有一个 keep segment，表现为 0% 停很久然后直接完成。
+
+**修复**：
+1. 升级为 frame/time 级进度：每帧视频编码后按 `processed_nanos / total_keep_nanos` 上报
+2. 准备阶段进度：cursor timeline 0→5%，cut timeline 5→10%
+3. 范围映射：FFmpeg 导出 1-99 映射到整体 10-99%
+4. 前端 terminal error 显示：失败时展示错误详情
+
+**预防规则**：
+
+1. export progress 不能只按 keep segment 上报；单段完整导出也必须产生中间进度。
+2. export progress 必须单调递增，且 100% 只能在导出和 artifact validation 成功后发送。
+3. 取消、失败、no-FFmpeg gate 等 terminal path 必须发送 `cancellable=false` 的 terminal progress，让 UI 清理导出状态。
+4. 前端进度条测试必须模拟中间 `export-progress` 事件，而不能只验证最终 summary。
 
 ---
 
