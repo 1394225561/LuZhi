@@ -71,30 +71,24 @@ static ARROW_GLYPH: CursorGlyph = CursorGlyph {
 };
 
 static ARROW_PIXELS: [GlyphPixel; 576] = [
-    B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
-    B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,
-    B,W,W,W,B,B,B,B,B,B,B,B,B,B,B,B,B,B,B,T,T,T,T,T,
-    B,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, B, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    B, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, B, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    B, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W,
+    W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T,
+    B, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W,
+    W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T,
+    T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T,
+    B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W,
+    W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W,
+    W, W, B, T, T, T, T, T, B, W, W, W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, T, T, T, T, T,
+    B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, B, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
 ];
 
 // Hand: 24×24 open hand silhouette. Hotspot at fingertip (12, 4).
@@ -107,30 +101,24 @@ static HAND_GLYPH: CursorGlyph = CursorGlyph {
 };
 
 static HAND_PIXELS: [GlyphPixel; 576] = [
-    T,T,T,T,T,T,T,T,B,B,B,B,T,T,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,T,B,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,T,B,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,B,B,B,B,W,W,W,W,W,W,B,B,B,T,T,T,T,T,T,T,T,
-    T,T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
-    T,T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
-    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
-    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
-    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
-    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
-    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
-    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
-    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
-    T,T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
-    T,T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,B,B,B,B,B,B,B,B,B,B,B,B,B,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
-    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    T, T, T, T, T, T, T, T, B, B, B, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B,
+    W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, B, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, B, B, B, B, W,
+    W, W, W, W, W, B, B, B, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W,
+    B, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T,
+    T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W,
+    W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W,
+    W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T,
+    T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W,
+    W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W,
+    W, B, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T,
+    T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, B, B, B, B, B,
+    B, B, B, B, B, B, B, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
 ];
 
 // IBeam: 16×24 I-beam text cursor. Hotspot at center (8, 12).
@@ -143,30 +131,18 @@ static IBEAM_GLYPH: CursorGlyph = CursorGlyph {
 };
 
 static IBEAM_PIXELS: [GlyphPixel; 384] = [
-    T,T,T,T,B,B,B,B,B,B,T,T,T,T,T,T,
-    T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,
-    T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,
-    T,T,T,T,B,B,W,W,B,B,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
-    T,T,T,T,B,B,W,W,B,B,T,T,T,T,T,T,
-    T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,
-    T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,
+    T, T, T, T, B, B, B, B, B, B, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T,
+    T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, B, B, W, W, B, B, T, T, T, T, T, T,
+    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
+    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
+    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
+    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
+    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
+    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
+    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
+    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
+    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, B, B, W, W, B, B, T, T, T, T, T, T,
+    T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T,
 ];
 
 /// Renders cursor overlay onto YUV420P video frames during export.
@@ -399,16 +375,7 @@ impl CursorOverlayRenderer {
 
         // Draw the glyph with alpha blending on Y plane.
         Self::draw_glyph_i64(
-            data,
-            w as i64,
-            h as i64,
-            linesize,
-            draw_x,
-            draw_y,
-            scaled_w,
-            scaled_h,
-            glyph,
-            scale,
+            data, w as i64, h as i64, linesize, draw_x, draw_y, scaled_w, scaled_h, glyph, scale,
         );
 
         // Click magnification ring: still drawn around hotspot.
@@ -679,7 +646,10 @@ mod tests {
         let has_visible = y_plane[near_center..near_center + 50]
             .iter()
             .any(|&b| b > 0);
-        assert!(has_visible, "arrow glyph should be visible near cursor position");
+        assert!(
+            has_visible,
+            "arrow glyph should be visible near cursor position"
+        );
     }
 
     #[test]

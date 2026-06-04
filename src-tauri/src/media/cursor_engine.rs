@@ -124,9 +124,7 @@ impl BezierInterpolator {
                 opacity: 1.0,
                 kind: samples
                     .iter()
-                    .min_by_key(|s| {
-                        (s.timestamp.nanos as i64 - timestamp as i64).unsigned_abs()
-                    })
+                    .min_by_key(|s| (s.timestamp.nanos as i64 - timestamp as i64).unsigned_abs())
                     .map(|s| s.kind)
                     .unwrap_or_default(),
             });
@@ -769,7 +767,9 @@ mod tests {
             },
         ];
         let engine = CursorEffectEngine::default();
-        let timeline = engine.build_timeline(&samples, &[], 30, 66_666_666).unwrap();
+        let timeline = engine
+            .build_timeline(&samples, &[], 30, 66_666_666)
+            .unwrap();
         assert!(!timeline.frames.is_empty());
         // All frames should have Hand kind since all samples are Hand.
         for frame in &timeline.frames {

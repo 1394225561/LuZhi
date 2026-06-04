@@ -25,8 +25,8 @@ use crate::core::capture::{
     ScreenCapture, VideoFrameSink,
 };
 use crate::core::config::CaptureConfig;
-use crate::core::timeline::CaptureGeometry;
 use crate::core::frame::{AudioChunk, FrameBuffer, PixelFormat, VideoFrame};
+use crate::core::timeline::CaptureGeometry;
 
 // ---------------------------------------------------------------------------
 // Send wrapper for SCStream
@@ -678,9 +678,8 @@ impl MacScreenCapture {
         let display = unsafe { displays.objectAtIndex(0) };
 
         // Read display geometry for cursor coordinate normalization.
-        let capture_geometry = unsafe {
-            Self::read_display_geometry(&display, config.width, config.height)
-        };
+        let capture_geometry =
+            unsafe { Self::read_display_geometry(&display, config.width, config.height) };
         self.last_capture_geometry = Some(capture_geometry);
 
         // Create content filter: capture the entire display.

@@ -272,8 +272,7 @@ mod tests {
 
     #[test]
     fn cursor_frame_defaults_to_arrow_for_old_json() {
-        let json =
-            r#"{"timestamp":{"nanos":0},"x":1.0,"y":2.0,"scale":1.0,"opacity":1.0}"#;
+        let json = r#"{"timestamp":{"nanos":0},"x":1.0,"y":2.0,"scale":1.0,"opacity":1.0}"#;
         let frame: CursorFrame = serde_json::from_str(json).unwrap();
         assert_eq!(frame.kind, CursorKind::Arrow);
     }

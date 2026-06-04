@@ -109,7 +109,12 @@ impl CursorMetadataRecorder {
         beautify_snapshot: BeautifyConfigSnapshot,
         capture_geometry: Option<CaptureGeometry>,
     ) -> Self {
-        Self::with_max_samples(fps, DEFAULT_MAX_CURSOR_SAMPLES, beautify_snapshot, capture_geometry)
+        Self::with_max_samples(
+            fps,
+            DEFAULT_MAX_CURSOR_SAMPLES,
+            beautify_snapshot,
+            capture_geometry,
+        )
     }
 
     pub fn with_max_samples(

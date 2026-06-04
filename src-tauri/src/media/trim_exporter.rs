@@ -934,10 +934,8 @@ impl TrimExporter for FfmpegTrimExporter {
                                     let mut processed_nanos: u64 = 0;
                                     for prev_seg_idx in 0..seg_idx {
                                         let prev_seg = &request.cut_timeline.keeps[prev_seg_idx];
-                                        processed_nanos += prev_seg
-                                            .end
-                                            .nanos
-                                            .saturating_sub(prev_seg.start.nanos);
+                                        processed_nanos +=
+                                            prev_seg.end.nanos.saturating_sub(prev_seg.start.nanos);
                                     }
                                     let frame_in_segment =
                                         (source_nanos).saturating_sub(segment.start.nanos);
@@ -945,9 +943,9 @@ impl TrimExporter for FfmpegTrimExporter {
                                         segment.end.nanos.saturating_sub(segment.start.nanos);
                                     processed_nanos += frame_in_segment.min(segment_duration);
 
-                                    let pct =
-                                        (1 + processed_nanos * 98 / total_keep_nanos).clamp(1, 99)
-                                            as u8;
+                                    let pct = (1 + processed_nanos * 98 / total_keep_nanos)
+                                        .clamp(1, 99)
+                                        as u8;
                                     if let Some(ref progress) = request.progress {
                                         progress_state.maybe_report(progress, pct);
                                     }
