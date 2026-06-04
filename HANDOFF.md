@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-04 | BUG-0010/0011 第三轮整改完成（timestamp 错位修复、AX system-wide root、parent chain 回溯、CursorKindDiagnostics、首帧诊断、Hand/IBeam rendered 测试、terminal error UI 测试）；12 个 Task 全部完成，待人工验证。
+> 最后更新：2026-06-04 | BUG-0010/0011 第四轮整改完成（Accessibility 权限、AX 诊断落盘、CursorKindProvider 注入、MediaTimelineDiagnostics、overlay PTS origin 对齐、raw positioning mode、Arrow 把柄、AX 采样日志）；12 个 Task 全部完成，待人工验证。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,53 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-04：BUG-0010/0011 第四轮整改完成
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-04-bug-0010-0011-fourth-round-code-review-root-cause-and-fix-plan.md`
+- `docs/superpowers/plans/2026-06-04-bug-0010-0011-fourth-round-rectification.md`
+
+已完成（12 个 Task）：
+
+1. 合并 AX 全局计数器到 metadata — `cursor_kind_diagnostics_merged()` 确保 failure/fallback 真实落盘
+2. 新增 MediaTimelineDiagnostics 和 CursorTimingDiagnostics 结构体
+3. 新增 Accessibility 权限检查 — `AXIsProcessTrusted()`，前端未授权时显示提示
+4. CursorKindProvider 注入 MacCursorSource — 删除重复 TTL，统一 provider 路径
+5. AX 分类限频采样日志 — role chain、result code、query duration，每秒最多 2 条
+6. 收集 MediaTimelineDiagnostics 数据 — 首帧 PTS origin、actual buffer size、cursor timing
+7. trim_exporter overlay timestamp 显式减去 source video PTS origin
+8. 新增 raw positioning 验收模式 — 关闭 smoothing/Bezier/magnification，仅渲染 glyph
+9. 录制时记录 Accessibility 权限状态到 CursorTimingDiagnostics
+10. 删除废弃的 AXUIElementCreateApplication FFI 声明
+11. Arrow glyph 添加尾部把柄 — 匹配 macOS 原生箭头光标外形
+12. 更新 BUG.md 第四轮整改状态和预防规则
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **285 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **350 unit + 10 integration tests** 通过
+- `npm test -- --run` **55 tests** 通过
+- `cargo build --manifest-path src-tauri/Cargo.toml` 通过
+- `npm run build` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/platform/macos/cursor_kind.rs`, `src-tauri/src/platform/macos/cursor_source.rs`, `src-tauri/src/platform/macos/permissions.rs`, `src-tauri/src/platform/macos/screen_capture_kit.rs`, `src-tauri/src/app/cursor_metadata_runtime.rs`, `src-tauri/src/app/permission_service.rs`, `src-tauri/src/app/events.rs`, `src-tauri/src/media/recording_metadata.rs`, `src-tauri/src/media/cursor_engine.rs`, `src-tauri/src/media/cursor_overlay.rs`, `src-tauri/src/media/trim_exporter.rs`, `src-tauri/src/core/timeline.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri.ts`, `src/App.tsx`, `src/App.test.tsx`, `BUG.md`, `HANDOFF.md`
+
+人工验证门禁（第四轮）：
+
+1. BUG-0010 raw：smoothing off + magnification off，静止四角和中心，overlay 与源位置重合
+2. BUG-0010 raw：水平匀速移动，overlay 不持续向右/向左漂
+3. BUG-0010 raw：多段移动，overlay 不出现累计漂移
+4. BUG-0011 Arrow：普通桌面导出光标为黑底白边箭头（带把柄）
+5. BUG-0011 Hand：Accessibility 授权后，悬停按钮/链接导出光标为白底黑边手形
+6. BUG-0011 IBeam：Accessibility 授权后，悬停文本框导出光标为黑底白边 I-beam
+7. BUG-0011 未授权：未授权 Accessibility 时，UI 显示提示，metadata 中 ax_query_failure_count > 0
+8. BUG-0011 Diagnostics：metadata 中 AX failure/fallback/kind distribution 可见
+
+---
 
 ### 2026-06-04：BUG-0010/0011 第三轮整改完成
 

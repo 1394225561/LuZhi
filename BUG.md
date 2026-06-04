@@ -73,6 +73,34 @@
 9. cursor position 和 cursor kind 对时间精度要求不同；position 必须贴近视频帧时间，kind 可以低频缓存。
 10. 首帧视频到达时必须记录 actual CVPixelBuffer 尺寸并与 CaptureGeometry 对比。
 
+#### BUG-0010_5: 第 3 轮人工验证结果
+
+**现象**：经过美化后导出的视频，光标的定位精读有改善，但是依旧存在偏移。目前光标在垂直方向上的高度定位是正确的，但是水平方向上的定位在录屏刚开始时是准确的，经过几段移动后，水平方向上的定位就开始出现向右偏移了。
+
+**期望**：美化的光标与源视频的光标是精确定位，没有偏移。
+
+#### BUG-0010_6: 第 4 轮整改状态
+
+✅ 已修复-第四轮待人工验证
+
+**本轮根因**：视频帧 PTS、cursor sample timestamp、effect timeline timestamp、导出 overlay source timestamp 缺少显式对齐契约；smoothing/Bezier 插值可能污染定位验收；source MP4 第一帧 PTS 不为 0 时 overlay 时间轴错位。
+
+**本轮整改内容**：
+
+1. 新增 MediaTimelineDiagnostics — 记录视频首帧 PTS origin、首帧 normalized timestamp、首末 cursor timestamp、帧数/样本数对比
+2. 新增 CursorTimingDiagnostics — 记录采样间隔 min/max/avg、几何外样本数、Accessibility 权限状态
+3. trim_exporter overlay timestamp 显式减去 source MP4 第一帧 PTS origin — 对齐 cursor timeline
+4. 新增 raw positioning 验收模式 — 关闭 smoothing/Bezier/magnification，仅渲染 glyph
+5. CursorTimingDiagnostics 写入 RecordingMetadata — stop 时完整结构化摘要
+6. 首帧 actual CVPixelBuffer size 写入 metadata（非仅 stderr）
+
+**新增预防规则**：
+
+11. video frame PTS、cursor sample timestamp、effect timeline timestamp、export overlay source timestamp 必须共享同一 source media timebase；任何 offset 都必须写入 metadata 并由测试验证。
+12. source artifact 第一帧 PTS 和 metadata 首帧/末帧时间必须有诊断对比；导出 overlay 不得隐式假设 raw_pts 从 0 开始。
+13. 光标定位验收必须先在 raw positioning mode 下进行，禁止 smoothing/magnification 影响坐标正确性判断。
+14. cursor diagnostics 必须落盘到 sidecar，不能只打印到 stderr。
+
 ---
 
 ### BUG-0011: 美化后的光标不好看 ✅ 已修复-待人工验证
@@ -166,6 +194,39 @@
 12. AX 查询必须设置 messaging timeout（建议 50ms），避免阻塞 cursor runtime。
 13. CursorKind 分类必须支持 parent chain 回溯（至少 3 层），覆盖浏览器/Electron/Tauri 场景。
 14. `AXStaticText` 不等于可编辑文本；只有 `AXTextField`/`AXTextArea` 或明确 editable 才判 IBeam。
+
+#### BUG-0011_5: 第 3 轮人工验证结果
+
+**现象**：完全没有改善，经过美化后导出的视频，显示的光标在任何情况下都是一个黑底白边箭头。
+
+**期望**：
+
+1. 普通桌面 — 导出光标为黑底白边箭头（**箭头的尾部加上把柄形状**）
+2. 悬停按钮/链接 — 导出光标为白底黑边手形（手形的 glyph 绘制需要更精致一些：大拇指和食指伸直，其他三个手指向掌心弯曲，视觉效果很短）
+3. 悬停文本框 — 导出光标为黑底白边 I-beam
+
+#### BUG-0011_6: 第 4 轮整改状态
+
+✅ 已修复-第四轮待人工验证
+
+**本轮根因**：(1) AX 查询依赖 Accessibility 权限，但权限模型未检查该权限；(2) AX 全局失败/回退计数未合并到 metadata，diagnostics 显示 0 掩盖了全部 fallback 事实；(3) CursorKindProvider trait 未接入生产路径，测试与生产脱节；(4) Arrow glyph 缺少尾部把柄。
+
+**本轮整改内容**：
+
+1. 新增 Accessibility 权限检查 — `AXIsProcessTrusted()`，前端未授权时显示提示
+2. 合并 AX 全局计数器到 metadata — `cursor_kind_diagnostics_merged()` 确保 failure/fallback 真实落盘
+3. CursorKindProvider 注入 MacCursorSource — 删除重复 TTL，统一 provider 路径
+4. AX 分类限频采样日志 — role chain、result code、query duration，每秒最多 2 条
+5. Arrow glyph 添加尾部把柄 — 匹配 macOS 原生箭头光标外形
+6. 删除废弃的 AXUIElementCreateApplication FFI 声明
+
+**新增预防规则**：
+
+15. target-aware cursor 依赖 Accessibility 时，Accessibility 权限必须进入录制前门禁和 metadata；未授权不能静默表现为全 Arrow。
+16. AX failure/fallback/kind distribution 必须来自实际 provider 并写入 RecordingMetadata，不能只统计 recorder 最终 kind。
+17. CursorKindProvider 必须可注入并覆盖生产路径，避免 mock 测试与真实采样脱节。
+18. 每次 target-aware 整改必须提供 role/action/classification 采样日志或等价诊断，证明 Hand/IBeam 的来源。
+19. glyph 形状变更必须配套 hotspot、颜色、关键形状区域的像素级测试。
 
 ---
 
