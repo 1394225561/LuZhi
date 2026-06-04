@@ -638,6 +638,17 @@ mod tests {
         }
     }
 
+    fn cursor_frame_with_kind(nanos: u64, x: f32, y: f32, kind: CursorKind) -> CursorFrame {
+        CursorFrame {
+            timestamp: MediaTimestamp::from_nanos(nanos),
+            x,
+            y,
+            scale: 1.0,
+            opacity: 1.0,
+            kind,
+        }
+    }
+
     #[test]
     fn renderer_returns_none_when_overlay_disabled() {
         let timeline = make_timeline(vec![cursor_frame(0, 100.0, 100.0)], false);
@@ -1025,6 +1036,83 @@ mod tests {
             y_plane[interior_offset] < 50,
             "arrow interior should be black (Y<50), got {}",
             y_plane[interior_offset]
+        );
+    }
+
+    #[test]
+    fn rendered_hand_has_correct_y_plane_values() {
+        let timeline = make_timeline(
+            vec![cursor_frame_with_kind(0, 960.0, 540.0, CursorKind::Hand)],
+            true,
+        );
+        let renderer = CursorOverlayRenderer::new(
+            timeline,
+            1920,
+            1080,
+            1920,
+            1080,
+            ExportScalePolicy::FitWithBars,
+            None,
+            Some((1920, 1080)),
+        )
+        .unwrap();
+
+        let mut frame = ffmpeg_next::util::frame::Video::new(
+            ffmpeg_next::util::format::Pixel::YUV420P,
+            1920,
+            1080,
+        );
+        renderer.draw_on_frame(&mut frame, 0, 30);
+
+        let y_plane = frame.data(0);
+        let linesize = y_plane.len() / 1080;
+
+        // Hand interior should be white fill (Y≈235).
+        // Find any white pixel in the hand glyph area near cursor position.
+        let hand_center_offset = 540 * linesize + 960;
+        let has_white = y_plane[hand_center_offset..hand_center_offset + 24]
+            .iter()
+            .any(|&y| y > 200);
+        assert!(
+            has_white,
+            "hand glyph should have white fill pixels near center"
+        );
+    }
+
+    #[test]
+    fn rendered_ibeam_has_correct_y_plane_values() {
+        let timeline = make_timeline(
+            vec![cursor_frame_with_kind(0, 960.0, 540.0, CursorKind::IBeam)],
+            true,
+        );
+        let renderer = CursorOverlayRenderer::new(
+            timeline,
+            1920,
+            1080,
+            1920,
+            1080,
+            ExportScalePolicy::FitWithBars,
+            None,
+            Some((1920, 1080)),
+        )
+        .unwrap();
+
+        let mut frame = ffmpeg_next::util::frame::Video::new(
+            ffmpeg_next::util::format::Pixel::YUV420P,
+            1920,
+            1080,
+        );
+        renderer.draw_on_frame(&mut frame, 0, 30);
+
+        let y_plane = frame.data(0);
+        let linesize = y_plane.len() / 1080;
+
+        // IBeam body should be black (Y≈16).
+        let ibeam_center_offset = (540 + 10) * linesize + (960 + 7);
+        assert!(
+            y_plane[ibeam_center_offset] < 50,
+            "ibeam body should be black (Y<50), got {}",
+            y_plane[ibeam_center_offset]
         );
     }
 }
