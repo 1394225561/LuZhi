@@ -23,6 +23,152 @@ use crate::app::error::{AppError, AppResult};
 use crate::core::timeline::{CursorFrame, CursorKind, EffectTimeline};
 use crate::media::export_presets::ExportScalePolicy;
 
+// ---------------------------------------------------------------------------
+// Cursor glyph data
+// ---------------------------------------------------------------------------
+
+/// A pixel in a cursor glyph: transparent, black with alpha, or white with alpha.
+#[derive(Clone, Copy)]
+enum GlyphPixel {
+    Transparent,
+    Black(u8),
+    White(u8),
+}
+
+/// Static cursor glyph with hotspot metadata.
+struct CursorGlyph {
+    width: usize,
+    height: usize,
+    /// Hotspot X relative to glyph top-left corner.
+    hotspot_x: f32,
+    /// Hotspot Y relative to glyph top-left corner.
+    hotspot_y: f32,
+    /// Row-major pixel data.
+    pixels: &'static [GlyphPixel],
+}
+
+/// Get the glyph for a given cursor kind.
+fn glyph_for_kind(kind: CursorKind) -> &'static CursorGlyph {
+    match kind {
+        CursorKind::Arrow => &ARROW_GLYPH,
+        CursorKind::Hand => &HAND_GLYPH,
+        CursorKind::IBeam => &IBEAM_GLYPH,
+    }
+}
+
+// Shorthand constants for the pixel arrays.
+const B: GlyphPixel = GlyphPixel::Black(255);
+const W: GlyphPixel = GlyphPixel::White(255);
+const T: GlyphPixel = GlyphPixel::Transparent;
+
+// Arrow: 24×24 diagonal arrow with outline. Hotspot at tip (0,0).
+static ARROW_GLYPH: CursorGlyph = CursorGlyph {
+    width: 24,
+    height: 24,
+    hotspot_x: 0.0,
+    hotspot_y: 0.0,
+    pixels: &ARROW_PIXELS,
+};
+
+static ARROW_PIXELS: [GlyphPixel; 576] = [
+    B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
+    B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,
+    B,W,W,W,B,B,B,B,B,B,B,B,B,B,B,B,B,B,B,T,T,T,T,T,
+    B,W,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,W,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    B,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+];
+
+// Hand: 24×24 open hand silhouette. Hotspot at fingertip (12, 4).
+static HAND_GLYPH: CursorGlyph = CursorGlyph {
+    width: 24,
+    height: 24,
+    hotspot_x: 12.0,
+    hotspot_y: 4.0,
+    pixels: &HAND_PIXELS,
+};
+
+static HAND_PIXELS: [GlyphPixel; 576] = [
+    T,T,T,T,T,T,T,T,B,B,B,B,T,T,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,B,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,B,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,B,B,B,B,W,W,W,W,W,W,B,B,B,T,T,T,T,T,T,T,T,
+    T,T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
+    T,T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
+    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
+    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
+    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
+    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
+    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
+    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
+    T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,
+    T,T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
+    T,T,B,W,W,W,W,W,W,W,W,W,W,W,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,B,B,B,B,B,B,B,B,B,B,B,B,B,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+    T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,T,
+];
+
+// IBeam: 16×24 I-beam text cursor. Hotspot at center (8, 12).
+static IBEAM_GLYPH: CursorGlyph = CursorGlyph {
+    width: 16,
+    height: 24,
+    hotspot_x: 8.0,
+    hotspot_y: 12.0,
+    pixels: &IBEAM_PIXELS,
+};
+
+static IBEAM_PIXELS: [GlyphPixel; 384] = [
+    T,T,T,T,B,B,B,B,B,B,T,T,T,T,T,T,
+    T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,
+    T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,
+    T,T,T,T,B,B,W,W,B,B,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,T,B,W,W,B,T,T,T,T,T,T,T,
+    T,T,T,T,B,B,W,W,B,B,T,T,T,T,T,T,
+    T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,
+    T,T,T,B,W,W,W,W,W,W,B,T,T,T,T,T,
+];
+
 /// Renders cursor overlay onto YUV420P video frames during export.
 pub struct CursorOverlayRenderer {
     timeline: EffectTimeline,
@@ -234,46 +380,38 @@ impl CursorOverlayRenderer {
             .min(max_radius);
 
         // BUG-008: Clamp mapped coordinates to a safe drawing range.
-        // Allow margin of max_radius so partially-visible cursors at edges
-        // are still drawn. Use i64 for all bounding box arithmetic to
-        // prevent overflow on debug builds.
+        // Allow margin for partially-visible cursors at edges.
         let margin = max_radius as i64;
         let out_x_clamped = (out_x.round() as i64).clamp(-margin, w as i64 + margin);
         let out_y_clamped = (out_y.round() as i64).clamp(-margin, h as i64 + margin);
 
-        // Skip if entirely outside the visible area (beyond margin).
-        if out_x_clamped + (radius as i64) < 0
-            || out_x_clamped - (radius as i64) > w as i64
-            || out_y_clamped + (radius as i64) < 0
-            || out_y_clamped - (radius as i64) > h as i64
-        {
-            return;
-        }
+        // Get the glyph for the current cursor kind.
+        let glyph = glyph_for_kind(cursor_frame.kind);
 
-        // Dark outline (radius + 1) for contrast.
-        Self::draw_circle_i64(
+        // Scale glyph dimensions.
+        let scale = clamped_scale;
+        let scaled_w = ((glyph.width as f32 * scale).round() as i64).max(1);
+        let scaled_h = ((glyph.height as f32 * scale).round() as i64).max(1);
+
+        // Calculate glyph top-left position: output position minus hotspot offset.
+        let draw_x = out_x_clamped - (glyph.hotspot_x * scale).round() as i64;
+        let draw_y = out_y_clamped - (glyph.hotspot_y * scale).round() as i64;
+
+        // Draw the glyph with alpha blending on Y plane.
+        Self::draw_glyph_i64(
             data,
             w as i64,
             h as i64,
             linesize,
-            out_x_clamped,
-            out_y_clamped,
-            radius as i64 + 1,
-            0,
-        );
-        // White fill for visibility.
-        Self::draw_circle_i64(
-            data,
-            w as i64,
-            h as i64,
-            linesize,
-            out_x_clamped,
-            out_y_clamped,
-            radius as i64,
-            235,
+            draw_x,
+            draw_y,
+            scaled_w,
+            scaled_h,
+            glyph,
+            scale,
         );
 
-        // Click magnification ring: when scale > 1.0, draw a faint outer ring.
+        // Click magnification ring: still drawn around hotspot.
         if clamped_scale > 1.05 {
             let ring_radius =
                 ((self.cursor_radius * clamped_scale * 1.4).round() as i64).min(max_radius as i64);
@@ -379,6 +517,65 @@ impl CursorOverlayRenderer {
             }
         }
     }
+
+    /// Draw a cursor glyph onto the Y plane with nearest-neighbor scaling.
+    ///
+    /// Each glyph pixel is scaled by `scale` and drawn at the corresponding
+    /// position. Alpha blending is done on the Y plane: existing pixel value
+    /// is blended with the glyph's target value based on the glyph alpha.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_glyph_i64(
+        data: &mut [u8],
+        frame_w: i64,
+        frame_h: i64,
+        linesize: usize,
+        draw_x: i64,
+        draw_y: i64,
+        scaled_w: i64,
+        scaled_h: i64,
+        glyph: &CursorGlyph,
+        scale: f32,
+    ) {
+        for sy in 0..scaled_h {
+            let gy = (sy as f32 / scale).floor() as usize;
+            if gy >= glyph.height {
+                continue;
+            }
+            let py = draw_y + sy;
+            if py < 0 || py >= frame_h {
+                continue;
+            }
+
+            for sx in 0..scaled_w {
+                let gx = (sx as f32 / scale).floor() as usize;
+                if gx >= glyph.width {
+                    continue;
+                }
+                let px = draw_x + sx;
+                if px < 0 || px >= frame_w {
+                    continue;
+                }
+
+                let glyph_pixel = &glyph.pixels[gy * glyph.width + gx];
+                let target_y: u8 = match glyph_pixel {
+                    GlyphPixel::Transparent => continue,
+                    GlyphPixel::Black(a) => {
+                        // Blend toward black (Y=16)
+                        let a_f = *a as f32 / 255.0;
+                        let existing = data[(py as usize) * linesize + px as usize] as f32;
+                        (existing * (1.0 - a_f) + 16.0 * a_f).round() as u8
+                    }
+                    GlyphPixel::White(a) => {
+                        // Blend toward white (Y=235)
+                        let a_f = *a as f32 / 255.0;
+                        let existing = data[(py as usize) * linesize + px as usize] as f32;
+                        (existing * (1.0 - a_f) + 235.0 * a_f).round() as u8
+                    }
+                };
+                data[(py as usize) * linesize + px as usize] = target_y;
+            }
+        }
+    }
 }
 
 /// Load an `EffectTimeline` from a JSON file path.
@@ -473,13 +670,16 @@ mod tests {
             1080,
         );
         renderer.draw_on_frame(&mut frame, 0, 30);
-        // Verify cursor pixels exist (Y plane should have non-zero values near center).
+        // Verify arrow glyph is visible near cursor position (hotspot at tip).
         let y_plane = frame.data(0);
-        let center_offset = 540 * (y_plane.len() / 1080) + 960;
-        assert!(
-            y_plane[center_offset] > 200,
-            "cursor center should be bright white"
-        );
+        let linesize = y_plane.len() / 1080;
+        // Arrow hotspot is at (0,0), so glyph draws starting at cursor position.
+        // The arrow tip pixel is black (Y=16). Check nearby pixels for glyph presence.
+        let near_center = 540 * linesize + 960;
+        let has_visible = y_plane[near_center..near_center + 50]
+            .iter()
+            .any(|&b| b > 0);
+        assert!(has_visible, "arrow glyph should be visible near cursor position");
     }
 
     #[test]
