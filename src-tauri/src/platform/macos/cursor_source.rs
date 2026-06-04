@@ -6,7 +6,7 @@
 
 use crate::app::cursor_metadata_runtime::{CursorSnapshot, CursorSnapshotSource};
 use crate::app::error::{AppError, AppResult};
-use crate::core::timeline::CursorKind;
+use crate::platform::macos::cursor_kind;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -66,6 +66,8 @@ impl CursorSnapshotSource for MacCursorSource {
             let point = CGEventGetLocation(event);
             CFRelease(event as CFTypeRef);
 
+            let kind = cursor_kind::query_cursor_kind(point.x as f32, point.y as f32);
+
             Ok(CursorSnapshot {
                 x: point.x as f32,
                 y: point.y as f32,
@@ -81,7 +83,7 @@ impl CursorSnapshotSource for MacCursorSource {
                     K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE,
                     K_CG_MOUSE_BUTTON_CENTER,
                 ),
-                kind: CursorKind::Arrow, // TODO: Task 5 接入真实 kind provider
+                kind,
             })
         }
     }

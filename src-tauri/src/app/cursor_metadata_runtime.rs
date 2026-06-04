@@ -740,4 +740,40 @@ mod tests {
         assert!((x - 1918.0).abs() < 2.0, "expected x≈1918, got {x}");
         assert!((y - 1078.0).abs() < 2.0, "expected y≈1078, got {y}");
     }
+
+    #[test]
+    fn recorder_preserves_cursor_kind_from_snapshot() {
+        let mut recorder = CursorMetadataRecorder::new(
+            30,
+            BeautifyConfigSnapshot {
+                cursor_magnification: false,
+                magnification_factor: 1.0,
+                cursor_smoothing: false,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+            None,
+        );
+
+        let kinds = [CursorKind::Arrow, CursorKind::Hand, CursorKind::IBeam];
+        for (i, kind) in kinds.iter().enumerate() {
+            recorder.record_snapshot(
+                MediaTimestamp::from_nanos(i as u64 * 33_333_333),
+                CursorSnapshot {
+                    x: 100.0,
+                    y: 100.0,
+                    left_down: false,
+                    right_down: false,
+                    middle_down: false,
+                    kind: *kind,
+                },
+            );
+        }
+
+        let metadata = recorder.finish(100_000_000, None);
+        assert_eq!(metadata.cursor_samples[0].kind, CursorKind::Arrow);
+        assert_eq!(metadata.cursor_samples[1].kind, CursorKind::Hand);
+        assert_eq!(metadata.cursor_samples[2].kind, CursorKind::IBeam);
+    }
 }
