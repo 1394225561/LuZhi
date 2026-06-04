@@ -90,6 +90,41 @@ pub struct BeautifyConfigSnapshot {
     pub raw_system_cursor_visible: bool,
 }
 
+/// Display geometry captured at recording start. Used to normalize
+/// cursor coordinates from macOS global screen space to source video
+/// pixel space.
+///
+/// Coordinate normalization formula:
+/// ```text
+/// local_x = global_x - content_origin_x
+/// local_y = global_y - content_origin_y
+/// source_x = local_x * stream_width / content_width
+/// source_y = local_y * stream_height / content_height
+/// ```
+///
+/// If the display Y-axis is flipped relative to `CGEventGetLocation()`,
+/// the mapper must flip `local_y` before scaling.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureGeometry {
+    /// CoreGraphics display identifier.
+    pub display_id: u32,
+    /// Content rect origin X in global screen points.
+    pub content_origin_x: f32,
+    /// Content rect origin Y in global screen points.
+    pub content_origin_y: f32,
+    /// Content rect width in global screen points.
+    pub content_width: f32,
+    /// Content rect height in global screen points.
+    pub content_height: f32,
+    /// Retina point-to-pixel scale (1.0 for non-Retina, 2.0 for Retina).
+    pub point_pixel_scale: f32,
+    /// Stream output width in pixels (source artifact frame width).
+    pub stream_width: u32,
+    /// Stream output height in pixels (source artifact frame height).
+    pub stream_height: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +183,26 @@ mod tests {
         let parsed: EffectTimeline = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed, timeline);
+    }
+
+    #[test]
+    fn capture_geometry_serializes_camel_case() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 25.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 2.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let json = serde_json::to_string(&geo).unwrap();
+        assert!(json.contains("\"displayId\""));
+        assert!(json.contains("\"contentOriginX\""));
+        assert!(json.contains("\"pointPixelScale\""));
+        let parsed: CaptureGeometry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, geo);
     }
 
     #[test]
