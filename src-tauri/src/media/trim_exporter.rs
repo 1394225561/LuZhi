@@ -921,8 +921,7 @@ impl TrimExporter for FfmpegTrimExporter {
                                     .as_ref()
                                     .map(|o| o.source_pts_origin_nanos())
                                     .unwrap_or(0);
-                                let source_nanos =
-                                    decoded_nanos.saturating_sub(source_pts_origin);
+                                let source_nanos = decoded_nanos.saturating_sub(source_pts_origin);
 
                                 // Draw cursor overlay onto the scaled output frame.
                                 // IMPORTANT: pass source timestamp (not output PTS)

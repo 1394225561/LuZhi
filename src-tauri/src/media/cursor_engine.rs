@@ -494,9 +494,7 @@ impl CursorEffectEngine {
         let mut t = 0u64;
         while t <= duration_nanos {
             // Advance sample_idx to the sample just before or at t.
-            while sample_idx + 1 < samples.len()
-                && samples[sample_idx + 1].timestamp.nanos <= t
-            {
+            while sample_idx + 1 < samples.len() && samples[sample_idx + 1].timestamp.nanos <= t {
                 sample_idx += 1;
             }
 
@@ -506,8 +504,7 @@ impl CursorEffectEngine {
                 let current_ts = current.timestamp.nanos;
                 let next_ts = next.timestamp.nanos;
                 if next_ts > current_ts {
-                    let alpha =
-                        (t - current_ts) as f32 / (next_ts - current_ts) as f32;
+                    let alpha = (t - current_ts) as f32 / (next_ts - current_ts) as f32;
                     let alpha = alpha.clamp(0.0, 1.0);
                     (
                         current.x + (next.x - current.x) * alpha,

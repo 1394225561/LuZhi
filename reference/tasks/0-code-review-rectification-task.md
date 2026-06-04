@@ -3,17 +3,17 @@
 ## 任务上下文
 
 输入内容：
-"docs/superpowers/reviews/2026-06-03-phase-6-bug-005-fourth-follow-up-rectification-code-review-findings.md" 文件完整内容。
+"docs/superpowers/reviews/2026-06-04-bug-0010-0011-fourth-round-code-review-root-cause-and-fix-plan.md" 文件完整内容。
 
 ---
 
 要求：
 
 - **完整仔细**阅读并参照上述 `输入内容` 索引的内容。
-- **严格遵守**本项目约束规则。
 - 修复所有 Critical、Important、Minor 问题。
 - 详细阅读索引内容的`bug 定位` `BUG.md 预防规则复核`，修复 `BUG.md` 记录的未解决 bug（或者类似**问题定位性质**章节，如果有的话）。
 - **重点**：仔细参照索引内容中的 `建议整改 Phase` `建议编码顺序` `推荐修复计划` 章节给出的规划（或者类似**推荐/建议性**章节，如果有的话）。
 - **重要**：不要遗漏问题！不要偷懒！一定要完整完成任务！
+- **严格遵守**本项目约束规则。
 
 ---

@@ -352,9 +352,7 @@ pub fn query_cursor_kind(global_x: f32, global_y: f32) -> CursorKind {
 ///
 /// For elements that hit child text/group/image (common in browsers, Electron, Tauri),
 /// we walk up to 3 parent levels looking for a clickable or editable container.
-unsafe fn element_role_to_cursor_kind(
-    element: AXUIElementRef,
-) -> (CursorKind, Vec<String>, bool) {
+unsafe fn element_role_to_cursor_kind(element: AXUIElementRef) -> (CursorKind, Vec<String>, bool) {
     let mut current = element;
     let mut retained_refs: Vec<AXUIElementRef> = Vec::new();
     let mut role_chain: Vec<String> = Vec::new();
