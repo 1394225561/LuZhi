@@ -48,6 +48,31 @@
 6. Y 轴翻转必须有真实设备证据或显式 geometry 语义，不能硬编码假设。
 7. `CursorSample` 和 `CursorClick` 必须处于同一 source video pixel 坐标空间。
 
+#### BUG-0010_3: 第 2 轮人工验证结果
+
+**现象**：经过美化后导出的视频，光标的定位依旧存在偏移。目前光标在垂直方向上的高度定位是正确的，但是水平方向上的定位偶尔准确，偶尔偏左，偶尔偏右。
+
+**期望**：美化的光标与源视频的光标是精确定位，没有偏移。
+
+#### BUG-0010_4: 第 3 轮整改状态
+
+✅ 已修复-第三轮待人工验证
+
+**本轮根因**：第二轮新增同步 AX kind 查询后，`MacCursorSource.snapshot()` 先读取坐标，再执行可能阻塞的 AX hit-test；`CursorMetadataRuntime` 在 `snapshot()` 返回后才写入 timestamp。坐标采样时刻和记录 timestamp 不再一致，横向移动时会出现方向相关的左右偏移。
+
+**本轮整改内容**：
+
+1. timestamp 移到 `snapshot()` 调用前 — 避免 AX 查询耗时污染坐标时间戳
+2. AX 查询限频 10Hz — `MacCursorSource` 持有 `SessionClock`，kind 缓存 100ms TTL
+3. `CursorSnapshot` 携带 `captured_at_nanos` — 精确记录坐标采样时刻
+4. 首帧 CVPixelBuffer 实际尺寸诊断日志
+
+**新增预防规则**：
+
+8. `snapshot()` 内任何可能阻塞的操作（如 AX 查询）不得污染坐标采样 timestamp。
+9. cursor position 和 cursor kind 对时间精度要求不同；position 必须贴近视频帧时间，kind 可以低频缓存。
+10. 首帧视频到达时必须记录 actual CVPixelBuffer 尺寸并与 CaptureGeometry 对比。
+
 ---
 
 ### BUG-0011: 美化后的光标不好看 ✅ 已修复-待人工验证
@@ -109,6 +134,38 @@
 8. `CursorKind` enum 存在不代表 target-aware 已完成；必须有 kind source。
 9. renderer 测试必须验证具体 glyph 类型和颜色，不得只检查"像素非零"。
 10. target-aware 查询失败必须 fallback Arrow，但 fallback 不能掩盖全部样本都未识别的问题，必须有诊断计数。
+
+#### BUG-0011_3: 第 2 轮人工验证结果
+
+**现象**：经过美化后导出的视频，显示的光标在任何情况下都是一个黑底白边箭头。
+
+**期望**：
+
+1. 普通桌面 — 导出光标为黑底白边箭头（箭头的尾部加上把柄形状）
+2. 悬停按钮/链接 — 导出光标为白底黑边手形（手形的 glyph 绘制需要更精致一些：大拇指和食指伸直，其他三个手指向掌心弯曲，视觉效果很短）
+3. 悬停文本框 — 导出光标为黑底白边 I-beam
+
+#### BUG-0011_4: 第 3 轮整改状态
+
+✅ 已修复-第三轮待人工验证
+
+**本轮根因**：AX provider 使用 `AXUIElementCreateApplication(0)` 作为 system-wide root，与 SDK 语义冲突。`AXUIElementCopyElementAtPosition()` 查询失败或被错误作用域限制，所有样本 fallback Arrow。
+
+**本轮整改内容**：
+
+1. AX provider 改用 `AXUIElementCreateSystemWide()` — 修复跨应用 hit-test
+2. 新增 `AXUIElementSetMessagingTimeout(50ms)` — 避免阻塞 cursor runtime
+3. CursorKind 分类扩展 — parent chain 回溯 3 层 + AXPress action 检查
+4. `AXStaticText` 不再默认判为 IBeam — 只有 `AXTextField`/`AXTextArea` 才判 IBeam
+5. CursorKindDiagnostics 写入 RecordingMetadata — stop 时打印结构化日志
+6. Hand/IBeam rendered Y plane 测试
+
+**新增预防规则**：
+
+11. AX hit-test 必须使用 `AXUIElementCreateSystemWide()`，不能用 `AXUIElementCreateApplication(0)`。
+12. AX 查询必须设置 messaging timeout（建议 50ms），避免阻塞 cursor runtime。
+13. CursorKind 分类必须支持 parent chain 回溯（至少 3 层），覆盖浏览器/Electron/Tauri 场景。
+14. `AXStaticText` 不等于可编辑文本；只有 `AXTextField`/`AXTextArea` 或明确 editable 才判 IBeam。
 
 ---
 
