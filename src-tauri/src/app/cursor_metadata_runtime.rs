@@ -609,4 +609,141 @@ mod tests {
         assert!((metadata.cursor_samples[0].x - 960.0).abs() < 0.01);
         assert!((metadata.cursor_samples[0].y - 540.0).abs() < 1.0);
     }
+
+    #[test]
+    fn cursor_mapper_maps_top_left_corner() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        // Top-left corner: global (0, 0).
+        // With flip_y=true: local_y = 1080 - 0 = 1080, source_y = 1080 → out of bounds!
+        // With flip_y=false: local_y = 0, source_y = 0 → correct.
+        let result = mapper.map(0.0, 0.0);
+        // Current implementation with flip_y=true returns None (out of bounds).
+        // This is WRONG — top-left should map to (0, 0).
+        assert!(
+            result.is_some(),
+            "top-left corner (0,0) should map to source (0,0), got None"
+        );
+        let (x, y) = result.unwrap();
+        assert!((x - 0.0).abs() < 1.0, "expected x≈0, got {x}");
+        assert!((y - 0.0).abs() < 1.0, "expected y≈0, got {y}");
+    }
+
+    #[test]
+    fn cursor_mapper_maps_bottom_right_corner() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        // Bottom-right corner: global (1919, 1079).
+        // With flip_y=true: local_y = 1080 - 1079 = 1, source_y = 1 → WRONG (should be ~1079).
+        // With flip_y=false: local_y = 1079, source_y = 1079 → correct.
+        let result = mapper.map(1919.0, 1079.0);
+        assert!(
+            result.is_some(),
+            "bottom-right corner should map to source, got None"
+        );
+        let (x, y) = result.unwrap();
+        assert!((x - 1919.0).abs() < 1.0, "expected x≈1919, got {x}");
+        assert!((y - 1079.0).abs() < 1.0, "expected y≈1079, got {y}");
+    }
+
+    #[test]
+    fn cursor_mapper_maps_lower_half_screen() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        // Cursor at y=900 (lower half of 1080p display).
+        // With flip_y=true: source_y = 1080 - 900 = 180 → WRONG (should be 900).
+        // With flip_y=false: source_y = 900 → correct.
+        let (x, y) = mapper.map(960.0, 900.0).unwrap();
+        assert!((x - 960.0).abs() < 0.01);
+        assert!((y - 900.0).abs() < 1.0, "expected y≈900, got {y}");
+    }
+
+    #[test]
+    fn cursor_mapper_handles_negative_origin() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: -1920.0,
+            content_origin_y: 0.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        // Cursor on secondary display at global x=-960 (center of -1920..0 range).
+        let (x, y) = mapper.map(-960.0, 540.0).unwrap();
+        assert!((x - 960.0).abs() < 0.01, "expected x≈960, got {x}");
+        assert!((y - 540.0).abs() < 1.0, "expected y≈540, got {y}");
+    }
+
+    #[test]
+    fn cursor_mapper_retina_top_left() {
+        // Retina 2x: display 960×540 points → 1920×1080 stream pixels.
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 960.0,
+            content_height: 540.0,
+            point_pixel_scale: 2.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        // Top-left in points: (0, 0).
+        let result = mapper.map(0.0, 0.0);
+        assert!(result.is_some(), "Retina top-left should not be out of bounds");
+        let (x, y) = result.unwrap();
+        assert!((x - 0.0).abs() < 1.0, "expected x≈0, got {x}");
+        assert!((y - 0.0).abs() < 1.0, "expected y≈0, got {y}");
+    }
+
+    #[test]
+    fn cursor_mapper_retina_bottom_right() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 960.0,
+            content_height: 540.0,
+            point_pixel_scale: 2.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        // Bottom-right in points: (959, 539).
+        let result = mapper.map(959.0, 539.0);
+        assert!(result.is_some(), "Retina bottom-right should not be out of bounds");
+        let (x, y) = result.unwrap();
+        assert!((x - 1918.0).abs() < 2.0, "expected x≈1918, got {x}");
+        assert!((y - 1078.0).abs() < 2.0, "expected y≈1078, got {y}");
+    }
 }
