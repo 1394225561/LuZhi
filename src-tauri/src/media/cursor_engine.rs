@@ -369,6 +369,9 @@ impl ClickEffectBuilder {
 pub struct CursorEffectEngine {
     click_config: ClickAnimationConfig,
     smoothing_enabled: bool,
+    /// When true, disable smoothing and Bezier interpolation for position verification.
+    /// Only renders glyph at raw cursor position with linear interpolation.
+    raw_positioning_mode: bool,
 }
 
 impl CursorEffectEngine {
@@ -376,6 +379,7 @@ impl CursorEffectEngine {
         Self {
             click_config,
             smoothing_enabled: true,
+            raw_positioning_mode: false,
         }
     }
 
@@ -383,7 +387,27 @@ impl CursorEffectEngine {
         Self {
             click_config,
             smoothing_enabled,
+            raw_positioning_mode: false,
         }
+    }
+
+    /// Create an engine in raw positioning mode: no smoothing, no Bezier,
+    /// linear interpolation only. Used for position verification.
+    pub fn raw_positioning() -> Self {
+        Self {
+            click_config: ClickAnimationConfig {
+                max_scale: 1.0,
+                peak_opacity: 0.0,
+            },
+            smoothing_enabled: false,
+            raw_positioning_mode: true,
+        }
+    }
+
+    /// Enable raw positioning mode (for testing).
+    pub fn with_raw_positioning_mode(mut self, raw: bool) -> Self {
+        self.raw_positioning_mode = raw;
+        self
     }
 }
 
@@ -419,14 +443,22 @@ impl CursorProcessor for CursorEffectEngine {
             });
         }
 
-        let smoothed = if self.smoothing_enabled {
+        let smoothed = if self.raw_positioning_mode {
+            // Raw mode: no smoothing.
+            samples.to_vec()
+        } else if self.smoothing_enabled {
             let smoother = CursorSmoother::new(SmoothingConfig::for_fps(fps));
             smoother.smooth(samples)
         } else {
             samples.to_vec()
         };
-        let interpolator = BezierInterpolator::new(fps);
-        let mut frames = interpolator.sample_frames(&smoothed, duration_nanos);
+        let mut frames = if self.raw_positioning_mode {
+            // Raw mode: linear interpolation between samples, no Bezier curve.
+            Self::linear_interpolate_frames(&smoothed, fps, duration_nanos)
+        } else {
+            let interpolator = BezierInterpolator::new(fps);
+            interpolator.sample_frames(&smoothed, duration_nanos)
+        };
         let click_effects = ClickEffectBuilder::new(self.click_config).build(clicks);
 
         apply_click_scale_to_frames(&mut frames, &click_effects);
@@ -440,6 +472,68 @@ impl CursorProcessor for CursorEffectEngine {
             render_cursor_overlay: true,
             source_pts_origin_nanos: 0,
         })
+    }
+}
+
+impl CursorEffectEngine {
+    /// Generate cursor frames via linear interpolation between samples.
+    /// Used in raw positioning mode to avoid smoothing/Bezier artifacts.
+    fn linear_interpolate_frames(
+        samples: &[CursorSample],
+        fps: u32,
+        duration_nanos: u64,
+    ) -> Vec<CursorFrame> {
+        if samples.is_empty() || fps == 0 {
+            return Vec::new();
+        }
+
+        let frame_interval = 1_000_000_000u64 / fps as u64;
+        let mut frames = Vec::new();
+        let mut sample_idx = 0;
+
+        let mut t = 0u64;
+        while t <= duration_nanos {
+            // Advance sample_idx to the sample just before or at t.
+            while sample_idx + 1 < samples.len()
+                && samples[sample_idx + 1].timestamp.nanos <= t
+            {
+                sample_idx += 1;
+            }
+
+            let current = &samples[sample_idx];
+            let (x, y, kind) = if sample_idx + 1 < samples.len() {
+                let next = &samples[sample_idx + 1];
+                let current_ts = current.timestamp.nanos;
+                let next_ts = next.timestamp.nanos;
+                if next_ts > current_ts {
+                    let alpha =
+                        (t - current_ts) as f32 / (next_ts - current_ts) as f32;
+                    let alpha = alpha.clamp(0.0, 1.0);
+                    (
+                        current.x + (next.x - current.x) * alpha,
+                        current.y + (next.y - current.y) * alpha,
+                        current.kind, // Kind is not interpolated.
+                    )
+                } else {
+                    (current.x, current.y, current.kind)
+                }
+            } else {
+                (current.x, current.y, current.kind)
+            };
+
+            frames.push(CursorFrame {
+                timestamp: crate::core::frame::MediaTimestamp::from_nanos(t),
+                x,
+                y,
+                scale: 1.0,
+                opacity: 1.0,
+                kind,
+            });
+
+            t += frame_interval;
+        }
+
+        frames
     }
 }
 
@@ -777,5 +871,106 @@ mod tests {
         for frame in &timeline.frames {
             assert_eq!(frame.kind, CursorKind::Hand);
         }
+    }
+
+    #[test]
+    fn effect_timeline_raw_positioning_disables_smoothing() {
+        // Create samples with a sharp direction change.
+        let samples = vec![
+            CursorSample {
+                timestamp: MediaTimestamp::from_nanos(0),
+                x: 100.0,
+                y: 100.0,
+                kind: CursorKind::Arrow,
+            },
+            CursorSample {
+                timestamp: MediaTimestamp::from_nanos(33_333_333),
+                x: 200.0,
+                y: 100.0,
+                kind: CursorKind::Arrow,
+            },
+            CursorSample {
+                timestamp: MediaTimestamp::from_nanos(66_666_666),
+                x: 100.0,
+                y: 100.0,
+                kind: CursorKind::Arrow,
+            }, // sharp reversal
+        ];
+
+        // Raw mode: frame at t=33ms should be exactly at (200, 100).
+        let engine = CursorEffectEngine::raw_positioning();
+        let timeline = engine
+            .build_timeline(&samples, &[], 30, 66_666_666)
+            .unwrap();
+
+        let frame_at_reversal = timeline
+            .frames
+            .iter()
+            .find(|f| {
+                let t = f.timestamp.nanos;
+                t >= 33_333_333 && t < 40_000_000
+            })
+            .expect("should have frame near reversal");
+
+        // In raw mode, position should be very close to sample position (no smoothing lag).
+        assert!(
+            (frame_at_reversal.x - 200.0).abs() < 5.0,
+            "raw mode x should be near 200, got {}",
+            frame_at_reversal.x
+        );
+
+        // Verify raw mode has scale=1.0 and opacity=1.0 (no magnification).
+        for frame in &timeline.frames {
+            assert_eq!(frame.scale, 1.0);
+            assert_eq!(frame.opacity, 1.0);
+        }
+    }
+
+    #[test]
+    fn raw_positioning_mode_linear_interpolation() {
+        // Two samples: one at t=0, one at t=1s.
+        let samples = vec![
+            CursorSample {
+                timestamp: MediaTimestamp::from_nanos(0),
+                x: 0.0,
+                y: 0.0,
+                kind: CursorKind::Arrow,
+            },
+            CursorSample {
+                timestamp: MediaTimestamp::from_nanos(1_000_000_000),
+                x: 100.0,
+                y: 200.0,
+                kind: CursorKind::Hand,
+            },
+        ];
+
+        let engine = CursorEffectEngine::raw_positioning();
+        let timeline = engine
+            .build_timeline(&samples, &[], 30, 1_000_000_000)
+            .unwrap();
+
+        // Frame near t=0.5s should be at ~(50, 100) — linear interpolation.
+        // Frame timestamps are quantized to 33_333_333ns intervals (30fps),
+        // so we search in a wider window.
+        let mid_frame = timeline
+            .frames
+            .iter()
+            .find(|f| {
+                let t = f.timestamp.nanos;
+                t >= 480_000_000 && t < 540_000_000
+            })
+            .expect("should have frame near midpoint");
+
+        // Allow wider tolerance due to integer rounding in frame_interval.
+        assert!(
+            (mid_frame.x - 50.0).abs() < 10.0,
+            "midpoint x should be ~50, got {}",
+            mid_frame.x
+        );
+        assert!(
+            (mid_frame.y - 100.0).abs() < 10.0,
+            "midpoint y should be ~100, got {}",
+            mid_frame.y
+        );
     }
 }
