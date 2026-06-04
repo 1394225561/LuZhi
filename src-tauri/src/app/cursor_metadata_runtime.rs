@@ -38,6 +38,8 @@ pub struct CursorCoordinateMapper {
     scale_x: f32,
     scale_y: f32,
     content_height: f32,
+    stream_width: f32,
+    stream_height: f32,
     /// Whether to flip Y axis (CGEventGetLocation Y increases upward,
     /// but video coordinates Y increases downward).
     flip_y: bool,
@@ -51,6 +53,8 @@ impl CursorCoordinateMapper {
             scale_x: geometry.stream_width as f32 / geometry.content_width.max(1.0),
             scale_y: geometry.stream_height as f32 / geometry.content_height.max(1.0),
             content_height: geometry.content_height,
+            stream_width: geometry.stream_width as f32,
+            stream_height: geometry.stream_height as f32,
             flip_y: true, // CGEventGetLocation Y is bottom-up, video is top-down
         }
     }
@@ -74,8 +78,8 @@ impl CursorCoordinateMapper {
         // Cursor outside capture region: negative or beyond stream dimensions.
         if source_x < 0.0
             || source_y < 0.0
-            || source_x > self.content_height / self.scale_y.max(f32::EPSILON)
-            || source_y > self.content_height / self.scale_y.max(f32::EPSILON)
+            || source_x > self.stream_width
+            || source_y > self.stream_height
         {
             return None;
         }
@@ -133,10 +137,25 @@ impl CursorMetadataRecorder {
             self.samples.pop_front();
         }
 
+        // Normalize coordinates from global screen space to source video pixel space.
+        let (norm_x, norm_y) = if let Some(ref mapper) = self.coordinate_mapper {
+            match mapper.map(snapshot.x, snapshot.y) {
+                Some((x, y)) => (x, y),
+                None => {
+                    // Cursor outside capture region: skip this sample.
+                    self.previous_snapshot = Some(snapshot);
+                    return;
+                }
+            }
+        } else {
+            // No geometry available: use raw coordinates (legacy behavior).
+            (snapshot.x, snapshot.y)
+        };
+
         self.samples.push_back(CursorSample {
             timestamp,
-            x: snapshot.x,
-            y: snapshot.y,
+            x: norm_x,
+            y: norm_y,
         });
 
         if let Some(previous) = self.previous_snapshot {
@@ -463,5 +482,124 @@ mod tests {
 
         assert_eq!(metadata.cursor_snapshot_success_count, 1);
         assert_eq!(metadata.cursor_snapshot_error_count, 1);
+    }
+
+    #[test]
+    fn cursor_mapper_maps_identity_display_to_stream_pixels() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        let (x, y) = mapper.map(960.0, 540.0).unwrap();
+        assert!((x - 960.0).abs() < 0.01);
+        // Y is flipped: global 540 (center) → local 540 → flipped 540 → source 540
+        assert!((y - 540.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn cursor_mapper_subtracts_non_zero_display_origin() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 256.0,
+            content_origin_y: 25.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        // Cursor at global (256+960, 25+540) should map to source (960, 540).
+        let (x, y) = mapper.map(1216.0, 565.0).unwrap();
+        assert!((x - 960.0).abs() < 0.01);
+        assert!((y - 540.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn cursor_mapper_scales_points_to_1080p_stream() {
+        // Retina 2x: display is 960x540 points, stream is 1920x1080 pixels.
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 960.0,
+            content_height: 540.0,
+            point_pixel_scale: 2.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        let (x, y) = mapper.map(480.0, 270.0).unwrap();
+        assert!((x - 960.0).abs() < 0.01);
+        assert!((y - 540.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn cursor_mapper_marks_cursor_outside_capture_region() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mapper = CursorCoordinateMapper::new(&geo);
+        // Cursor far outside the display area.
+        assert!(mapper.map(-500.0, -500.0).is_none());
+        assert!(mapper.map(5000.0, 5000.0).is_none());
+    }
+
+    #[test]
+    fn recorder_normalizes_coordinates_when_geometry_present() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mut recorder = CursorMetadataRecorder::new(
+            30,
+            BeautifyConfigSnapshot {
+                cursor_magnification: false,
+                magnification_factor: 1.0,
+                cursor_smoothing: false,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+            Some(geo),
+        );
+
+        // Cursor at center of display.
+        recorder.record_snapshot(
+            MediaTimestamp::from_nanos(0),
+            CursorSnapshot {
+                x: 960.0,
+                y: 540.0,
+                left_down: false,
+                right_down: false,
+                middle_down: false,
+            },
+        );
+
+        let metadata = recorder.finish(33_333_333, Some(geo));
+        assert_eq!(metadata.cursor_samples.len(), 1);
+        // Y is flipped: global 540 → local 540 → flipped 540 → source 540
+        assert!((metadata.cursor_samples[0].x - 960.0).abs() < 0.01);
+        assert!((metadata.cursor_samples[0].y - 540.0).abs() < 1.0);
     }
 }
