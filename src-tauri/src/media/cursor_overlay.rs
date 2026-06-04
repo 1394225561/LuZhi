@@ -61,7 +61,8 @@ const B: GlyphPixel = GlyphPixel::Black(255);
 const W: GlyphPixel = GlyphPixel::White(255);
 const T: GlyphPixel = GlyphPixel::Transparent;
 
-// Arrow: 24×24 diagonal arrow with outline. Hotspot at tip (0,0).
+// Arrow: 24×24 diagonal arrow. Hotspot at tip (0,0).
+// Colors: white outline (W), black fill (B) — matches macOS standard arrow.
 static ARROW_GLYPH: CursorGlyph = CursorGlyph {
     width: 24,
     height: 24,
@@ -71,24 +72,24 @@ static ARROW_GLYPH: CursorGlyph = CursorGlyph {
 };
 
 static ARROW_PIXELS: [GlyphPixel; 576] = [
-    B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, B, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    B, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, B, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    B, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W,
-    W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T,
-    B, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W,
-    W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T,
-    T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T,
-    B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W,
-    W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W,
-    W, W, B, T, T, T, T, T, B, W, W, W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, T, T, T, T, T,
-    B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, B, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, W, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    W, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, W, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    W, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B,
+    B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T,
+    W, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B,
+    B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T,
+    T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T,
+    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, W, B, B, B, B, B, B, B,
+    B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B,
+    B, B, W, T, T, T, T, T, W, B, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, T, T, T, T, T, W,
+    B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, W, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
 ];
 
 // Hand: 24×24 open hand silhouette. Hotspot at fingertip (12, 4).
@@ -122,6 +123,7 @@ static HAND_PIXELS: [GlyphPixel; 576] = [
 ];
 
 // IBeam: 16×24 I-beam text cursor. Hotspot at center (8, 12).
+// Colors: white outline (W), black body (B) — matches macOS standard I-beam.
 static IBEAM_GLYPH: CursorGlyph = CursorGlyph {
     width: 16,
     height: 24,
@@ -131,18 +133,18 @@ static IBEAM_GLYPH: CursorGlyph = CursorGlyph {
 };
 
 static IBEAM_PIXELS: [GlyphPixel; 384] = [
-    T, T, T, T, B, B, B, B, B, B, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T,
-    T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, B, B, W, W, B, B, T, T, T, T, T, T,
-    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
-    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
-    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
-    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
-    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
-    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
-    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
-    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T,
-    T, T, T, T, T, B, W, W, B, T, T, T, T, T, T, T, T, T, T, T, B, B, W, W, B, B, T, T, T, T, T, T,
-    T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T,
+    T, T, T, T, W, W, W, W, W, W, T, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T,
+    T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, W, W, B, B, W, W, T, T, T, T, T, T,
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
+    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, W, W, B, B, W, W, T, T, T, T, T, T,
+    T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T,
 ];
 
 /// Renders cursor overlay onto YUV420P video frames during export.
