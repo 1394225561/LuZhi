@@ -258,6 +258,7 @@ impl CursorMetadataRecorder {
             )),
             media_timeline_diagnostics: None,
             cursor_timing_diagnostics: None,
+            source_pts_origin_nanos: 0,
         }
     }
 }

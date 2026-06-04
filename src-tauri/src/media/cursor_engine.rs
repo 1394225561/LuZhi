@@ -415,6 +415,7 @@ impl CursorProcessor for CursorEffectEngine {
                 click_effects: Vec::new(),
                 raw_system_cursor_visible: false,
                 render_cursor_overlay: true,
+                source_pts_origin_nanos: 0,
             });
         }
 
@@ -437,6 +438,7 @@ impl CursorProcessor for CursorEffectEngine {
             click_effects,
             raw_system_cursor_visible: false,
             render_cursor_overlay: true,
+            source_pts_origin_nanos: 0,
         })
     }
 }

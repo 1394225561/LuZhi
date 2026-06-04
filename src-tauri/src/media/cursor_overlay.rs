@@ -384,6 +384,12 @@ impl CursorOverlayRenderer {
         })
     }
 
+    /// Get the source video PTS origin in nanoseconds.
+    /// Used by trim_exporter to align decoded PTS with cursor timeline.
+    pub fn source_pts_origin_nanos(&self) -> u64 {
+        self.timeline.source_pts_origin_nanos
+    }
+
     /// Draw cursor overlay onto the output frame at the given source timestamp.
     ///
     /// `source_timestamp_nanos` is the timestamp in the **original source
@@ -624,6 +630,7 @@ mod tests {
             click_effects: Vec::new(),
             raw_system_cursor_visible: !render,
             render_cursor_overlay: render,
+            source_pts_origin_nanos: 0,
         }
     }
 

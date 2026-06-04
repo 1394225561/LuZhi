@@ -56,6 +56,8 @@ struct StreamOutputIvars {
     session_clock: Arc<crate::core::clock::SessionClock>,
     /// (first_cmsamplebuffer_pts_nanos, session_clock_elapsed_at_first_pts)
     pts_origin: Mutex<Option<(u64, u64)>>,
+    /// Actual CVPixelBuffer size on first frame (width, height).
+    first_frame_actual_size: Mutex<Option<(u32, u32)>>,
 }
 
 // Only protocol conformance goes inside define_class! — all helper functions
@@ -106,6 +108,7 @@ impl StreamOutput {
             audio_sink: Mutex::new(Some(audio_sink)),
             session_clock,
             pts_origin: Mutex::new(None),
+            first_frame_actual_size: Mutex::new(None),
         });
         unsafe { objc2::msg_send![super(this), init] }
     }
@@ -196,14 +199,16 @@ unsafe fn handle_video_frame(delegate: &StreamOutput, sample_buffer: &CMSampleBu
     let base_address = cvpixelbuffer_get_base_address(image_buffer);
     let bytes_per_row = cvpixelbuffer_get_bytes_per_row(image_buffer);
 
-    // First-frame diagnostics: log actual CVPixelBuffer size for coordinate mapping verification.
-    static FIRST_FRAME_DIAGNOSED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    if !FIRST_FRAME_DIAGNOSED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!(
-            "[sck-first-frame] actual_buffer={}×{} bytes_per_row={}",
-            width, height, bytes_per_row
-        );
+    // First-frame diagnostics: store actual CVPixelBuffer size and log for verification.
+    {
+        let mut size_guard = delegate.ivars().first_frame_actual_size.lock().unwrap();
+        if size_guard.is_none() {
+            *size_guard = Some((width as u32, height as u32));
+            eprintln!(
+                "[sck-first-frame] actual_buffer={}×{} bytes_per_row={}",
+                width, height, bytes_per_row
+            );
+        }
     }
 
     if base_address.is_null() {
@@ -664,6 +669,23 @@ impl MacScreenCapture {
     /// Returns the capture geometry from the last `start_stream()` call.
     pub fn last_capture_geometry(&self) -> Option<CaptureGeometry> {
         self.last_capture_geometry
+    }
+
+    /// Get the first video frame's raw PTS nanos and session entry nanos.
+    /// Returns (first_pts_nanos, session_entry_nanos) if a frame has been received.
+    pub fn first_frame_timing(&self) -> Option<(u64, u64)> {
+        self.delegate
+            .as_ref()
+            .and_then(|d| d.ivars().pts_origin.lock().ok())
+            .and_then(|guard| *guard)
+    }
+
+    /// Get the actual CVPixelBuffer size of the first video frame (width, height).
+    pub fn first_frame_actual_size(&self) -> Option<(u32, u32)> {
+        self.delegate
+            .as_ref()
+            .and_then(|d| d.ivars().first_frame_actual_size.lock().ok())
+            .and_then(|guard| *guard)
     }
 
     /// Creates and starts an SCStream with the given configuration.

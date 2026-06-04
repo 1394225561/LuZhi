@@ -37,6 +37,10 @@ pub struct RecordingMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub cursor_timing_diagnostics: Option<CursorTimingDiagnostics>,
+    /// The raw PTS (in nanoseconds) of the first video frame from CMSampleBuffer.
+    /// Used by trim_exporter to align decoded source PTS with cursor timeline.
+    #[serde(default)]
+    pub source_pts_origin_nanos: u64,
 }
 
 /// Diagnostics for aligning video frame PTS, cursor timestamps, and export overlay timestamps.
@@ -197,6 +201,7 @@ mod tests {
             cursor_kind_diagnostics: None,
             media_timeline_diagnostics: None,
             cursor_timing_diagnostics: None,
+            source_pts_origin_nanos: 0,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -227,6 +232,7 @@ mod tests {
             cursor_kind_diagnostics: None,
             media_timeline_diagnostics: None,
             cursor_timing_diagnostics: None,
+            source_pts_origin_nanos: 0,
         };
 
         RecordingMetadataWriter::write_metadata(&path, &metadata).unwrap();
@@ -273,6 +279,7 @@ mod tests {
                 samples_outside_geometry: 0,
                 accessibility_permission_at_start: "granted".to_string(),
             }),
+            source_pts_origin_nanos: 0,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();

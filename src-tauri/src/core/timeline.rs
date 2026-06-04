@@ -97,6 +97,12 @@ pub struct EffectTimeline {
     pub raw_system_cursor_visible: bool,
     /// Whether Phase 6 compositor should render a cursor overlay.
     pub render_cursor_overlay: bool,
+    /// The PTS origin of the source video in nanoseconds.
+    /// When decoding source MP4, the first frame's PTS may not be 0 in the
+    /// SessionClock time domain. Overlay timestamps must subtract this origin
+    /// to align with cursor timeline.
+    #[serde(default)]
+    pub source_pts_origin_nanos: u64,
 }
 
 /// Beautify config frozen at the moment recording starts. Stored in
@@ -203,6 +209,7 @@ mod tests {
             }],
             raw_system_cursor_visible: false,
             render_cursor_overlay: true,
+            source_pts_origin_nanos: 0,
         };
 
         let json = serde_json::to_string(&timeline).unwrap();

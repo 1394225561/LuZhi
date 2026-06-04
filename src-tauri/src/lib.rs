@@ -508,10 +508,15 @@ fn build_effect_timeline_from_metadata(
             click_effects: Vec::new(),
             raw_system_cursor_visible: true,
             render_cursor_overlay: false,
+            source_pts_origin_nanos: 0,
         }
     };
     timeline.raw_system_cursor_visible = raw_visible;
     timeline.render_cursor_overlay = render_cursor_overlay;
+    // Set source PTS origin from metadata for overlay timestamp alignment.
+    if let Some(ref mtd) = metadata.media_timeline_diagnostics {
+        timeline.source_pts_origin_nanos = mtd.first_video_pts_nanos_raw;
+    }
 
     Ok(timeline)
 }
@@ -1277,6 +1282,7 @@ mod tests {
             cursor_kind_diagnostics: None,
             media_timeline_diagnostics: None,
             cursor_timing_diagnostics: None,
+            source_pts_origin_nanos: 0,
         }
     }
 

@@ -911,10 +911,18 @@ impl TrimExporter for FfmpegTrimExporter {
                                 }
 
                                 // Compute source timestamp for cursor overlay and progress.
-                                let source_nanos =
+                                let decoded_nanos =
                                     time_base_units_to_nanos(raw_pts, video_time_base)
                                         .unwrap_or(0)
                                         .max(0) as u64;
+                                // Align decoded PTS with cursor timeline: subtract source MP4's
+                                // first-PTS origin so overlay queries match cursor sample timestamps.
+                                let source_pts_origin = cursor_overlay
+                                    .as_ref()
+                                    .map(|o| o.source_pts_origin_nanos())
+                                    .unwrap_or(0);
+                                let source_nanos =
+                                    decoded_nanos.saturating_sub(source_pts_origin);
 
                                 // Draw cursor overlay onto the scaled output frame.
                                 // IMPORTANT: pass source timestamp (not output PTS)
