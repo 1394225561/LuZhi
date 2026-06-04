@@ -223,13 +223,16 @@ impl MacRecordingService {
         // Extract trim sensitivity before moving beautify_snapshot into cursor runtime.
         let trim_sensitivity = beautify_snapshot.trim_sensitivity.clone();
 
+        // Read capture geometry from screen capture for cursor coordinate normalization.
+        let capture_geometry = self.screen_capture.last_capture_geometry();
+
         // Start cursor metadata runtime for cursor effects.
         self.cursor_runtime = Some(CursorMetadataRuntime::spawn(
             MacCursorSource::new(),
             config.fps,
             session_clock.clone(),
             beautify_snapshot,
-            None, // Task 4 will wire capture_geometry from screen capture
+            capture_geometry,
         ));
 
         // Spawn frame consumer thread (drain mode).
