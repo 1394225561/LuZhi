@@ -751,4 +751,29 @@ mod tests {
             assert_eq!(frame.opacity, 1.0);
         }
     }
+
+    #[test]
+    fn cursor_engine_preserves_sample_kind_through_interpolation() {
+        let samples = vec![
+            CursorSample {
+                timestamp: MediaTimestamp::from_nanos(0),
+                x: 100.0,
+                y: 100.0,
+                kind: CursorKind::Hand,
+            },
+            CursorSample {
+                timestamp: MediaTimestamp::from_nanos(33_333_333),
+                x: 200.0,
+                y: 200.0,
+                kind: CursorKind::Hand,
+            },
+        ];
+        let engine = CursorEffectEngine::default();
+        let timeline = engine.build_timeline(&samples, &[], 30, 66_666_666).unwrap();
+        assert!(!timeline.frames.is_empty());
+        // All frames should have Hand kind since all samples are Hand.
+        for frame in &timeline.frames {
+            assert_eq!(frame.kind, CursorKind::Hand);
+        }
+    }
 }
