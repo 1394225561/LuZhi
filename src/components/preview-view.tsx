@@ -110,7 +110,12 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
     let unlisten: (() => void) | undefined
     void onExportProgress((payload) => {
       setExportProgress(payload)
-      setIsExporting(payload.cancellable && payload.progress < 100)
+      if (!payload.cancellable && payload.error) {
+        // Terminal error: show error briefly, then clear.
+        setIsExporting(false)
+      } else {
+        setIsExporting(payload.cancellable && payload.progress < 100)
+      }
     }).then((fn) => { unlisten = fn })
     return () => { unlisten?.() }
   }, [])
