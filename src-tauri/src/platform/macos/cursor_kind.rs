@@ -232,6 +232,42 @@ impl CursorKindProvider for MacCursorKindProvider {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Per-query classification log entry for debugging why kind was assigned.
+#[derive(Debug, Clone)]
+struct AxClassificationLog {
+    result_code: i32,
+    role_chain: Vec<String>,
+    has_ax_press: bool,
+    classified_kind: CursorKind,
+    query_duration_nanos: u64,
+}
+
+/// Rate-limited sampling log: print at most once per second.
+static LAST_LOG_TIME: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+const LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+fn maybe_log_classification(log: &AxClassificationLog, point: (f32, f32)) {
+    let Ok(mut last) = LAST_LOG_TIME.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    if let Some(last_time) = *last {
+        if now.duration_since(last_time) < LOG_INTERVAL {
+            return;
+        }
+    }
+    *last = Some(now);
+    eprintln!(
+        "[cursor-kind-classify] point=({:.0},{:.0}) kind={:?} role_chain={:?} ax_press={} rc={} dur={}µs",
+        point.0, point.1,
+        log.classified_kind,
+        log.role_chain,
+        log.has_ax_press,
+        log.result_code,
+        log.query_duration_nanos / 1000,
+    );
+}
+
 /// Query the cursor kind at the given global screen position.
 ///
 /// Uses `AXUIElementCreateSystemWide()` to create a system-wide accessibility
@@ -241,6 +277,7 @@ impl CursorKindProvider for MacCursorKindProvider {
 /// Falls back to `Arrow` on any failure (no accessibility permission, timeout,
 /// unexpected role, etc.).
 pub fn query_cursor_kind(global_x: f32, global_y: f32) -> CursorKind {
+    let query_start = Instant::now();
     unsafe {
         // Use the proper system-wide accessibility object for cross-app hit-testing.
         // AXUIElementCreateApplication(0) is NOT a system-wide object per Apple SDK.
@@ -267,8 +304,21 @@ pub fn query_cursor_kind(global_x: f32, global_y: f32) -> CursorKind {
             return CursorKind::Arrow;
         }
 
-        let kind = element_role_to_cursor_kind(element);
+        let (kind, role_chain, has_ax_press) = element_role_to_cursor_kind(element);
         CFRelease(element);
+
+        // Rate-limited classification logging for debugging.
+        let query_duration = query_start.elapsed().as_nanos() as u64;
+        maybe_log_classification(
+            &AxClassificationLog {
+                result_code: result,
+                role_chain,
+                has_ax_press,
+                classified_kind: kind,
+                query_duration_nanos: query_duration,
+            },
+            (global_x, global_y),
+        );
 
         // Update kind distribution counters.
         match kind {
@@ -294,6 +344,8 @@ pub fn query_cursor_kind(global_x: f32, global_y: f32) -> CursorKind {
 
 /// Map an AXUIElement's role to a CursorKind, with parent chain fallback.
 ///
+/// Returns `(kind, role_chain, has_ax_press)` for classification auditing.
+///
 /// Classification strategy:
 /// - IBeam: AXTextField, AXTextArea, or editable text
 /// - Hand: AXButton, AXLink, AXMenuItem, or element/parent supports AXPress
@@ -301,19 +353,30 @@ pub fn query_cursor_kind(global_x: f32, global_y: f32) -> CursorKind {
 ///
 /// For elements that hit child text/group/image (common in browsers, Electron, Tauri),
 /// we walk up to 3 parent levels looking for a clickable or editable container.
-unsafe fn element_role_to_cursor_kind(element: AXUIElementRef) -> CursorKind {
+unsafe fn element_role_to_cursor_kind(
+    element: AXUIElementRef,
+) -> (CursorKind, Vec<String>, bool) {
     let mut current = element;
     let mut retained_refs: Vec<AXUIElementRef> = Vec::new();
+    let mut role_chain: Vec<String> = Vec::new();
+    let mut has_ax_press = false;
 
     for depth in 0..4 {
         // Max 4 levels: element + 3 parents.
         let role = read_role(current);
 
+        // Record role chain for auditing.
+        if let Some(ref r) = role {
+            role_chain.push(r.clone());
+        } else {
+            role_chain.push(format!("(unknown@depth{depth})"));
+        }
+
         match role.as_deref() {
             // IBeam: text input elements (not plain static text).
             Some("AXTextField") | Some("AXTextArea") => {
                 cleanup_refs(&retained_refs);
-                return CursorKind::IBeam;
+                return (CursorKind::IBeam, role_chain, has_ax_press);
             }
             // Hand: clickable elements.
             Some("AXButton")
@@ -325,15 +388,16 @@ unsafe fn element_role_to_cursor_kind(element: AXUIElementRef) -> CursorKind {
             | Some("AXPopUpButton")
             | Some("AXComboBox") => {
                 cleanup_refs(&retained_refs);
-                return CursorKind::Hand;
+                return (CursorKind::Hand, role_chain, has_ax_press);
             }
             _ => {}
         }
 
         // Check if element supports AXPress action (clickable but role not in list).
         if element_supports_press(current) {
+            has_ax_press = true;
             cleanup_refs(&retained_refs);
-            return CursorKind::Hand;
+            return (CursorKind::Hand, role_chain, has_ax_press);
         }
 
         // Walk up to parent (except on last iteration).
@@ -348,7 +412,7 @@ unsafe fn element_role_to_cursor_kind(element: AXUIElementRef) -> CursorKind {
     }
 
     cleanup_refs(&retained_refs);
-    CursorKind::Arrow
+    (CursorKind::Arrow, role_chain, has_ax_press)
 }
 
 /// Clean up retained parent refs.
