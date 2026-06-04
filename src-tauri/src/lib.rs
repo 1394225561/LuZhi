@@ -755,6 +755,18 @@ async fn export_video(
         // to prevent silent "no cursor, no beautification" exports (BUG-005).
         let cursor_needs_overlay = config.cursor_magnification || config.cursor_smoothing;
         let cursor = build_cursor_effect_timeline(app.clone(), state.clone()).await;
+
+        // Progress: cursor timeline preparation (0% → 5%).
+        let _ = app.emit(
+            "export-progress",
+            ExportProgressPayload {
+                preset: preset_id,
+                progress: 5,
+                cancellable: true,
+                output_path: None,
+                error: None,
+            },
+        );
         let cursor = if cursor_needs_overlay {
             cursor.map_err(|e| format!("光标美化已开启但效果时间线构建失败：{e}"))?
         } else {
@@ -764,6 +776,18 @@ async fn export_video(
                 effect_timeline_path: None,
             })
         };
+
+        // Progress: cut timeline preparation (5% → 10%).
+        let _ = app.emit(
+            "export-progress",
+            ExportProgressPayload {
+                preset: preset_id,
+                progress: 10,
+                cancellable: true,
+                output_path: None,
+                error: None,
+            },
+        );
 
         let cut = if config.auto_trim_silences {
             Some(build_cut_timeline(app.clone(), state.clone()).await?)
@@ -835,13 +859,15 @@ async fn export_video(
             .map_err(|error| error.to_string())?;
 
         // Create progress reporter that emits events to the frontend.
+        // Map exporter 1-99 to overall 10-99 (preparation phase uses 0-10).
         let app_for_progress = app.clone();
         let progress_reporter = ExportProgressReporter::new(Arc::new(move |progress| {
+            let mapped = 10 + (progress as u32) * 89 / 99;
             let _ = app_for_progress.emit(
                 "export-progress",
                 ExportProgressPayload {
                     preset: preset_id,
-                    progress,
+                    progress: mapped.clamp(10, 99) as u8,
                     cancellable: true,
                     output_path: None,
                     error: None,
