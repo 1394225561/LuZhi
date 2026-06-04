@@ -42,6 +42,27 @@ impl PartialEq for ExportProgressReporter {
     }
 }
 
+/// Tracks export progress to ensure monotonic reporting and avoid
+/// flooding the frontend with events.
+struct ProgressState {
+    last_reported: u8,
+}
+
+impl ProgressState {
+    fn new() -> Self {
+        Self { last_reported: 0 }
+    }
+
+    /// Report progress if it's higher than the last reported value.
+    fn maybe_report(&mut self, reporter: &ExportProgressReporter, next: u8) {
+        let next = next.clamp(1, 99);
+        if next > self.last_reported {
+            self.last_reported = next;
+            reporter.report(next);
+        }
+    }
+}
+
 /// Structured request for a future FFmpeg binding implementation.
 #[derive(Clone, Debug)]
 pub struct TrimExportRequest {
@@ -460,6 +481,12 @@ impl TrimExporter for FfmpegTrimExporter {
         // Cut tracking uses nanoseconds; PTS offsets are tracked in each stream's
         // own time_base to avoid precision loss from nanos→time_base roundtrips.
         let total_keeps = request.cut_timeline.keeps.len();
+        let total_keep_nanos: u64 = request
+            .cut_timeline
+            .keeps
+            .iter()
+            .map(|s| s.end.nanos.saturating_sub(s.start.nanos))
+            .sum();
         // First frame PTS offset in input video time_base units.
         let mut video_pts_offset: Option<i64> = None;
         let mut cumulative_cut_nanos: i64 = 0;
@@ -479,6 +506,8 @@ impl TrimExporter for FfmpegTrimExporter {
         let input_audio_tb = audio_stream_info
             .map(|(_, tb)| tb)
             .unwrap_or(Rational(1, 48000));
+
+        let mut progress_state = ProgressState::new();
 
         for (seg_idx, segment) in request.cut_timeline.keeps.iter().enumerate() {
             if request.cancel_token.load(Ordering::Relaxed) {
@@ -881,14 +910,16 @@ impl TrimExporter for FfmpegTrimExporter {
                                     }
                                 }
 
+                                // Compute source timestamp for cursor overlay and progress.
+                                let source_nanos =
+                                    time_base_units_to_nanos(raw_pts, video_time_base)
+                                        .unwrap_or(0)
+                                        .max(0) as u64;
+
                                 // Draw cursor overlay onto the scaled output frame.
                                 // IMPORTANT: pass source timestamp (not output PTS)
                                 // because cursor timeline is in source time.
                                 if let Some(ref overlay) = cursor_overlay {
-                                    let source_nanos =
-                                        time_base_units_to_nanos(raw_pts, video_time_base)
-                                            .unwrap_or(0)
-                                            .max(0) as u64;
                                     overlay.draw_on_frame(&mut output_frame, source_nanos, out_fps);
                                 }
 
@@ -897,6 +928,30 @@ impl TrimExporter for FfmpegTrimExporter {
                                         reason: format!("编码视频帧失败: {e}"),
                                     }
                                 })?;
+
+                                // Report time-based progress after each video frame.
+                                if total_keep_nanos > 0 {
+                                    let mut processed_nanos: u64 = 0;
+                                    for prev_seg_idx in 0..seg_idx {
+                                        let prev_seg = &request.cut_timeline.keeps[prev_seg_idx];
+                                        processed_nanos += prev_seg
+                                            .end
+                                            .nanos
+                                            .saturating_sub(prev_seg.start.nanos);
+                                    }
+                                    let frame_in_segment =
+                                        (source_nanos).saturating_sub(segment.start.nanos);
+                                    let segment_duration =
+                                        segment.end.nanos.saturating_sub(segment.start.nanos);
+                                    processed_nanos += frame_in_segment.min(segment_duration);
+
+                                    let pct =
+                                        (1 + processed_nanos * 98 / total_keep_nanos).clamp(1, 99)
+                                            as u8;
+                                    if let Some(ref progress) = request.progress {
+                                        progress_state.maybe_report(progress, pct);
+                                    }
+                                }
 
                                 let mut enc_pkt = ff::Packet::empty();
                                 while video_encoder.receive_packet(&mut enc_pkt).is_ok() {
@@ -1073,11 +1128,12 @@ impl TrimExporter for FfmpegTrimExporter {
                 }
             }
 
-            // Report progress per segment (clamp to 1..99 for intermediate,
-            // final 100 is reported after successful completion).
-            if let Some(ref progress) = request.progress {
-                let pct = ((seg_idx + 1) * 99 / total_keeps).clamp(1, 99) as u8;
-                progress.report(pct);
+            // Fallback: report per-segment progress for zero-duration timelines.
+            if total_keep_nanos == 0 {
+                if let Some(ref progress) = request.progress {
+                    let pct = ((seg_idx + 1) * 99 / total_keeps).clamp(1, 99) as u8;
+                    progress_state.maybe_report(progress, pct);
+                }
             }
         }
 
