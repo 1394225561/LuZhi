@@ -71,6 +71,7 @@ impl CursorSmoother {
                     timestamp: sample.timestamp,
                     x: sum_x / count,
                     y: sum_y / count,
+                    kind: sample.kind,
                 }
             })
             .collect()
@@ -121,6 +122,13 @@ impl BezierInterpolator {
                 y: position.y,
                 scale: 1.0,
                 opacity: 1.0,
+                kind: samples
+                    .iter()
+                    .min_by_key(|s| {
+                        (s.timestamp.nanos as i64 - timestamp as i64).unsigned_abs()
+                    })
+                    .map(|s| s.kind)
+                    .unwrap_or_default(),
             });
 
             timestamp = timestamp.saturating_add(frame_interval);
@@ -173,6 +181,7 @@ impl BezierInterpolator {
             timestamp: MediaTimestamp::from_nanos(timestamp),
             x,
             y,
+            kind: p1.kind,
         }
     }
 }
@@ -463,13 +472,14 @@ fn apply_click_scale_to_frames(frames: &mut [CursorFrame], effects: &[CursorClic
 mod tests {
     use super::*;
     use crate::core::frame::MediaTimestamp;
-    use crate::core::timeline::CursorSample;
+    use crate::core::timeline::{CursorKind, CursorSample};
 
     fn sample(nanos: u64, x: f32, y: f32) -> CursorSample {
         CursorSample {
             timestamp: MediaTimestamp::from_nanos(nanos),
             x,
             y,
+            kind: CursorKind::default(),
         }
     }
 

@@ -20,7 +20,7 @@
 //! - If `false`: raw SCK frames already contain the cursor; overlay is forbidden.
 
 use crate::app::error::{AppError, AppResult};
-use crate::core::timeline::{CursorFrame, EffectTimeline};
+use crate::core::timeline::{CursorFrame, CursorKind, EffectTimeline};
 use crate::media::export_presets::ExportScalePolicy;
 
 /// Renders cursor overlay onto YUV420P video frames during export.
@@ -395,7 +395,7 @@ pub fn load_effect_timeline(path: &std::path::Path) -> AppResult<EffectTimeline>
 mod tests {
     use super::*;
     use crate::core::frame::MediaTimestamp;
-    use crate::core::timeline::{CursorFrame, EffectTimeline};
+    use crate::core::timeline::{CursorFrame, CursorKind, EffectTimeline};
 
     fn make_timeline(frames: Vec<CursorFrame>, render: bool) -> EffectTimeline {
         EffectTimeline {
@@ -415,6 +415,7 @@ mod tests {
             y,
             scale: 1.0,
             opacity: 1.0,
+            kind: CursorKind::Arrow,
         }
     }
 
@@ -565,6 +566,7 @@ mod tests {
             y: 540.0,
             scale: 2.0, // Click magnification active.
             opacity: 0.35,
+            kind: CursorKind::Arrow,
         }];
         let timeline = make_timeline(frames, true);
         let renderer = CursorOverlayRenderer::new(
@@ -613,6 +615,7 @@ mod tests {
             y: 999_999.0,
             scale: 1.0,
             opacity: 1.0,
+            kind: CursorKind::Arrow,
         }];
         let timeline = make_timeline(frames, true);
         let renderer = CursorOverlayRenderer::new(
@@ -645,6 +648,7 @@ mod tests {
             y: -999_999.0,
             scale: 1.0,
             opacity: 1.0,
+            kind: CursorKind::Arrow,
         }];
         let timeline = make_timeline(frames, true);
         let renderer = CursorOverlayRenderer::new(
@@ -677,6 +681,7 @@ mod tests {
             y: 540.0,
             scale: 1.0,
             opacity: 1.0,
+            kind: CursorKind::Arrow,
         }];
         let timeline = make_timeline(frames, true);
         let renderer = CursorOverlayRenderer::new(

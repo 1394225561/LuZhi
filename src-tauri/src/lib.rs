@@ -1209,13 +1209,16 @@ pub fn run() -> tauri::Result<()> {
 mod tests {
     use super::*;
     use crate::core::frame::MediaTimestamp;
-    use crate::core::timeline::{ClickPhase, CursorClick, CursorSample, MouseButton};
+    use crate::core::timeline::{
+        ClickPhase, CursorClick, CursorKind, CursorSample, MouseButton,
+    };
 
     fn sample(nanos: u64, x: f32, y: f32) -> CursorSample {
         CursorSample {
             timestamp: MediaTimestamp::from_nanos(nanos),
             x,
             y,
+            kind: CursorKind::default(),
         }
     }
 

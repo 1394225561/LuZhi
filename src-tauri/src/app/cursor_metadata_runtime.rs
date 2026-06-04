@@ -8,7 +8,8 @@ use crate::app::error::AppResult;
 use crate::core::clock::SessionClock;
 use crate::core::frame::MediaTimestamp;
 use crate::core::timeline::{
-    BeautifyConfigSnapshot, CaptureGeometry, ClickPhase, CursorClick, CursorSample, MouseButton,
+    BeautifyConfigSnapshot, CaptureGeometry, ClickPhase, CursorClick, CursorKind, CursorSample,
+    MouseButton,
 };
 use crate::media::recording_metadata::RecordingMetadata;
 
@@ -156,6 +157,7 @@ impl CursorMetadataRecorder {
             timestamp,
             x: norm_x,
             y: norm_y,
+            kind: CursorKind::Arrow, // Phase 1: always Arrow; target-aware detection is future work
         });
 
         if let Some(previous) = self.previous_snapshot {

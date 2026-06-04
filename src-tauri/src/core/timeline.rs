@@ -2,6 +2,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::frame::MediaTimestamp;
 
+/// Cursor shape kind detected during recording or inferred from context.
+///
+/// Used by the overlay renderer to draw the appropriate glyph instead of
+/// a generic white circle. Defaults to `Arrow` for backward compatibility
+/// with timelines that lack kind information.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CursorKind {
+    /// Standard arrow pointer (default).
+    #[default]
+    Arrow,
+    /// Hand pointer for clickable elements (buttons, links).
+    Hand,
+    /// I-beam text cursor for editable text fields.
+    IBeam,
+}
+
 /// Cursor position sampled during recording using the shared media time base.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -9,6 +26,9 @@ pub struct CursorSample {
     pub timestamp: MediaTimestamp,
     pub x: f32,
     pub y: f32,
+    /// Cursor shape kind. Defaults to Arrow for legacy timelines.
+    #[serde(default)]
+    pub kind: CursorKind,
 }
 
 /// Mouse button recorded for click effects.
@@ -48,6 +68,9 @@ pub struct CursorFrame {
     pub y: f32,
     pub scale: f32,
     pub opacity: f32,
+    /// Cursor shape kind. Defaults to Arrow for legacy timelines.
+    #[serde(default)]
+    pub kind: CursorKind,
 }
 
 /// Click magnification effect window.
@@ -136,6 +159,7 @@ mod tests {
             timestamp: MediaTimestamp::from_nanos(1_000_000),
             x: 120.5,
             y: 240.25,
+            kind: CursorKind::Arrow,
         };
 
         let json = serde_json::to_string(&sample).unwrap();
@@ -158,6 +182,7 @@ mod tests {
                     y: 10.0,
                     scale: 1.0,
                     opacity: 1.0,
+                    kind: CursorKind::Arrow,
                 },
                 CursorFrame {
                     timestamp: MediaTimestamp::from_nanos(16_666_667),
@@ -165,6 +190,7 @@ mod tests {
                     y: 20.0,
                     scale: 1.5,
                     opacity: 1.0,
+                    kind: CursorKind::Arrow,
                 },
             ],
             click_effects: vec![CursorClickEffect {
@@ -219,5 +245,36 @@ mod tests {
 
         assert!(json.contains("\"button\":\"left\""));
         assert!(json.contains("\"phase\":\"down\""));
+    }
+
+    #[test]
+    fn cursor_kind_serializes_camel_case() {
+        assert_eq!(
+            serde_json::to_string(&CursorKind::Arrow).unwrap(),
+            "\"arrow\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CursorKind::Hand).unwrap(),
+            "\"hand\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CursorKind::IBeam).unwrap(),
+            "\"iBeam\""
+        );
+    }
+
+    #[test]
+    fn cursor_kind_defaults_to_arrow_for_old_json() {
+        let json = r#"{"timestamp":{"nanos":0},"x":1.0,"y":2.0}"#;
+        let sample: CursorSample = serde_json::from_str(json).unwrap();
+        assert_eq!(sample.kind, CursorKind::Arrow);
+    }
+
+    #[test]
+    fn cursor_frame_defaults_to_arrow_for_old_json() {
+        let json =
+            r#"{"timestamp":{"nanos":0},"x":1.0,"y":2.0,"scale":1.0,"opacity":1.0}"#;
+        let frame: CursorFrame = serde_json::from_str(json).unwrap();
+        assert_eq!(frame.kind, CursorKind::Arrow);
     }
 }

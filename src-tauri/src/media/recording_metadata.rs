@@ -81,7 +81,7 @@ impl RecordingMetadataWriter {
 mod tests {
     use super::*;
     use crate::core::frame::MediaTimestamp;
-    use crate::core::timeline::{ClickPhase, CursorClick, CursorSample, MouseButton};
+    use crate::core::timeline::{ClickPhase, CursorClick, CursorKind, CursorSample, MouseButton};
 
     #[test]
     fn metadata_round_trips_json() {
@@ -92,6 +92,7 @@ mod tests {
                 timestamp: MediaTimestamp::from_nanos(0),
                 x: 10.0,
                 y: 20.0,
+                kind: CursorKind::default(),
             }],
             cursor_clicks: vec![CursorClick {
                 timestamp: MediaTimestamp::from_nanos(10_000_000),
