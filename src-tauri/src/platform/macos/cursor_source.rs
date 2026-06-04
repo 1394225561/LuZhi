@@ -6,6 +6,7 @@
 
 use crate::app::cursor_metadata_runtime::{CursorSnapshot, CursorSnapshotSource};
 use crate::app::error::{AppError, AppResult};
+use crate::core::timeline::CursorKind;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -80,6 +81,7 @@ impl CursorSnapshotSource for MacCursorSource {
                     K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE,
                     K_CG_MOUSE_BUTTON_CENTER,
                 ),
+                kind: CursorKind::Arrow, // TODO: Task 5 接入真实 kind provider
             })
         }
     }

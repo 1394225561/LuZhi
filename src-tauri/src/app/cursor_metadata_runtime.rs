@@ -16,7 +16,7 @@ use crate::media::recording_metadata::RecordingMetadata;
 const DEFAULT_MAX_CURSOR_SAMPLES: usize = 120_000;
 const DEFAULT_MAX_CURSOR_CLICKS: usize = 10_000;
 
-/// Snapshot of the current cursor position and button states.
+/// Snapshot of the current cursor position, button states, and kind.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CursorSnapshot {
     pub x: f32,
@@ -24,6 +24,7 @@ pub struct CursorSnapshot {
     pub left_down: bool,
     pub right_down: bool,
     pub middle_down: bool,
+    pub kind: CursorKind,
 }
 
 /// Source that can poll the current cursor state.
@@ -149,7 +150,7 @@ impl CursorMetadataRecorder {
             timestamp,
             x: norm_x,
             y: norm_y,
-            kind: CursorKind::Arrow, // Phase 1: always Arrow; target-aware detection is future work
+            kind: snapshot.kind,
         });
 
         if let Some(previous) = self.previous_snapshot {
@@ -321,6 +322,7 @@ mod tests {
                 left_down: false,
                 right_down: false,
                 middle_down: false,
+                kind: CursorKind::Arrow,
             },
         );
         recorder.record_snapshot(
@@ -331,6 +333,7 @@ mod tests {
                 left_down: false,
                 right_down: false,
                 middle_down: false,
+                kind: CursorKind::Arrow,
             },
         );
 
@@ -364,6 +367,7 @@ mod tests {
                 left_down: false,
                 right_down: false,
                 middle_down: false,
+                kind: CursorKind::Arrow,
             },
         );
         recorder.record_snapshot(
@@ -374,6 +378,7 @@ mod tests {
                 left_down: true,
                 right_down: false,
                 middle_down: false,
+                kind: CursorKind::Arrow,
             },
         );
         recorder.record_snapshot(
@@ -384,6 +389,7 @@ mod tests {
                 left_down: false,
                 right_down: false,
                 middle_down: false,
+                kind: CursorKind::Arrow,
             },
         );
 
@@ -420,6 +426,7 @@ mod tests {
                     left_down: false,
                     right_down: false,
                     middle_down: false,
+                    kind: CursorKind::Arrow,
                 },
             );
         }
@@ -468,6 +475,7 @@ mod tests {
                 left_down: false,
                 right_down: false,
                 middle_down: false,
+                kind: CursorKind::Arrow,
             },
         );
         recorder.record_snapshot_failure();
@@ -586,6 +594,7 @@ mod tests {
                 left_down: false,
                 right_down: false,
                 middle_down: false,
+                kind: CursorKind::Arrow,
             },
         );
 
