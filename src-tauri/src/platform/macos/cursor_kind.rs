@@ -60,7 +60,6 @@ extern "C" {
         y: f64,
         element: *mut AXUIElementRef,
     ) -> i32;
-    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
     fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
         attribute: CFStringRef,
