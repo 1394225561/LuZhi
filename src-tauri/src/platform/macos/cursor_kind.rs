@@ -75,6 +75,7 @@ struct CGSize {
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
     fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout_in_seconds: f32) -> i32;
     fn AXUIElementCopyElementAtPosition(
         application: AXUIElementRef,
@@ -88,6 +89,18 @@ extern "C" {
         value: *mut CFTypeRef,
     ) -> i32;
     fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFTypeRef) -> i32;
+}
+
+// NSWorkspace for getting frontmost application PID.
+type id = *mut std::ffi::c_void;
+type SEL = *const std::ffi::c_void;
+
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {
+    fn objc_getClass(name: *const std::ffi::c_char) -> id;
+    fn sel_registerName(name: *const std::ffi::c_char) -> SEL;
+    // objc_msgSend is variadic — we transmute to typed fn pointers at call sites.
+    fn objc_msgSend();
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -239,6 +252,12 @@ impl MacCursorKindProvider {
         let display_height = unsafe {
             let main_display = CGMainDisplayID();
             let bounds = CGDisplayBounds(main_display);
+            eprintln!(
+                "[cursor-kind] display_height={:.1} main_display={} bounds_origin=({:.1},{:.1}) bounds_size=({:.1}×{:.1})",
+                bounds.size.height, main_display,
+                bounds.origin.x, bounds.origin.y,
+                bounds.size.width, bounds.size.height,
+            );
             bounds.size.height
         };
         Self {
@@ -264,6 +283,10 @@ impl CursorKindProvider for MacCursorKindProvider {
         }
         // Flip Y: CGEventGetLocation uses top-down, AX API uses bottom-up.
         let ax_y = self.display_height - global_y as f64;
+        eprintln!(
+            "[cursor-kind] CGEvent=({:.0},{:.0}) → AX=({:.0},{:.0}) display_h={:.0}",
+            global_x, global_y, global_x, ax_y, self.display_height
+        );
         self.cached_kind = query_cursor_kind(global_x, ax_y);
         self.last_query_at = now;
         self.cached_kind
@@ -282,6 +305,8 @@ struct AxClassificationLog {
     has_ax_press: bool,
     classified_kind: CursorKind,
     query_duration_nanos: u64,
+    /// Whether this was a frontmost-app query or system-wide fallback.
+    used_frontmost_app: bool,
 }
 
 /// Rate-limited sampling log: print at most once per second.
@@ -299,43 +324,120 @@ fn maybe_log_classification(log: &AxClassificationLog, point: (f32, f32)) {
         }
     }
     *last = Some(now);
+    let source = if log.used_frontmost_app {
+        "front"
+    } else {
+        "system"
+    };
     eprintln!(
-        "[cursor-kind-classify] point=({:.0},{:.0}) kind={:?} role_chain={:?} ax_press={} rc={} dur={}µs",
+        "[cursor-kind-classify] point=({:.0},{:.0}) kind={:?} role_chain={:?} ax_press={} rc={} dur={}µs src={}",
         point.0, point.1,
         log.classified_kind,
         log.role_chain,
         log.has_ax_press,
         log.result_code,
         log.query_duration_nanos / 1000,
+        source,
     );
+}
+
+/// Get the PID of the frontmost (active) application.
+///
+/// Uses `[NSWorkspace sharedWorkspace].frontmostApplication.processIdentifier`.
+/// Returns 0 on failure.
+unsafe fn get_frontmost_app_pid() -> i32 {
+    // objc_msgSend is variadic; cast to typed function pointers.
+    type MsgSendId = extern "C" fn(id, SEL) -> id;
+    type MsgSendI32 = extern "C" fn(id, SEL) -> i32;
+    let msg_send_id: MsgSendId = std::mem::transmute(objc_msgSend as *const ());
+    let msg_send_i32: MsgSendI32 = std::mem::transmute(objc_msgSend as *const ());
+
+    let workspace_class = objc_getClass(b"NSWorkspace\0".as_ptr() as *const std::ffi::c_char);
+    if workspace_class.is_null() {
+        return 0;
+    }
+    let sel_shared = sel_registerName(b"sharedWorkspace\0".as_ptr() as *const std::ffi::c_char);
+    let workspace = msg_send_id(workspace_class, sel_shared);
+    if workspace.is_null() {
+        return 0;
+    }
+    let sel_front = sel_registerName(b"frontmostApplication\0".as_ptr() as *const std::ffi::c_char);
+    let app = msg_send_id(workspace, sel_front);
+    if app.is_null() {
+        return 0;
+    }
+    let sel_pid = sel_registerName(b"processIdentifier\0".as_ptr() as *const std::ffi::c_char);
+    msg_send_i32(app, sel_pid)
 }
 
 /// Query the cursor kind at the given position.
 ///
-/// Uses `AXUIElementCreateSystemWide()` to create a system-wide accessibility
-/// object, then `AXUIElementCopyElementAtPosition()` to find the UI element
-/// under the cursor, then reads its role to determine the cursor kind.
+/// **Strategy**: Try the frontmost application's AX element first (better for
+/// app-specific content like Tauri/WebView), then fall back to system-wide.
 ///
-/// Falls back to `Arrow` on any failure (no accessibility permission, timeout,
-/// unexpected role, etc.).
-///
-/// **Coordinate space**: The AX API expects coordinates in its own coordinate
-/// space (bottom-left origin, Y increases upward). The caller is responsible
-/// for flipping the Y coordinate from CGEvent space (top-left origin) before
-/// calling this function.
+/// **Coordinate space**: The caller is responsible for providing coordinates
+/// in the AX coordinate space (Y already flipped if needed).
 pub fn query_cursor_kind(global_x: f32, ax_y: f64) -> CursorKind {
     let query_start = Instant::now();
     unsafe {
-        // Use the proper system-wide accessibility object for cross-app hit-testing.
-        // AXUIElementCreateApplication(0) is NOT a system-wide object per Apple SDK.
+        // Try frontmost app first — better for Tauri/WebView content.
+        let frontmost_pid = get_frontmost_app_pid();
+        if frontmost_pid > 0 {
+            let app_element = AXUIElementCreateApplication(frontmost_pid);
+            if !app_element.is_null() {
+                AXUIElementSetMessagingTimeout(app_element, 0.1);
+
+                let mut element: AXUIElementRef = std::ptr::null();
+                let result = AXUIElementCopyElementAtPosition(
+                    app_element,
+                    global_x as f64,
+                    ax_y,
+                    &mut element,
+                );
+                CFRelease(app_element);
+
+                if result == K_AX_ERROR_SUCCESS && !element.is_null() {
+                    let (kind, role_chain, has_ax_press) = element_role_to_cursor_kind(element);
+                    CFRelease(element);
+
+                    let query_duration = query_start.elapsed().as_nanos() as u64;
+                    maybe_log_classification(
+                        &AxClassificationLog {
+                            result_code: result,
+                            role_chain,
+                            has_ax_press,
+                            classified_kind: kind,
+                            query_duration_nanos: query_duration,
+                            used_frontmost_app: true,
+                        },
+                        (global_x, ax_y as f32),
+                    );
+
+                    match kind {
+                        CursorKind::Arrow => {
+                            AX_FALLBACK_ARROW_COUNT.fetch_add(1, Ordering::Relaxed);
+                            KIND_ARROW_COUNT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        CursorKind::Hand => {
+                            KIND_HAND_COUNT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        CursorKind::IBeam => {
+                            KIND_IBEAM_COUNT.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    return kind;
+                }
+            }
+        }
+
+        // Fallback: system-wide element.
         let system = AXUIElementCreateSystemWide();
         if system.is_null() {
             AX_QUERY_FAILURE_COUNT.fetch_add(1, Ordering::Relaxed);
             return CursorKind::Arrow;
         }
 
-        // Set a short timeout to avoid blocking the cursor runtime thread.
-        AXUIElementSetMessagingTimeout(system, 0.05); // 50ms
+        AXUIElementSetMessagingTimeout(system, 0.1);
 
         let mut element: AXUIElementRef = std::ptr::null();
         let result = AXUIElementCopyElementAtPosition(system, global_x as f64, ax_y, &mut element);
@@ -349,7 +451,6 @@ pub fn query_cursor_kind(global_x: f32, ax_y: f64) -> CursorKind {
         let (kind, role_chain, has_ax_press) = element_role_to_cursor_kind(element);
         CFRelease(element);
 
-        // Rate-limited classification logging for debugging.
         let query_duration = query_start.elapsed().as_nanos() as u64;
         maybe_log_classification(
             &AxClassificationLog {
@@ -358,11 +459,11 @@ pub fn query_cursor_kind(global_x: f32, ax_y: f64) -> CursorKind {
                 has_ax_press,
                 classified_kind: kind,
                 query_duration_nanos: query_duration,
+                used_frontmost_app: false,
             },
             (global_x, ax_y as f32),
         );
 
-        // Update kind distribution counters.
         match kind {
             CursorKind::Arrow => {
                 AX_FALLBACK_ARROW_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -426,7 +527,18 @@ unsafe fn element_role_to_cursor_kind(element: AXUIElementRef) -> (CursorKind, V
             | Some("AXCheckBox")
             | Some("AXRadioButton")
             | Some("AXPopUpButton")
-            | Some("AXComboBox") => {
+            | Some("AXComboBox")
+            | Some("AXTab")
+            | Some("AXDisclosureTriangle")
+            | Some("AXSlider") => {
+                cleanup_refs(&retained_refs);
+                return (CursorKind::Hand, role_chain, has_ax_press);
+            }
+            // Hand: interactive containers — list items, table rows, rows.
+            // These are clickable in many apps (Finder, browsers, Tauri apps).
+            Some("AXList") | Some("AXRow") | Some("AXTable") => {
+                cleanup_refs(&retained_refs);
+                return (CursorKind::Hand, role_chain, has_ax_press);
                 cleanup_refs(&retained_refs);
                 return (CursorKind::Hand, role_chain, has_ax_press);
             }
