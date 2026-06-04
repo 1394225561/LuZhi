@@ -111,8 +111,9 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
     void onExportProgress((payload) => {
       setExportProgress(payload)
       if (!payload.cancellable && payload.error) {
-        // Terminal error: show error briefly, then clear.
+        // Terminal error: show error details, clear exporting state.
         setIsExporting(false)
+        setBeautifyError(payload.error)
       } else {
         setIsExporting(payload.cancellable && payload.progress < 100)
       }
