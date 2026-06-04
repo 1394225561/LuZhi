@@ -11,6 +11,7 @@ use crate::core::timeline::{
     BeautifyConfigSnapshot, CaptureGeometry, ClickPhase, CursorClick, CursorKind, CursorSample,
     MouseButton,
 };
+use crate::platform::macos::cursor_kind::CursorKindDiagnostics;
 use crate::media::recording_metadata::RecordingMetadata;
 
 const DEFAULT_MAX_CURSOR_SAMPLES: usize = 120_000;
@@ -94,6 +95,10 @@ pub struct CursorMetadataRecorder {
     snapshot_success_count: u64,
     snapshot_error_count: u64,
     coordinate_mapper: Option<CursorCoordinateMapper>,
+    /// Kind distribution counters.
+    arrow_count: u64,
+    hand_count: u64,
+    ibeam_count: u64,
 }
 
 impl CursorMetadataRecorder {
@@ -127,6 +132,9 @@ impl CursorMetadataRecorder {
             snapshot_success_count: 0,
             snapshot_error_count: 0,
             coordinate_mapper: capture_geometry.map(|geo| CursorCoordinateMapper::new(&geo)),
+            arrow_count: 0,
+            hand_count: 0,
+            ibeam_count: 0,
         }
     }
 
@@ -150,6 +158,13 @@ impl CursorMetadataRecorder {
             // No geometry available: use raw coordinates (legacy behavior).
             (snapshot.x, snapshot.y)
         };
+
+        // Track kind distribution.
+        match snapshot.kind {
+            CursorKind::Arrow => self.arrow_count += 1,
+            CursorKind::Hand => self.hand_count += 1,
+            CursorKind::IBeam => self.ibeam_count += 1,
+        }
 
         self.samples.push_back(CursorSample {
             timestamp,
@@ -236,6 +251,12 @@ impl CursorMetadataRecorder {
             cursor_snapshot_success_count: self.snapshot_success_count,
             cursor_snapshot_error_count: self.snapshot_error_count,
             capture_geometry,
+            cursor_kind_diagnostics: Some(CursorKindDiagnostics {
+                arrow_count: self.arrow_count,
+                hand_count: self.hand_count,
+                ibeam_count: self.ibeam_count,
+                ..Default::default()
+            }),
         }
     }
 }
@@ -296,7 +317,23 @@ impl CursorMetadataRuntime {
 
     pub fn stop(&mut self) -> Option<RecordingMetadata> {
         self.stop.store(true, Ordering::Relaxed);
-        self.handle.take().and_then(|handle| handle.join().ok())
+        let result = self.handle.take().and_then(|handle| handle.join().ok());
+        if let Some(ref metadata) = result {
+            if let Some(ref diag) = metadata.cursor_kind_diagnostics {
+                eprintln!(
+                    "[cursor-kind-diagnostics] arrow={} hand={} ibeam={} ax_fail={} ax_fallback_arrow={}",
+                    diag.arrow_count, diag.hand_count, diag.ibeam_count,
+                    diag.ax_query_failure_count, diag.ax_fallback_arrow_count
+                );
+                if diag.hand_count == 0 && diag.ibeam_count == 0 && diag.ax_query_failure_count > 0
+                {
+                    eprintln!(
+                        "[cursor-kind-diagnostics] ⚠️ 未检测到 Hand/IBeam，AX 查询存在失败"
+                    );
+                }
+            }
+        }
+        result
     }
 }
 

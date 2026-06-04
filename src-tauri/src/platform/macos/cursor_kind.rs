@@ -98,7 +98,8 @@ const K_AX_ERROR_SUCCESS: i32 = 0;
 // ---------------------------------------------------------------------------
 
 /// Diagnostics for cursor kind queries.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CursorKindDiagnostics {
     pub ax_query_failure_count: u64,
     pub ax_fallback_arrow_count: u64,
