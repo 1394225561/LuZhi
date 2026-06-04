@@ -3,9 +3,14 @@
 // - CGEventSourceButtonState only reads button state; it must not post or synthesize input.
 // - This source is polled from CursorMetadataRuntime, not from ScreenCaptureKit callbacks.
 // - Polling failures return a structured Rust error and must not panic.
+// - Kind query uses AXUIElementCreateSystemWide (not AXUIElementCreateApplication(0)).
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::app::cursor_metadata_runtime::{CursorSnapshot, CursorSnapshotSource};
 use crate::app::error::{AppError, AppResult};
+use crate::core::clock::SessionClock;
 use crate::platform::macos::cursor_kind;
 
 #[repr(C)]
@@ -39,22 +44,34 @@ extern "C" {
 }
 
 /// macOS cursor snapshot source backed by CoreGraphics.
-pub struct MacCursorSource;
-
-impl MacCursorSource {
-    pub fn new() -> Self {
-        Self
-    }
+///
+/// Records `captured_at_nanos` immediately after `CGEventGetLocation()` to
+/// avoid timing pollution from the subsequent AX kind query.
+///
+/// Kind queries are rate-limited to 10Hz (100ms TTL) to avoid blocking the
+/// cursor runtime thread on every snapshot.
+pub struct MacCursorSource {
+    session_clock: Arc<SessionClock>,
+    /// Kind is cached and only re-queried at most once per this interval.
+    kind_cache_ttl: Duration,
+    cached_kind: crate::core::timeline::CursorKind,
+    last_kind_query_at: Instant,
 }
 
-impl Default for MacCursorSource {
-    fn default() -> Self {
-        Self::new()
+impl MacCursorSource {
+    pub fn new(session_clock: Arc<SessionClock>) -> Self {
+        Self {
+            session_clock,
+            kind_cache_ttl: Duration::from_millis(100), // 10Hz kind query
+            cached_kind: crate::core::timeline::CursorKind::Arrow,
+            last_kind_query_at: Instant::now() - Duration::from_secs(1),
+        }
     }
 }
 
 impl CursorSnapshotSource for MacCursorSource {
     fn snapshot(&mut self) -> AppResult<CursorSnapshot> {
+        let start = Instant::now();
         unsafe {
             let event = CGEventCreate(std::ptr::null());
             if event.is_null() {
@@ -66,7 +83,16 @@ impl CursorSnapshotSource for MacCursorSource {
             let point = CGEventGetLocation(event);
             CFRelease(event as CFTypeRef);
 
-            let kind = cursor_kind::query_cursor_kind(point.x as f32, point.y as f32);
+            // Record position sampling time immediately after CGEventGetLocation.
+            let captured_at_nanos = self.session_clock.elapsed_nanos();
+
+            // Kind query: cached, low-frequency (10Hz max).
+            if start.duration_since(self.last_kind_query_at) >= self.kind_cache_ttl {
+                self.cached_kind = cursor_kind::query_cursor_kind(point.x as f32, point.y as f32);
+                self.last_kind_query_at = start;
+            }
+
+            let snapshot_duration_nanos = start.elapsed().as_nanos() as u64;
 
             Ok(CursorSnapshot {
                 x: point.x as f32,
@@ -83,7 +109,9 @@ impl CursorSnapshotSource for MacCursorSource {
                     K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE,
                     K_CG_MOUSE_BUTTON_CENTER,
                 ),
-                kind,
+                kind: self.cached_kind,
+                captured_at_nanos,
+                snapshot_duration_nanos,
             })
         }
     }

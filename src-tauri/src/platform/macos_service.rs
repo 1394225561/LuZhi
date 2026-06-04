@@ -228,7 +228,7 @@ impl MacRecordingService {
 
         // Start cursor metadata runtime for cursor effects.
         self.cursor_runtime = Some(CursorMetadataRuntime::spawn(
-            MacCursorSource::new(),
+            MacCursorSource::new(session_clock.clone()),
             config.fps,
             session_clock.clone(),
             beautify_snapshot,

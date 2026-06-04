@@ -25,6 +25,11 @@ pub struct CursorSnapshot {
     pub right_down: bool,
     pub middle_down: bool,
     pub kind: CursorKind,
+    /// Monotonic timestamp when the cursor position was sampled (before AX query).
+    /// Zero means unavailable; runtime will use poll-start timestamp instead.
+    pub captured_at_nanos: u64,
+    /// Duration of the full snapshot() call in nanoseconds.
+    pub snapshot_duration_nanos: u64,
 }
 
 /// Source that can poll the current cursor state.
@@ -261,10 +266,17 @@ impl CursorMetadataRuntime {
                 CursorMetadataRecorder::new(fps.max(1), beautify_snapshot, capture_geometry);
             while !thread_stop.load(Ordering::Relaxed) {
                 // Record timestamp BEFORE snapshot() to avoid AX query delay pollution.
-                let sample_timestamp = MediaTimestamp::from_nanos(session_clock.elapsed_nanos());
+                let poll_start_nanos = session_clock.elapsed_nanos();
                 match source.snapshot() {
                     Ok(snapshot) => {
-                        recorder.record_snapshot(sample_timestamp, snapshot);
+                        // Use snapshot's captured_at if available (more precise),
+                        // else poll start.
+                        let ts = if snapshot.captured_at_nanos > 0 {
+                            MediaTimestamp::from_nanos(snapshot.captured_at_nanos)
+                        } else {
+                            MediaTimestamp::from_nanos(poll_start_nanos)
+                        };
+                        recorder.record_snapshot(ts, snapshot);
                     }
                     Err(_) => {
                         recorder.record_snapshot_failure();
@@ -333,6 +345,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: self.kind,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             })
         }
     }
@@ -394,6 +408,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             },
         );
         recorder.record_snapshot(
@@ -405,6 +421,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             },
         );
 
@@ -439,6 +457,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             },
         );
         recorder.record_snapshot(
@@ -450,6 +470,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             },
         );
         recorder.record_snapshot(
@@ -461,6 +483,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             },
         );
 
@@ -498,6 +522,8 @@ mod tests {
                     right_down: false,
                     middle_down: false,
                     kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
                 },
             );
         }
@@ -547,6 +573,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             },
         );
         recorder.record_snapshot_failure();
@@ -666,6 +694,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             },
         );
 
@@ -844,6 +874,8 @@ mod tests {
                     right_down: false,
                     middle_down: false,
                     kind: *kind,
+                    captured_at_nanos: 0,
+                    snapshot_duration_nanos: 0,
                 },
             );
         }
@@ -889,6 +921,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             },
         );
         // Second snapshot: left button pressed.
@@ -901,6 +935,8 @@ mod tests {
                 right_down: false,
                 middle_down: false,
                 kind: CursorKind::Arrow,
+                captured_at_nanos: 0,
+                snapshot_duration_nanos: 0,
             },
         );
 
