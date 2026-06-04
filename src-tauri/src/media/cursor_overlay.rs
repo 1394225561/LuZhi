@@ -446,9 +446,6 @@ impl CursorOverlayRenderer {
 
         // Clamp radius: minimum 4px, maximum 256px or half the smallest dimension.
         let max_radius = (w.min(h) / 2).min(256);
-        let radius = ((self.cursor_radius * clamped_scale).round() as i32)
-            .max(4)
-            .min(max_radius);
 
         // BUG-008: Clamp mapped coordinates to a safe drawing range.
         // Allow margin for partially-visible cursors at edges.
@@ -503,43 +500,6 @@ impl CursorOverlayRenderer {
             Err(i) => i - 1,
         };
         frames.get(idx)
-    }
-
-    /// Draw a filled circle on the Y plane using i64 coordinates.
-    ///
-    /// BUG-008: Uses i64 throughout to prevent overflow on extreme coordinates
-    /// after coordinate mapping. This is the primary drawing function used by
-    /// `draw_on_frame()` after clamping.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_circle_i64(
-        data: &mut [u8],
-        frame_w: i64,
-        frame_h: i64,
-        linesize: usize,
-        cx: i64,
-        cy: i64,
-        radius: i64,
-        value: u8,
-    ) {
-        let r2 = radius * radius;
-
-        let y_start = (cy - radius).max(0) as usize;
-        let y_end = ((cy + radius).min(frame_h - 1)) as usize;
-        let x_start = (cx - radius).max(0) as usize;
-        let x_end = ((cx + radius).min(frame_w - 1)) as usize;
-
-        for y in y_start..=y_end {
-            let row_offset = y * linesize;
-            for x in x_start..=x_end {
-                let dx = x as i64 - cx;
-                let dy = y as i64 - cy;
-                if dx * dx + dy * dy <= r2 {
-                    if let Some(pixel) = data.get_mut(row_offset + x) {
-                        *pixel = value;
-                    }
-                }
-            }
-        }
     }
 
     /// Draw a circle outline (1px wide) on the Y plane using i64 coordinates.
