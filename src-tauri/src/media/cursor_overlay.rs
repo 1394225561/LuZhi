@@ -83,11 +83,11 @@ const T: GlyphPixel = GlyphPixel::Transparent;
 //   Row 16: W B B B B B B B B B B B B B B B W T T T T T T T
 //   Row 17: W B B B B B B B B B B B B B B B B W T T T T T T
 //   Row 18: W B B B B B B B B B B B B B B B B B W T T T T T
-//   Row 19: W B B W W W W W W W W W W W W W W W W T T T T T
-//   Row 20: W B W T T T T T T T T T T T T T T T T T T T T T
-//   Row 21: W W T T T T T T T T T T T T T T T T T T T T T T
-//   Row 22: W T T T T T T T T T T T T T T T T T T T T T T T
-//   Row 23: T T T T T T T T T T T T T T T T T T T T T T T T
+//   Row 19: W B B W W W W W W W W W W W W W W W W T T T T T  ← shelf
+//   Row 20: W W W B B B W T T T T T T T T T T T T T T T T T  ← handle top
+//   Row 21: T T W B B B W T T T T T T T T T T T T T T T T T  ← handle body
+//   Row 22: T T T W B B W T T T T T T T T T T T T T T T T T  ← handle body
+//   Row 23: T T T T W W T T T T T T T T T T T T T T T T T T  ← handle bottom
 static ARROW_GLYPH: CursorGlyph = CursorGlyph {
     width: 24,
     height: 24,
@@ -138,14 +138,14 @@ static ARROW_PIXELS: [GlyphPixel; 576] = [
     W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T,
     // Row 19
     W, B, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, T, T, T, T, T,
-    // Row 20
-    W, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 21
-    W, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 22
-    W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 23
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 20 — tail handle starts (white outline top)
+    W, W, W, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 21 — tail handle body (black fill + white outline)
+    T, T, W, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 22 — tail handle body
+    T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    // Row 23 — tail handle bottom (white outline)
+    T, T, T, T, W, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
 ];
 
 // Hand: 24×24 open hand silhouette. Hotspot at fingertip (12, 4).
@@ -1120,6 +1120,44 @@ mod tests {
             y_plane[ibeam_center_offset] < 50,
             "ibeam body should be black (Y<50), got {}",
             y_plane[ibeam_center_offset]
+        );
+    }
+
+    #[test]
+    fn arrow_glyph_has_tail_handle_and_hotspot_still_at_tip() {
+        let glyph = &ARROW_GLYPH;
+
+        // Hotspot must be at (0, 0) — the arrow tip.
+        assert_eq!(glyph.hotspot_x, 0.0);
+        assert_eq!(glyph.hotspot_y, 0.0);
+
+        // Check that the tail handle region (rows 20-23, cols ~3-5) has black pixels.
+        // Row 20, col 3 should be black (handle body).
+        let handle_pixel = &glyph.pixels[20 * glyph.width + 3];
+        assert!(
+            matches!(handle_pixel, GlyphPixel::Black(_)),
+            "arrow tail handle should have black pixels at row 20, col 3"
+        );
+
+        // Row 21, col 3 should also be black (handle body).
+        let handle_body = &glyph.pixels[21 * glyph.width + 3];
+        assert!(
+            matches!(handle_body, GlyphPixel::Black(_)),
+            "arrow tail handle should have black pixels at row 21, col 3"
+        );
+
+        // Row 20, col 2 should be white outline around handle.
+        let handle_outline = &glyph.pixels[20 * glyph.width + 2];
+        assert!(
+            matches!(handle_outline, GlyphPixel::White(_)),
+            "arrow tail handle should have white outline at row 20, col 2"
+        );
+
+        // The shelf at row 19 should still have white outline pixels.
+        let shelf_pixel = &glyph.pixels[19 * glyph.width + 4];
+        assert!(
+            matches!(shelf_pixel, GlyphPixel::White(_)),
+            "arrow shelf at row 19 should have white outline"
         );
     }
 }
