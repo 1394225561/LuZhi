@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-04 | BUG-0010/0011/0012 实施完成（光标坐标归一化、CursorKind 与 glyph 渲染、导出进度粒度升级）；三个 Phase 16 个 Task 全部完成，待人工验证。
+> 最后更新：2026-06-04 | BUG-0010/0011 第二轮整改完成（Y 轴翻转修复、CursorKind provider、glyph 颜色修正、click 坐标归一化、terminal error UI）；11 个 Task 全部完成，待人工验证。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,52 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-04：BUG-0010/0011 第二轮整改完成
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-04-bug-0010-0011-second-round-code-review-root-cause-and-fix-plan.md`
+- `docs/superpowers/plans/2026-06-04-bug-0010-0011-second-round-rectification.md`
+
+已完成（11 个 Task）：
+
+1. 新增 mapper 四角和负 origin 测试锁定 BUG-0010 Y 轴错误（7 个新测试）
+2. 移除无条件 Y 轴翻转 — `CGEventGetLocation` 与 SCK 使用同一 top-down 坐标系
+3. 添加 SCDisplay 几何诊断日志用于人工确认坐标系
+4. CursorSnapshot 携带 kind 字段，record_snapshot 使用真实 kind
+5. 实现 macOS CursorKind provider — Accessibility hit-test 识别 Arrow/Hand/IBeam
+6. CursorClick 坐标归一化 — 与 CursorSample 使用同一 source video 坐标空间
+7. 修正 Arrow/IBeam glyph 颜色 — 黑底白边符合验收要求
+8. 新增像素级颜色契约测试 — Arrow/Hand/IBeam 颜色和渲染验证
+9. terminal export error 写入 beautifyError 确保错误显示
+10. 清理 cursor_overlay.rs 死代码 — 删除未使用 radius 变量和 draw_circle_i64
+11. BUG.md 第二轮整改状态和预防规则更新
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **271 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **333 unit + 10 integration tests** 通过
+- `npm test -- --run` **54 tests** 通过
+- `cargo fmt --check` 通过
+- `npm run build` 通过
+
+改动文件：
+
+- **新增**: `src-tauri/src/platform/macos/cursor_kind.rs`
+- **修改**: `src-tauri/src/app/cursor_metadata_runtime.rs`, `src-tauri/src/platform/macos/cursor_source.rs`, `src-tauri/src/platform/macos/mod.rs`, `src-tauri/src/platform/macos/screen_capture_kit.rs`, `src-tauri/src/media/cursor_overlay.rs`, `src/components/preview-view.tsx`, `BUG.md`, `HANDOFF.md`
+
+人工验证门禁（第二轮）：
+
+1. BUG-0010 1080p：鼠标移动到四角和下半屏，导出 overlay 精确匹配源光标位置
+2. BUG-0010 Retina：Retina 显示器四角和中心，导出 overlay 不偏移
+3. BUG-0011 Arrow：普通桌面导出光标为黑底白边箭头
+4. BUG-0011 Hand：悬停按钮/链接导出光标为白底黑边手形
+5. BUG-0011 IBeam：悬停文本框导出光标为黑底白边 I-beam
+6. BUG-0011 Hotspot：点击放大中心在目标 hotspot，不在 glyph 中心
+7. BUG-0012 Error：导出失败时 UI 显示错误详情，isExporting 清理
+
+---
 
 ### 2026-06-04：BUG-0010/0011/0012 实施完成
 

@@ -956,10 +956,16 @@ mod tests {
     fn hand_glyph_has_white_fill_and_black_outline() {
         let glyph = &HAND_GLYPH;
         // Find a white fill pixel (interior of hand).
-        let has_white = glyph.pixels.iter().any(|p| matches!(p, GlyphPixel::White(_)));
+        let has_white = glyph
+            .pixels
+            .iter()
+            .any(|p| matches!(p, GlyphPixel::White(_)));
         assert!(has_white, "hand should have white fill pixels");
         // Find a black outline pixel.
-        let has_black = glyph.pixels.iter().any(|p| matches!(p, GlyphPixel::Black(_)));
+        let has_black = glyph
+            .pixels
+            .iter()
+            .any(|p| matches!(p, GlyphPixel::Black(_)));
         assert!(has_black, "hand should have black outline pixels");
     }
 
@@ -985,15 +991,20 @@ mod tests {
         let timeline = make_timeline(vec![cursor_frame(0, 960.0, 540.0)], true);
         let renderer = CursorOverlayRenderer::new(
             timeline,
-            1920, 1080, 1920, 1080,
+            1920,
+            1080,
+            1920,
+            1080,
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut frame = ffmpeg_next::util::frame::Video::new(
             ffmpeg_next::util::format::Pixel::YUV420P,
-            1920, 1080,
+            1920,
+            1080,
         );
         renderer.draw_on_frame(&mut frame, 0, 30);
 

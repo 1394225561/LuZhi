@@ -718,7 +718,10 @@ mod tests {
         let mapper = CursorCoordinateMapper::new(&geo);
         // Top-left in points: (0, 0).
         let result = mapper.map(0.0, 0.0);
-        assert!(result.is_some(), "Retina top-left should not be out of bounds");
+        assert!(
+            result.is_some(),
+            "Retina top-left should not be out of bounds"
+        );
         let (x, y) = result.unwrap();
         assert!((x - 0.0).abs() < 1.0, "expected x≈0, got {x}");
         assert!((y - 0.0).abs() < 1.0, "expected y≈0, got {y}");
@@ -739,7 +742,10 @@ mod tests {
         let mapper = CursorCoordinateMapper::new(&geo);
         // Bottom-right in points: (959, 539).
         let result = mapper.map(959.0, 539.0);
-        assert!(result.is_some(), "Retina bottom-right should not be out of bounds");
+        assert!(
+            result.is_some(),
+            "Retina bottom-right should not be out of bounds"
+        );
         let (x, y) = result.unwrap();
         assert!((x - 1918.0).abs() < 2.0, "expected x≈1918, got {x}");
         assert!((y - 1078.0).abs() < 2.0, "expected y≈1078, got {y}");

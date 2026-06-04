@@ -21,6 +21,33 @@
 3. cursor glyph 绘制必须以 hotspot 对齐目标点，不能以图标左上角或视觉中心对齐。
 4. 多显示器、Retina scale、CenterCrop/FitWithBars 必须有坐标回归测试或人工门禁。
 
+#### BUG-0010_1: 第 1 轮人工验证结果
+
+**现象**：经过美化后导出的视频，光标的定位依旧产生了很大的偏移，但是这次的偏移方向是在垂直向上的方向，偏移幅度很大，超过了半个屏幕的高度。
+
+**期望**：美化的光标与源视频的光标是精确定位，没有偏移。
+
+**根因**：`CursorCoordinateMapper` 中 `flip_y: true` 硬编码无条件翻转 Y 轴。`CGEventGetLocation()` 和 `SCDisplay.frame()` 使用同一坐标系（top-left origin, Y 向下），不需要翻转。
+
+**修复**：移除 `flip_y` 字段和翻转逻辑，简化 `map()` 为直接线性映射。新增 7 个 mapper 测试覆盖 top-left、bottom-right、下半屏、负 origin、Retina 四角场景。
+
+#### BUG-0010_2: 第 2 轮整改状态
+
+✅ 已修复-第二轮待人工验证
+
+**本轮整改内容**：
+
+1. 移除无条件 Y 轴翻转 — `CGEventGetLocation` 与 SCK 使用同一 top-down 坐标系
+2. 新增 mapper 四角和负 origin 测试锁定 BUG-0010 Y 轴错误
+3. 添加 SCDisplay 几何诊断日志用于人工确认坐标系
+4. CursorClick 坐标归一化 — 与 CursorSample 使用同一 source video 坐标空间
+
+**新增预防规则**：
+
+5. mapper 测试不能只测中心点，必须测 top/bottom。
+6. Y 轴翻转必须有真实设备证据或显式 geometry 语义，不能硬编码假设。
+7. `CursorSample` 和 `CursorClick` 必须处于同一 source video pixel 坐标空间。
+
 ---
 
 ### BUG-0011: 美化后的光标不好看 ✅ 已修复-待人工验证
@@ -44,6 +71,45 @@
 3. cursor glyph 必须有 hotspot metadata，并由测试验证 hotspot 对齐。
 4. cursor asset/bitmask 更新必须配套像素级或 snapshot-like 回归测试。
 
+#### BUG-0011_1: 第 1 轮人工验证结果
+
+**现象**：经过美化后导出的视频，显示的光标在任何情况下都是一个白底黑边的箭头。
+
+**期望**：
+
+1. 普通桌面 — 导出光标为黑底白边箭头
+2. 悬停按钮/链接 — 导出光标为白底黑边手形（手形的 glyph 绘制需要更精致一些：大拇指和食指伸直，其他三个手指向掌心弯曲，视觉效果很短）
+3. 悬停文本框 — 导出光标为黑底白边 I-beam
+
+**根因**：
+
+1. `CursorSnapshot` 没有 `kind` 字段，`record_snapshot()` 固定写 `CursorKind::Arrow`。
+2. Arrow/IBeam glyph 颜色与验收相反（白底黑边 → 应为黑底白边）。
+
+**修复**：
+
+1. 扩展 `CursorSnapshot` 携带 `kind`，`record_snapshot()` 使用 `snapshot.kind`。
+2. 实现 macOS CursorKind provider — `AXUIElementCopyElementAtPosition` Accessibility hit-test 识别 Arrow/Hand/IBeam。
+3. Arrow glyph 改为白底黑边，IBeam glyph 改为白底黑边。
+4. 新增像素级颜色契约测试。
+
+#### BUG-0011_2: 第 2 轮整改状态
+
+✅ 已修复-第二轮待人工验证
+
+**本轮整改内容**：
+
+1. CursorSnapshot 携带 kind 字段，record_snapshot 使用真实 kind
+2. 实现 macOS CursorKind provider — Accessibility hit-test 识别 Arrow/Hand/IBeam
+3. 修正 Arrow/IBeam glyph 颜色 — 黑底白边符合验收要求
+4. 新增像素级颜色契约测试 — Arrow/Hand/IBeam 颜色和渲染验证
+
+**新增预防规则**：
+
+8. `CursorKind` enum 存在不代表 target-aware 已完成；必须有 kind source。
+9. renderer 测试必须验证具体 glyph 类型和颜色，不得只检查"像素非零"。
+10. target-aware 查询失败必须 fallback Arrow，但 fallback 不能掩盖全部样本都未识别的问题，必须有诊断计数。
+
 ---
 
 ### BUG-0012: 点击导出按钮后的交互不够优雅 ✅ 已修复-待人工验证
@@ -55,6 +121,7 @@
 **根因**：`FfmpegTrimExporter` 按 keep segment 上报进度（`(seg_idx+1)*99/total_keeps`），自动裁剪关闭时只有一个 keep segment，表现为 0% 停很久然后直接完成。
 
 **修复**：
+
 1. 升级为 frame/time 级进度：每帧视频编码后按 `processed_nanos / total_keep_nanos` 上报
 2. 准备阶段进度：cursor timeline 0→5%，cut timeline 5→10%
 3. 范围映射：FFmpeg 导出 1-99 映射到整体 10-99%
@@ -66,6 +133,21 @@
 2. export progress 必须单调递增，且 100% 只能在导出和 artifact validation 成功后发送。
 3. 取消、失败、no-FFmpeg gate 等 terminal path 必须发送 `cancellable=false` 的 terminal progress，让 UI 清理导出状态。
 4. 前端进度条测试必须模拟中间 `export-progress` 事件，而不能只验证最终 summary。
+
+#### BUG-0012_1: 第 1 轮人工验证结果
+
+✅ 验证通过，已解决
+
+#### BUG-0012_2: 第 2 轮整改（terminal error UI 边界）
+
+✅ 已修复-第二轮待人工验证
+
+**整改内容**：terminal export error 写入 `beautifyError` 确保错误显示。当 `!payload.cancellable && payload.error` 时，除了设置 `isExporting=false`，还设置 `beautifyError=payload.error`。
+
+**新增预防规则**：
+
+11. terminal progress error 必须被 UI 展示。
+12. no-FFmpeg gate、取消、失败都必须让 UI 清理 exporting 状态并显示明确结果。
 
 ---
 
