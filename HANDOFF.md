@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-04 | BUG-0010/0011 第五轮整改完成（EMA + 单调 Hermite 插值修复漂移；AX 坐标 Y 轴翻转修复 cursor kind 分类）；待人工验证。
+> 最后更新：2026-06-04 | BUG-0011 方案B（前台应用 AX 查询）已实现但 WebView 不可穿透；待尝试方案A（NSCursor API）。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,38 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-04：BUG-0011 方案B（前台应用 AX 查询）实现与测试
+
+输入文件：
+
+- 用户终端日志：cursor-kind-classify 始终返回 `role_chain=["AXMenuBar", "AXApplication"]`
+
+已完成：
+
+1. 添加 `AXUIElementCreateApplication` FFI 绑定
+2. 添加 `get_frontmost_app_pid()` — 通过 `NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier` 获取前台应用 PID
+3. `query_cursor_kind()` 改为先查询前台应用 AX 元素，失败后 fallback 到系统级查询
+4. 添加 `used_frontmost_app` 字段到 `AxClassificationLog`，日志显示 `src=front` 或 `src=system`
+5. 更新 BUG.md
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` **288 tests** 通过
+- `cargo fmt --check` 通过
+
+**测试结论**：方案B 已实现但 WebView (WKWebView) 内容对 AX hit-test 不透明。
+- `src=front` 查询成功（前台应用 PID 正确获取）
+- 但 `role_chain` 始终返回 `["AXMenuBar", "AXApplication"]` 或 `["AXGroup", "AXScrollArea", "AXApplication"]`
+- AX API 无法穿透 WebView 的内部 AX 层级，无法检测到链接、按钮、输入框等交互元素
+
+改动文件：
+
+- **修改**: `src-tauri/src/platform/macos/cursor_kind.rs`, `BUG.md`
+
+下一步：尝试方案A（NSCursor API）
+
+---
 
 ### 2026-06-04：BUG-0010/0011 第五轮整改（光标漂移 + AX 坐标修复）
 
@@ -1328,6 +1360,42 @@ Round 2 复审发现的问题（已进入 Round 3 修复）：
 ---
 
 ## 冬眠记录
+
+### 2026-06-04：BUG-0011 方案B 实现完成、准备尝试方案A 冬眠
+
+#### 1. 当前任务上下文
+
+BUG-0011 光标类型始终为 Arrow。已尝试方案B（增强 AX 分类），包括前台应用 AX 查询，但 WebView 内容对 AX hit-test 不透明。准备尝试方案A（NSCursor API）。当前在 `feat/architecture-planning` 分支。
+
+#### 2. 已完成进度
+
+- 方案B 实现：添加 `AXUIElementCreateApplication` + `get_frontmost_app_pid()` + 前台应用优先查询
+- 测试结论：`src=front` 查询成功，但 `role_chain` 始终返回 `AXMenuBar`/`AXGroup`，无法穿透 WebView
+- 诊断日志显示 `arrow=480 hand=0 ibeam=0`，确认 AX API 对 WebView 内容无效
+- Git 已提交（`2a6f814`），未 push
+
+#### 3. 中断时的处置决策
+
+方案B 代码已提交，状态稳定。决定尝试方案A（NSCursor API），冬眠保存现场。
+
+#### 4. 架构与关键决策
+
+- **AX API 无法穿透 WebView**：`AXUIElementCopyElementAtPosition` 无论系统级还是应用级查询，都无法获取 WebView 内部 DOM 元素的 AX role
+- **前台应用 PID 方案**：通过 `NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier` 获取 PID，再用 `AXUIElementCreateApplication(pid)` 查询。技术上可行，但 WebView 内容不暴露交互元素
+- **方案A（NSCursor API）**：下一步调研 `[NSCursor currentCursor]` 在后台线程查询实时光标类型的可行性
+
+#### 5. 立即执行清单
+
+1. 调研 `[NSCursor currentCursor]` API 的线程安全性和实时性
+2. 如果可行，实现 NSCursor-based CursorKindProvider
+3. 验证：在 Tauri 应用中悬停链接/按钮/输入框，检查光标类型是否正确切换
+4. 验证完成后移除 diagnostic logging
+
+#### 6. 当前报错/阻碍
+
+无编译报错。核心阻碍是 AX API 对 WebView 内容的固有限制。
+
+---
 
 ### 2026-06-03：BUG-0010/0011/0012 实施计划编写完成冬眠
 
