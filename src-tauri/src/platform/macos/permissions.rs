@@ -7,6 +7,7 @@ impl PermissionProbe for MacPermissionProbe {
         RecordingPermissions {
             screen_recording: Self::check_screen_recording(),
             microphone: Self::check_microphone(),
+            accessibility: Self::check_accessibility(),
         }
     }
 }
@@ -21,6 +22,19 @@ impl MacPermissionProbe {
     fn check_microphone() -> PermissionStatus {
         let status = unsafe { av_authorization_status_for_audio() };
         map_av_authorization_status(status)
+    }
+
+    fn check_accessibility() -> PermissionStatus {
+        // SAFETY: AXIsProcessTrusted() 是无状态查询函数，无副作用。
+        // 返回 true 表示用户已在系统偏好设置中授权辅助功能权限。
+        let trusted = unsafe { AXIsProcessTrusted() };
+        if trusted {
+            PermissionStatus::Granted
+        } else {
+            // 无法通过此 API 区分"从未请求"和"用户已拒绝"，
+            // 对 UX 而言映射为 NotDetermined（用户可能需要在系统偏好设置中授权）。
+            PermissionStatus::NotDetermined
+        }
     }
 }
 
@@ -56,6 +70,13 @@ extern "C" {
     /// macOS 10.15+ 屏幕录制权限预检。
     /// 返回 true 表示用户已授权，false 表示尚未授权或已拒绝。
     fn CGPreflightScreenCaptureAccess() -> bool;
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    /// 检查当前进程是否被信任使用辅助功能 API。
+    /// 返回 true 表示用户已在系统偏好设置 > 隐私与安全 > 辅助功能中授权。
+    fn AXIsProcessTrusted() -> bool;
 }
 
 /// 调用 AVFoundation 的 AVCaptureDevice 类方法查询麦克风授权状态。

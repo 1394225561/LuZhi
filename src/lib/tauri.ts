@@ -13,6 +13,8 @@ export type RecordingStatus = {
 export type RecordingPermissions = {
   screenRecording: 'granted' | 'denied' | 'notDetermined' | 'unknown'
   microphone: 'granted' | 'denied' | 'notDetermined' | 'unknown'
+  /** Accessibility permission — required for target-aware cursor kind (Hand/IBeam). */
+  accessibility: 'granted' | 'denied' | 'notDetermined' | 'unknown'
 }
 
 export type CaptureMode = 'fullscreen' | 'window' | 'area'

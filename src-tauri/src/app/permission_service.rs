@@ -12,6 +12,9 @@ pub enum PermissionStatus {
 pub struct RecordingPermissions {
     pub screen_recording: PermissionStatus,
     pub microphone: PermissionStatus,
+    /// Accessibility permission — required for target-aware cursor kind (Hand/IBeam).
+    /// When Denied/NotDetermined, cursor kind will always fallback to Arrow.
+    pub accessibility: PermissionStatus,
 }
 
 /// Platform-specific permission probe.
@@ -45,6 +48,7 @@ mod tests {
             RecordingPermissions {
                 screen_recording: PermissionStatus::Granted,
                 microphone: PermissionStatus::Granted,
+                accessibility: PermissionStatus::Granted,
             }
         }
     }
@@ -58,6 +62,7 @@ mod tests {
             RecordingPermissions {
                 screen_recording: PermissionStatus::Granted,
                 microphone: PermissionStatus::Granted,
+                accessibility: PermissionStatus::Granted,
             }
         );
     }

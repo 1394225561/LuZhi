@@ -29,6 +29,8 @@ impl From<RecordingState> for RecordingStatusPayload {
 pub struct PermissionPayload {
     pub screen_recording: PermissionStatusPayload,
     pub microphone: PermissionStatusPayload,
+    /// Accessibility permission — required for target-aware cursor kind (Hand/IBeam).
+    pub accessibility: PermissionStatusPayload,
 }
 
 /// Mic level payload sent to the frontend during recording.
@@ -63,6 +65,7 @@ impl From<RecordingPermissions> for PermissionPayload {
         Self {
             screen_recording: permissions.screen_recording.into(),
             microphone: permissions.microphone.into(),
+            accessibility: permissions.accessibility.into(),
         }
     }
 }

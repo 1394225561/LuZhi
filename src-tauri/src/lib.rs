@@ -124,6 +124,7 @@ fn recording_permissions() -> PermissionPayload {
     let permissions = RecordingPermissions {
         screen_recording: PermissionStatus::Unknown,
         microphone: PermissionStatus::Unknown,
+        accessibility: PermissionStatus::Unknown,
     };
 
     PermissionPayload::from(permissions)

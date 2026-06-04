@@ -32,6 +32,7 @@ describe('App', () => {
         return Promise.resolve({
           screenRecording: 'unknown',
           microphone: 'unknown',
+          accessibility: 'unknown',
         })
       }
       return Promise.reject(new Error(`unexpected command ${command}`))
@@ -113,6 +114,7 @@ describe('App', () => {
         return Promise.resolve({
           screenRecording: 'notDetermined',
           microphone: 'notDetermined',
+          accessibility: 'notDetermined',
         })
       }
       return Promise.reject(new Error(`unexpected command ${command}`))
@@ -129,7 +131,7 @@ describe('App', () => {
   it('prevents double-click on start recording', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -168,7 +170,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -235,7 +237,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -286,7 +288,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -342,6 +344,7 @@ describe('App', () => {
         return Promise.resolve({
           screenRecording: 'denied',
           microphone: 'denied',
+          accessibility: 'denied',
         })
       }
       return Promise.reject(new Error(`unexpected command ${command}`))
@@ -362,6 +365,7 @@ describe('App', () => {
         return Promise.resolve({
           screenRecording: 'unknown',
           microphone: 'unknown',
+          accessibility: 'unknown',
         })
       }
       if (command === 'set_capture_mode') return Promise.resolve()
@@ -399,7 +403,7 @@ describe('App', () => {
   it('does not call Tauri when window mode is selected', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       return Promise.reject(new Error(`unexpected command ${command}`))
     })
 
@@ -435,7 +439,7 @@ describe('App', () => {
   it('error view does not contain false drag-region markers', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'failed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       return Promise.reject(new Error(`unexpected command ${command}`))
     })
 
@@ -459,7 +463,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -539,7 +543,7 @@ describe('App', () => {
         if (statusCalls === 1) return Promise.resolve({ state: 'idle', canStart: true })
         return Promise.resolve({ state: 'recording', canStart: false })
       }
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -576,7 +580,7 @@ describe('App', () => {
         if (statusCalls === 2) return Promise.resolve({ state: 'recording', canStart: false })
         return Promise.resolve({ state: 'completed', canStart: true })
       }
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -634,7 +638,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -712,7 +716,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -798,7 +802,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -848,7 +852,7 @@ describe('App', () => {
   it('removes mic indicator bars when mic is toggled off', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       return Promise.reject(new Error(`unexpected command ${command}`))
     })
 
@@ -896,7 +900,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -962,7 +966,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_capture_mode') return Promise.resolve()
       if (command === 'set_audio_config') return Promise.resolve()
       if (command === 'start_recording') return Promise.resolve()
@@ -989,7 +993,7 @@ describe('App', () => {
   it('sends beautify config when cursor smoothing is toggled in preview', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_beautify_config') return Promise.resolve()
       if (command === 'build_cursor_effect_timeline') {
         return Promise.resolve({ frameCount: 30, clickEffectCount: 1, effectTimelinePath: '/tmp/effects.json' })
@@ -1021,7 +1025,7 @@ describe('App', () => {
   it('calls export_video from preview export button', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_beautify_config') return Promise.resolve()
       if (command === 'build_cursor_effect_timeline') {
         return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
@@ -1068,7 +1072,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_beautify_config') return Promise.resolve()
       if (command === 'build_cursor_effect_timeline') {
         return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: null })
@@ -1109,7 +1113,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_beautify_config') return Promise.resolve()
       if (command === 'build_cursor_effect_timeline') {
         return Promise.resolve({ frameCount: 10, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
@@ -1144,7 +1148,7 @@ describe('App', () => {
   it('debounces consecutive beautify changes into a single timeline build', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_beautify_config') return Promise.resolve()
       if (command === 'build_cursor_effect_timeline') {
         return Promise.resolve({ frameCount: 10, clickEffectCount: 0, effectTimelinePath: '/tmp/effects.json' })
@@ -1183,7 +1187,7 @@ describe('App', () => {
     let buildCalled = false
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_beautify_config') return Promise.resolve()
       if (command === 'build_cursor_effect_timeline') {
         buildCalled = true
@@ -1212,7 +1216,7 @@ describe('App', () => {
     let buildCalled = false
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_beautify_config') return Promise.reject(new Error('config write failed'))
       if (command === 'build_cursor_effect_timeline') {
         buildCalled = true
@@ -1243,7 +1247,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'set_beautify_config') {
         return new Promise<void>((resolve) => {
           resolveConfig = resolve
@@ -1293,7 +1297,7 @@ describe('App', () => {
   it('initializes beautify controls from backend on preview mount', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: false,
@@ -1330,7 +1334,7 @@ describe('App', () => {
     const callOrder: string[] = []
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1381,7 +1385,7 @@ describe('App', () => {
   it('flushes pending beautify config when navigating back from preview', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1434,7 +1438,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1500,7 +1504,7 @@ describe('App', () => {
   it('shows error when build_cursor_effect_timeline rejects with raw cursor conflict', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1533,7 +1537,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1574,7 +1578,7 @@ describe('App', () => {
   it('stays on preview when handleBack flush fails and shows error', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1612,7 +1616,7 @@ describe('App', () => {
   it('shows generic error when build_cursor_effect_timeline rejects with non-cursor-conflict error', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1643,7 +1647,7 @@ describe('App', () => {
   it('shows generic error when export_video rejects with non-cursor-conflict error', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1676,7 +1680,7 @@ describe('App', () => {
   it('shows generic error when set_beautify_config rejects with non-cursor-conflict error during beautify change', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1717,7 +1721,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1775,7 +1779,7 @@ describe('App', () => {
     let buildCallCount = 0
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1822,7 +1826,7 @@ describe('App', () => {
     let exportCallCount = 0
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1864,7 +1868,7 @@ describe('App', () => {
   it('builds cut timeline when auto trim is toggled in preview', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1893,7 +1897,7 @@ describe('App', () => {
     const callOrder: string[] = []
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1939,7 +1943,7 @@ describe('App', () => {
   it('clears export summary when beautify config changes', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
@@ -1987,7 +1991,7 @@ describe('App', () => {
   it('shows local trial days in idle state', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'license_status') {
         return Promise.resolve({
           kind: 'trial',
@@ -2007,7 +2011,7 @@ describe('App', () => {
   it('shows expired local trial state', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'license_status') {
         return Promise.resolve({
           kind: 'expired',
@@ -2027,7 +2031,7 @@ describe('App', () => {
   it('shows activated local license state', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'license_status') {
         return Promise.resolve({
           kind: 'activated',
@@ -2047,7 +2051,7 @@ describe('App', () => {
   it('shows playable export success when outputPath is returned', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true,
@@ -2090,7 +2094,7 @@ describe('App', () => {
     let exportResolve: (value: unknown) => void = () => {}
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true,
@@ -2139,7 +2143,7 @@ describe('App', () => {
 
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
-      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted' })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
       if (command === 'get_beautify_config') {
         return Promise.resolve({
           cursorMagnification: true, magnificationFactor: 2,
