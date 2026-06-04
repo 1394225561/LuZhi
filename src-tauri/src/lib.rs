@@ -1245,6 +1245,7 @@ mod tests {
             },
             cursor_snapshot_success_count: 2,
             cursor_snapshot_error_count: 0,
+            capture_geometry: None,
         }
     }
 

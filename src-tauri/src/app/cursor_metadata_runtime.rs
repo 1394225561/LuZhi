@@ -8,7 +8,7 @@ use crate::app::error::AppResult;
 use crate::core::clock::SessionClock;
 use crate::core::frame::MediaTimestamp;
 use crate::core::timeline::{
-    BeautifyConfigSnapshot, ClickPhase, CursorClick, CursorSample, MouseButton,
+    BeautifyConfigSnapshot, CaptureGeometry, ClickPhase, CursorClick, CursorSample, MouseButton,
 };
 use crate::media::recording_metadata::RecordingMetadata;
 
@@ -30,6 +30,60 @@ pub trait CursorSnapshotSource: Send + 'static {
     fn snapshot(&mut self) -> AppResult<CursorSnapshot>;
 }
 
+/// Maps cursor coordinates from macOS global screen space to source
+/// video pixel space.
+pub struct CursorCoordinateMapper {
+    origin_x: f32,
+    origin_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    content_height: f32,
+    /// Whether to flip Y axis (CGEventGetLocation Y increases upward,
+    /// but video coordinates Y increases downward).
+    flip_y: bool,
+}
+
+impl CursorCoordinateMapper {
+    pub fn new(geometry: &CaptureGeometry) -> Self {
+        Self {
+            origin_x: geometry.content_origin_x,
+            origin_y: geometry.content_origin_y,
+            scale_x: geometry.stream_width as f32 / geometry.content_width.max(1.0),
+            scale_y: geometry.stream_height as f32 / geometry.content_height.max(1.0),
+            content_height: geometry.content_height,
+            flip_y: true, // CGEventGetLocation Y is bottom-up, video is top-down
+        }
+    }
+
+    /// Map global screen coordinates to source video pixel coordinates.
+    /// Returns `None` if the cursor is outside the capture region.
+    pub fn map(&self, global_x: f32, global_y: f32) -> Option<(f32, f32)> {
+        let local_x = global_x - self.origin_x;
+        let local_y_raw = global_y - self.origin_y;
+
+        // Flip Y if needed (global screen Y increases upward, video Y increases downward).
+        let local_y = if self.flip_y {
+            self.content_height - local_y_raw
+        } else {
+            local_y_raw
+        };
+
+        let source_x = local_x * self.scale_x;
+        let source_y = local_y * self.scale_y;
+
+        // Cursor outside capture region: negative or beyond stream dimensions.
+        if source_x < 0.0
+            || source_y < 0.0
+            || source_x > self.content_height / self.scale_y.max(f32::EPSILON)
+            || source_y > self.content_height / self.scale_y.max(f32::EPSILON)
+        {
+            return None;
+        }
+
+        Some((source_x, source_y))
+    }
+}
+
 /// Pure recorder that converts snapshots into timeline metadata.
 pub struct CursorMetadataRecorder {
     fps: u32,
@@ -41,17 +95,23 @@ pub struct CursorMetadataRecorder {
     beautify_snapshot: BeautifyConfigSnapshot,
     snapshot_success_count: u64,
     snapshot_error_count: u64,
+    coordinate_mapper: Option<CursorCoordinateMapper>,
 }
 
 impl CursorMetadataRecorder {
-    pub fn new(fps: u32, beautify_snapshot: BeautifyConfigSnapshot) -> Self {
-        Self::with_max_samples(fps, DEFAULT_MAX_CURSOR_SAMPLES, beautify_snapshot)
+    pub fn new(
+        fps: u32,
+        beautify_snapshot: BeautifyConfigSnapshot,
+        capture_geometry: Option<CaptureGeometry>,
+    ) -> Self {
+        Self::with_max_samples(fps, DEFAULT_MAX_CURSOR_SAMPLES, beautify_snapshot, capture_geometry)
     }
 
     pub fn with_max_samples(
         fps: u32,
         max_samples: usize,
         beautify_snapshot: BeautifyConfigSnapshot,
+        capture_geometry: Option<CaptureGeometry>,
     ) -> Self {
         Self {
             fps,
@@ -63,6 +123,7 @@ impl CursorMetadataRecorder {
             beautify_snapshot,
             snapshot_success_count: 0,
             snapshot_error_count: 0,
+            coordinate_mapper: capture_geometry.map(|geo| CursorCoordinateMapper::new(&geo)),
         }
     }
 
@@ -138,7 +199,11 @@ impl CursorMetadataRecorder {
         self.snapshot_error_count += 1;
     }
 
-    pub fn finish(self, duration_nanos: u64) -> RecordingMetadata {
+    pub fn finish(
+        self,
+        duration_nanos: u64,
+        capture_geometry: Option<CaptureGeometry>,
+    ) -> RecordingMetadata {
         RecordingMetadata {
             fps: self.fps,
             duration_nanos,
@@ -147,6 +212,7 @@ impl CursorMetadataRecorder {
             beautify_config: self.beautify_snapshot,
             cursor_snapshot_success_count: self.snapshot_success_count,
             cursor_snapshot_error_count: self.snapshot_error_count,
+            capture_geometry,
         }
     }
 }
@@ -163,6 +229,7 @@ impl CursorMetadataRuntime {
         fps: u32,
         session_clock: Arc<SessionClock>,
         beautify_snapshot: BeautifyConfigSnapshot,
+        capture_geometry: Option<CaptureGeometry>,
     ) -> Self
     where
         S: CursorSnapshotSource,
@@ -172,7 +239,8 @@ impl CursorMetadataRuntime {
         let interval = Duration::from_nanos(1_000_000_000u64 / fps.max(1) as u64);
 
         let handle = thread::spawn(move || {
-            let mut recorder = CursorMetadataRecorder::new(fps.max(1), beautify_snapshot);
+            let mut recorder =
+                CursorMetadataRecorder::new(fps.max(1), beautify_snapshot, capture_geometry);
             while !thread_stop.load(Ordering::Relaxed) {
                 match source.snapshot() {
                     Ok(snapshot) => {
@@ -188,7 +256,7 @@ impl CursorMetadataRuntime {
                 thread::sleep(interval);
             }
 
-            recorder.finish(session_clock.elapsed_nanos())
+            recorder.finish(session_clock.elapsed_nanos(), capture_geometry)
         });
 
         Self {
@@ -229,6 +297,7 @@ mod tests {
                 trim_sensitivity: "medium".to_string(),
                 raw_system_cursor_visible: false,
             },
+            None,
         );
 
         recorder.record_snapshot(
@@ -252,7 +321,7 @@ mod tests {
             },
         );
 
-        let metadata = recorder.finish(66_666_666);
+        let metadata = recorder.finish(66_666_666, None);
 
         assert_eq!(metadata.fps, 30);
         assert_eq!(metadata.cursor_samples.len(), 2);
@@ -271,6 +340,7 @@ mod tests {
                 trim_sensitivity: "medium".to_string(),
                 raw_system_cursor_visible: false,
             },
+            None,
         );
 
         recorder.record_snapshot(
@@ -304,7 +374,7 @@ mod tests {
             },
         );
 
-        let metadata = recorder.finish(50_000_000);
+        let metadata = recorder.finish(50_000_000, None);
 
         assert_eq!(metadata.cursor_clicks.len(), 2);
         assert_eq!(metadata.cursor_clicks[0].button, MouseButton::Left);
@@ -325,6 +395,7 @@ mod tests {
                 trim_sensitivity: "medium".to_string(),
                 raw_system_cursor_visible: false,
             },
+            None,
         );
 
         for i in 0..10 {
@@ -340,7 +411,7 @@ mod tests {
             );
         }
 
-        let metadata = recorder.finish(333_333_333);
+        let metadata = recorder.finish(333_333_333, None);
 
         assert_eq!(metadata.cursor_samples.len(), 3);
         assert_eq!(metadata.cursor_samples[0].x, 7.0);
@@ -356,8 +427,8 @@ mod tests {
             trim_sensitivity: "high".to_string(),
             raw_system_cursor_visible: true,
         };
-        let recorder = CursorMetadataRecorder::new(30, snapshot.clone());
-        let metadata = recorder.finish(1_000_000_000);
+        let recorder = CursorMetadataRecorder::new(30, snapshot.clone(), None);
+        let metadata = recorder.finish(1_000_000_000, None);
 
         assert_eq!(metadata.beautify_config, snapshot);
     }
@@ -374,6 +445,7 @@ mod tests {
                 trim_sensitivity: "medium".to_string(),
                 raw_system_cursor_visible: false,
             },
+            None,
         );
         recorder.record_snapshot(
             MediaTimestamp::from_nanos(0),
@@ -387,7 +459,7 @@ mod tests {
         );
         recorder.record_snapshot_failure();
 
-        let metadata = recorder.finish(33_333_333);
+        let metadata = recorder.finish(33_333_333, None);
 
         assert_eq!(metadata.cursor_snapshot_success_count, 1);
         assert_eq!(metadata.cursor_snapshot_error_count, 1);

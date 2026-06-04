@@ -4,7 +4,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::app::error::{AppError, AppResult};
-use crate::core::timeline::{BeautifyConfigSnapshot, CursorClick, CursorSample, EffectTimeline};
+use crate::core::timeline::{
+    BeautifyConfigSnapshot, CaptureGeometry, CursorClick, CursorSample, EffectTimeline,
+};
 
 /// Recording sidecar metadata saved next to the intermediate recording artifact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -19,6 +21,9 @@ pub struct RecordingMetadata {
     pub cursor_snapshot_success_count: u64,
     #[serde(default)]
     pub cursor_snapshot_error_count: u64,
+    /// Display geometry captured at recording start. `None` for legacy metadata.
+    #[serde(default)]
+    pub capture_geometry: Option<CaptureGeometry>,
 }
 
 /// JSON sidecar reader/writer for cursor metadata and effect timelines.
@@ -105,6 +110,7 @@ mod tests {
             },
             cursor_snapshot_success_count: 1,
             cursor_snapshot_error_count: 0,
+            capture_geometry: None,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -131,6 +137,7 @@ mod tests {
             },
             cursor_snapshot_success_count: 0,
             cursor_snapshot_error_count: 5,
+            capture_geometry: None,
         };
 
         RecordingMetadataWriter::write_metadata(&path, &metadata).unwrap();

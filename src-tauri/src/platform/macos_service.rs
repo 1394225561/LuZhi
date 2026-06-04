@@ -229,6 +229,7 @@ impl MacRecordingService {
             config.fps,
             session_clock.clone(),
             beautify_snapshot,
+            None, // Task 4 will wire capture_geometry from screen capture
         ));
 
         // Spawn frame consumer thread (drain mode).
