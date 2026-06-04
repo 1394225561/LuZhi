@@ -33,17 +33,17 @@ pub trait CursorSnapshotSource: Send + 'static {
 
 /// Maps cursor coordinates from macOS global screen space to source
 /// video pixel space.
+///
+/// Both `CGEventGetLocation()` and `SCDisplay.frame()` use the same macOS
+/// global display coordinate system: origin at top-left of the primary
+/// display, Y increases downward. No Y-axis flip is needed.
 pub struct CursorCoordinateMapper {
     origin_x: f32,
     origin_y: f32,
     scale_x: f32,
     scale_y: f32,
-    content_height: f32,
     stream_width: f32,
     stream_height: f32,
-    /// Whether to flip Y axis (CGEventGetLocation Y increases upward,
-    /// but video coordinates Y increases downward).
-    flip_y: bool,
 }
 
 impl CursorCoordinateMapper {
@@ -53,30 +53,17 @@ impl CursorCoordinateMapper {
             origin_y: geometry.content_origin_y,
             scale_x: geometry.stream_width as f32 / geometry.content_width.max(1.0),
             scale_y: geometry.stream_height as f32 / geometry.content_height.max(1.0),
-            content_height: geometry.content_height,
             stream_width: geometry.stream_width as f32,
             stream_height: geometry.stream_height as f32,
-            flip_y: true, // CGEventGetLocation Y is bottom-up, video is top-down
         }
     }
 
     /// Map global screen coordinates to source video pixel coordinates.
     /// Returns `None` if the cursor is outside the capture region.
     pub fn map(&self, global_x: f32, global_y: f32) -> Option<(f32, f32)> {
-        let local_x = global_x - self.origin_x;
-        let local_y_raw = global_y - self.origin_y;
+        let source_x = (global_x - self.origin_x) * self.scale_x;
+        let source_y = (global_y - self.origin_y) * self.scale_y;
 
-        // Flip Y if needed (global screen Y increases upward, video Y increases downward).
-        let local_y = if self.flip_y {
-            self.content_height - local_y_raw
-        } else {
-            local_y_raw
-        };
-
-        let source_x = local_x * self.scale_x;
-        let source_y = local_y * self.scale_y;
-
-        // Cursor outside capture region: negative or beyond stream dimensions.
         if source_x < 0.0
             || source_y < 0.0
             || source_x > self.stream_width
@@ -506,8 +493,7 @@ mod tests {
         let mapper = CursorCoordinateMapper::new(&geo);
         let (x, y) = mapper.map(960.0, 540.0).unwrap();
         assert!((x - 960.0).abs() < 0.01);
-        // Y is flipped: global 540 (center) → local 540 → flipped 540 → source 540
-        assert!((y - 540.0).abs() < 1.0);
+        assert!((y - 540.0).abs() < 0.01);
     }
 
     #[test]
@@ -545,7 +531,7 @@ mod tests {
         let mapper = CursorCoordinateMapper::new(&geo);
         let (x, y) = mapper.map(480.0, 270.0).unwrap();
         assert!((x - 960.0).abs() < 0.01);
-        assert!((y - 540.0).abs() < 1.0);
+        assert!((y - 540.0).abs() < 0.01);
     }
 
     #[test]
@@ -605,9 +591,8 @@ mod tests {
 
         let metadata = recorder.finish(33_333_333, Some(geo));
         assert_eq!(metadata.cursor_samples.len(), 1);
-        // Y is flipped: global 540 → local 540 → flipped 540 → source 540
         assert!((metadata.cursor_samples[0].x - 960.0).abs() < 0.01);
-        assert!((metadata.cursor_samples[0].y - 540.0).abs() < 1.0);
+        assert!((metadata.cursor_samples[0].y - 540.0).abs() < 0.01);
     }
 
     #[test]
