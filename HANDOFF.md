@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-03 | BUG-0010/0011/0012 实施计划完成（光标坐标归一化、CursorKind 与 glyph 渲染、导出进度粒度升级）；计划已审阅，待选择执行方式后开始实施。
+> 最后更新：2026-06-04 | BUG-0010/0011/0012 实施完成（光标坐标归一化、CursorKind 与 glyph 渲染、导出进度粒度升级）；三个 Phase 16 个 Task 全部完成，待人工验证。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,65 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-04：BUG-0010/0011/0012 实施完成
+
+输入文件：
+
+- `docs/superpowers/plans/2026-06-03-bug-0010-0011-0012-fix-plan.md`
+- `BUG.md`
+
+已完成（16 个 Task，3 个 Phase）：
+
+**Phase 1（Task 1-7）：BUG-0010 光标坐标归一化**
+
+1. `CaptureGeometry` 结构体添加到 `timeline.rs`
+2. `RecordingMetadata` 新增 `capture_geometry` 字段，`CursorMetadataRecorder` 更新
+3. 从 `SCDisplay` 读取显示几何信息（⚠️ FFI 需人工审查）
+4. `CaptureGeometry` 从屏幕捕获传递到光标元数据运行时
+5. `CursorCoordinateMapper` 实现坐标归一化（全局屏幕坐标→源视频像素坐标）
+6. overlay renderer 验证（无代码变更）
+7. BUG.md 更新 BUG-0010 状态和预防规则
+
+**Phase 2（Task 8-12）：BUG-0011 CursorKind 和 Glyph 渲染**
+
+8. `CursorKind` 枚举（Arrow/Hand/IBeam）添加到 `timeline.rs`
+9. `CursorSample`/`CursorFrame` 扩展 `kind` 字段，`CursorMetadataRecorder` 写入默认 Arrow
+10. `CursorEffectEngine` 保留 `kind` 通过平滑和插值
+11. glyph 渲染替换白色圆点（静态 bitmask：24×24 arrow、24×24 hand、16×24 ibeam）
+12. BUG.md 更新 BUG-0011 状态和预防规则
+
+**Phase 3（Task 13-16）：BUG-0012 导出进度粒度升级**
+
+13. `FfmpegTrimExporter` 进度从 segment 级升级为 frame/time 级
+14. 导出准备阶段进度（0→5→10%）和范围映射（1-99→10-99）
+15. 前端 terminal error 显示
+16. BUG.md 更新 BUG-0012 状态和预防规则
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **263 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **321 unit + 10 integration tests** 通过
+- `npm test -- --run` **54 tests** 通过
+- `cargo fmt --check` 通过
+- `npm run build` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/core/timeline.rs`, `src-tauri/src/media/recording_metadata.rs`, `src-tauri/src/app/cursor_metadata_runtime.rs`, `src-tauri/src/platform/macos/screen_capture_kit.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/media/cursor_engine.rs`, `src-tauri/src/media/cursor_overlay.rs`, `src-tauri/src/media/trim_exporter.rs`, `src-tauri/src/lib.rs`, `src/components/preview-view.tsx`, `BUG.md`, `HANDOFF.md`
+
+人工验证门禁：
+
+1. BUG-0010：1080p 主显示器 — 鼠标移动到四角和中心，导出 overlay 精确匹配
+2. BUG-0010：Retina 显示器 — 验证 point/pixel scale 不产生偏移
+3. BUG-0011：普通桌面 — 导出光标为黑底白边箭头
+4. BUG-0011：悬停按钮/链接 — 导出光标为白底黑边手形
+5. BUG-0011：悬停文本框 — 导出光标为黑底白边 I-beam
+6. BUG-0011：点击放大中心必须在目标 hotspot，不在 glyph 中心
+7. BUG-0012：导出 10 秒视频无裁剪 — 进度从 0% 持续增长到 100%
+8. BUG-0012：取消导出 — 进度 UI 清理，不显示成功状态
+
+---
 
 ### 2026-06-03：BUG-0010/0011/0012 实施计划编写
 
