@@ -11,8 +11,8 @@ use crate::core::timeline::{
     BeautifyConfigSnapshot, CaptureGeometry, ClickPhase, CursorClick, CursorKind, CursorSample,
     MouseButton,
 };
-use crate::platform::macos::cursor_kind::CursorKindDiagnostics;
 use crate::media::recording_metadata::RecordingMetadata;
+use crate::platform::macos::cursor_kind::{cursor_kind_diagnostics_merged, CursorKindDiagnostics};
 
 const DEFAULT_MAX_CURSOR_SAMPLES: usize = 120_000;
 const DEFAULT_MAX_CURSOR_CLICKS: usize = 10_000;
@@ -251,12 +251,11 @@ impl CursorMetadataRecorder {
             cursor_snapshot_success_count: self.snapshot_success_count,
             cursor_snapshot_error_count: self.snapshot_error_count,
             capture_geometry,
-            cursor_kind_diagnostics: Some(CursorKindDiagnostics {
-                arrow_count: self.arrow_count,
-                hand_count: self.hand_count,
-                ibeam_count: self.ibeam_count,
-                ..Default::default()
-            }),
+            cursor_kind_diagnostics: Some(cursor_kind_diagnostics_merged(
+                self.arrow_count,
+                self.hand_count,
+                self.ibeam_count,
+            )),
         }
     }
 }
@@ -327,9 +326,7 @@ impl CursorMetadataRuntime {
                 );
                 if diag.hand_count == 0 && diag.ibeam_count == 0 && diag.ax_query_failure_count > 0
                 {
-                    eprintln!(
-                        "[cursor-kind-diagnostics] ⚠️ 未检测到 Hand/IBeam，AX 查询存在失败"
-                    );
+                    eprintln!("[cursor-kind-diagnostics] ⚠️ 未检测到 Hand/IBeam，AX 查询存在失败");
                 }
             }
         }
@@ -559,8 +556,8 @@ mod tests {
                     right_down: false,
                     middle_down: false,
                     kind: CursorKind::Arrow,
-                captured_at_nanos: 0,
-                snapshot_duration_nanos: 0,
+                    captured_at_nanos: 0,
+                    snapshot_duration_nanos: 0,
                 },
             );
         }
@@ -982,5 +979,69 @@ mod tests {
         // Click coordinates should be in source video pixel space.
         assert!((metadata.cursor_clicks[0].x - 960.0).abs() < 0.01);
         assert!((metadata.cursor_clicks[0].y - 540.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn finish_merges_ax_failure_counts_into_metadata() {
+        // Reset global counters to ensure clean state.
+        crate::platform::macos::cursor_kind::reset_global_counters();
+
+        // Simulate AX failures by incrementing the global counter directly.
+        crate::platform::macos::cursor_kind::test_add_ax_query_failures(5);
+        crate::platform::macos::cursor_kind::test_add_ax_fallback_arrows(3);
+
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mut recorder = CursorMetadataRecorder::new(
+            30,
+            BeautifyConfigSnapshot {
+                cursor_magnification: false,
+                magnification_factor: 1.0,
+                cursor_smoothing: false,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+            Some(geo),
+        );
+
+        // Record some Arrow samples (simulating fallback).
+        for i in 0..10 {
+            recorder.record_snapshot(
+                MediaTimestamp::from_nanos(i * 33_333_333),
+                CursorSnapshot {
+                    x: 100.0,
+                    y: 100.0,
+                    left_down: false,
+                    right_down: false,
+                    middle_down: false,
+                    kind: CursorKind::Arrow,
+                    captured_at_nanos: 0,
+                    snapshot_duration_nanos: 0,
+                },
+            );
+        }
+
+        let metadata = recorder.finish(333_333_330, Some(geo));
+        let diag = metadata.cursor_kind_diagnostics.unwrap();
+
+        // AX global counters should be merged.
+        assert_eq!(diag.ax_query_failure_count, 5);
+        assert_eq!(diag.ax_fallback_arrow_count, 3);
+        // Recorder-local kind counts.
+        assert_eq!(diag.arrow_count, 10);
+        assert_eq!(diag.hand_count, 0);
+        assert_eq!(diag.ibeam_count, 0);
+
+        // Clean up global state.
+        crate::platform::macos::cursor_kind::reset_global_counters();
     }
 }

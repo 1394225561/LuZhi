@@ -87,7 +87,10 @@ extern "C" {
         encoding: u32,
     ) -> bool;
     fn CFArrayGetCount(the_array: *const std::ffi::c_void) -> i64;
-    fn CFArrayGetValueAtIndex(the_array: *const std::ffi::c_void, idx: i64) -> *const std::ffi::c_void;
+    fn CFArrayGetValueAtIndex(
+        the_array: *const std::ffi::c_void,
+        idx: i64,
+    ) -> *const std::ffi::c_void;
 }
 
 const K_CFStringEncoding_UTF8: u32 = 0x08000100;
@@ -127,6 +130,55 @@ pub fn ax_query_failure_count() -> u64 {
 /// Get the fallback arrow count (for diagnostics).
 pub fn ax_fallback_arrow_count() -> u64 {
     AX_FALLBACK_ARROW_COUNT.load(Ordering::Relaxed)
+}
+
+/// Merge global AX diagnostic counters with recorder-local kind counts.
+/// Call this at recording stop to get a complete picture.
+///
+/// The global `ax_query_failure_count` and `ax_fallback_arrow_count` come from
+/// the `query_cursor_kind()` function's atomic counters, while `arrow_count`,
+/// `hand_count`, and `ibeam_count` come from the `CursorMetadataRecorder`'s
+/// own per-sample tracking.
+pub fn cursor_kind_diagnostics_merged(
+    recorder_arrow: u64,
+    recorder_hand: u64,
+    recorder_ibeam: u64,
+) -> CursorKindDiagnostics {
+    CursorKindDiagnostics {
+        ax_query_failure_count: AX_QUERY_FAILURE_COUNT.load(Ordering::Relaxed),
+        ax_fallback_arrow_count: AX_FALLBACK_ARROW_COUNT.load(Ordering::Relaxed),
+        arrow_count: recorder_arrow,
+        hand_count: recorder_hand,
+        ibeam_count: recorder_ibeam,
+    }
+}
+
+/// Reset all global diagnostic counters. Only for test isolation.
+///
+/// Tests that manipulate global counters MUST call this before and after
+/// to avoid cross-test contamination.
+///
+/// # Safety
+///
+/// This function is NOT thread-safe — it must only be called from single-threaded
+/// test contexts. The atomics themselves are safe, but concurrent test execution
+/// could cause cross-test contamination.
+pub fn reset_global_counters() {
+    AX_QUERY_FAILURE_COUNT.store(0, Ordering::Relaxed);
+    AX_FALLBACK_ARROW_COUNT.store(0, Ordering::Relaxed);
+    KIND_ARROW_COUNT.store(0, Ordering::Relaxed);
+    KIND_HAND_COUNT.store(0, Ordering::Relaxed);
+    KIND_IBEAM_COUNT.store(0, Ordering::Relaxed);
+}
+
+/// Add to the global AX query failure counter. Only for test setup.
+pub fn test_add_ax_query_failures(count: u64) {
+    AX_QUERY_FAILURE_COUNT.fetch_add(count, Ordering::Relaxed);
+}
+
+/// Add to the global AX fallback arrow counter. Only for test setup.
+pub fn test_add_ax_fallback_arrows(count: u64) {
+    AX_FALLBACK_ARROW_COUNT.fetch_add(count, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
