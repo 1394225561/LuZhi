@@ -625,6 +625,20 @@ impl MacScreenCapture {
             1.0
         };
 
+        // 诊断日志：仅打印一次，用于人工确认坐标来源。
+        eprintln!(
+            "[cursor-geometry] display_id={} frame_origin=({:.1}, {:.1}) frame_size=({:.1}×{:.1}) \
+             stream={}×{} point_pixel_scale={:.2}",
+            display_id,
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+            stream_width,
+            stream_height,
+            point_pixel_scale
+        );
+
         CaptureGeometry {
             display_id,
             content_origin_x: frame.origin.x as f32,
