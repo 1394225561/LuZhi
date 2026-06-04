@@ -300,8 +300,76 @@ impl Drop for CursorMetadataRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::clock::SessionClock;
     use crate::core::frame::MediaTimestamp;
     use crate::core::timeline::{ClickPhase, MouseButton};
+
+    /// Mock source that returns a fixed position and kind, with configurable delay.
+    struct SlowMockSource {
+        snapshot_count: u32,
+        delay: Duration,
+        kind: CursorKind,
+    }
+
+    impl SlowMockSource {
+        fn new(delay: Duration, kind: CursorKind) -> Self {
+            Self {
+                snapshot_count: 0,
+                delay,
+                kind,
+            }
+        }
+    }
+
+    impl CursorSnapshotSource for SlowMockSource {
+        fn snapshot(&mut self) -> AppResult<CursorSnapshot> {
+            self.snapshot_count += 1;
+            if !self.delay.is_zero() {
+                thread::sleep(self.delay);
+            }
+            Ok(CursorSnapshot {
+                x: 960.0,
+                y: 540.0,
+                left_down: false,
+                right_down: false,
+                middle_down: false,
+                kind: self.kind,
+            })
+        }
+    }
+
+    #[test]
+    fn runtime_timestamps_snapshot_at_poll_start_not_after_slow_source() {
+        let clock = Arc::new(SessionClock::new());
+        let source = SlowMockSource::new(Duration::from_millis(50), CursorKind::Arrow);
+
+        let mut runtime = CursorMetadataRuntime::spawn(
+            source,
+            30,
+            clock.clone(),
+            BeautifyConfigSnapshot {
+                cursor_magnification: false,
+                magnification_factor: 1.0,
+                cursor_smoothing: false,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+            None,
+        );
+
+        // Wait for a few samples.
+        thread::sleep(Duration::from_millis(200));
+        let metadata = runtime.stop().unwrap();
+
+        // The first sample's timestamp should be close to 0, not delayed by 50ms.
+        // If timestamp is recorded AFTER snapshot(), the first sample would be ~50ms.
+        assert!(
+            metadata.cursor_samples[0].timestamp.nanos < 30_000_000,
+            "first sample timestamp should be near 0, got {}ms",
+            metadata.cursor_samples[0].timestamp.nanos / 1_000_000
+        );
+    }
 
     #[test]
     fn recorder_keeps_samples_in_order() {
