@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-04 | BUG-0010/0011 第二轮整改完成（Y 轴翻转修复、CursorKind provider、glyph 颜色修正、click 坐标归一化、terminal error UI）；11 个 Task 全部完成，待人工验证。
+> 最后更新：2026-06-04 | BUG-0010/0011 第三轮整改完成（timestamp 错位修复、AX system-wide root、parent chain 回溯、CursorKindDiagnostics、首帧诊断、Hand/IBeam rendered 测试、terminal error UI 测试）；12 个 Task 全部完成，待人工验证。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,52 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-04：BUG-0010/0011 第三轮整改完成
+
+输入文件：
+
+- `docs/superpowers/reviews/2026-06-04-bug-0010-0011-third-round-code-review-root-cause-and-fix-plan.md`
+- `docs/superpowers/plans/2026-06-04-bug-0010-0011-third-round-rectification.md`
+
+已完成（12 个 Task）：
+
+1. 新增慢 snapshot 失败测试锁定 BUG-0010 timestamp 错位
+2. timestamp 移到 snapshot() 调用前 — 避免 AX 查询耗时污染坐标时间戳
+3. AX 查询限频 10Hz + snapshot duration 记录 + captured_at 时间戳
+4. 新增 CursorKindProvider trait + CursorKindDiagnostics + mock 测试
+5. AX provider 改用 AXUIElementCreateSystemWide — 修复跨应用 hit-test
+6. 扩展 CursorKind 分类 — parent chain 回溯 3 层 + AXPress action 检查
+7. CursorKindDiagnostics 写入 RecordingMetadata + stop 时结构化日志
+8. 首帧 CVPixelBuffer 实际尺寸诊断日志
+9. 补 Hand/IBeam rendered Y plane 测试 + cursor_frame_with_kind helper
+10. 补 terminal export error UI 测试 — beautifyError 显示与 isExporting 清理
+11. 更新 BUG.md 第三轮整改状态和预防规则
+12. 更新 HANDOFF.md 工作记录与完整回归
+
+验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml` **272 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg` **334 unit + 10 integration tests** 通过
+- `npm test -- --run` **55 tests** 通过
+- `cargo fmt --check` 通过
+- `npm run build` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/app/cursor_metadata_runtime.rs`, `src-tauri/src/platform/macos/cursor_source.rs`, `src-tauri/src/platform/macos/cursor_kind.rs`, `src-tauri/src/platform/macos/screen_capture_kit.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/media/recording_metadata.rs`, `src-tauri/src/media/cursor_overlay.rs`, `src-tauri/src/lib.rs`, `src/App.test.tsx`, `BUG.md`, `HANDOFF.md`
+
+人工验证门禁（第三轮）：
+
+1. BUG-0010 静止：cursor 放四角，导出 overlay 与目标点一致
+2. BUG-0010 动态：快速水平移动 cursor，导出 overlay 不再随移动方向左/右漂
+3. BUG-0010 Retina：Retina 显示器四角和中心
+4. BUG-0011 Arrow：普通桌面导出光标为黑底白边箭头
+5. BUG-0011 Hand：悬停按钮/链接导出光标为白底黑边手形
+6. BUG-0011 IBeam：悬停文本框导出光标为黑底白边 I-beam
+7. BUG-0011 Diagnostics：关闭 Accessibility 权限时 diagnostics 显示 failure count
+
+---
 
 ### 2026-06-04：BUG-0010/0011 第二轮整改完成
 
