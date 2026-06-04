@@ -256,6 +256,8 @@ impl CursorMetadataRecorder {
                 self.hand_count,
                 self.ibeam_count,
             )),
+            media_timeline_diagnostics: None,
+            cursor_timing_diagnostics: None,
         }
     }
 }

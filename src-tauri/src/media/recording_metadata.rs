@@ -29,6 +29,83 @@ pub struct RecordingMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub cursor_kind_diagnostics: Option<CursorKindDiagnostics>,
+    /// Media timeline alignment diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub media_timeline_diagnostics: Option<MediaTimelineDiagnostics>,
+    /// Cursor sampling rate and coverage diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub cursor_timing_diagnostics: Option<CursorTimingDiagnostics>,
+}
+
+/// Diagnostics for aligning video frame PTS, cursor timestamps, and export overlay timestamps.
+/// Allows post-hoc analysis of whether cursor overlay is using the correct timebase.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaTimelineDiagnostics {
+    /// First valid video PTS from CMSampleBuffer (raw, before normalization).
+    pub first_video_pts_nanos_raw: u64,
+    /// Session clock value when first video frame callback was entered.
+    pub first_video_session_entry_nanos: u64,
+    /// First normalized video timestamp (after pts_origin mapping).
+    pub first_video_normalized_nanos: u64,
+    /// Last normalized video timestamp written to source MP4.
+    pub last_video_normalized_nanos: u64,
+    /// Total video frames written.
+    pub video_frame_count: u64,
+    /// First cursor sample timestamp (from SessionClock).
+    pub first_cursor_sample_nanos: u64,
+    /// Last cursor sample timestamp.
+    pub last_cursor_sample_nanos: u64,
+    /// Total cursor samples recorded.
+    pub cursor_sample_count: u64,
+    /// Actual CVPixelBuffer size on first frame (width, height).
+    pub first_frame_actual_size: Option<(u32, u32)>,
+}
+
+impl Default for MediaTimelineDiagnostics {
+    fn default() -> Self {
+        Self {
+            first_video_pts_nanos_raw: 0,
+            first_video_session_entry_nanos: 0,
+            first_video_normalized_nanos: 0,
+            last_video_normalized_nanos: 0,
+            video_frame_count: 0,
+            first_cursor_sample_nanos: 0,
+            last_cursor_sample_nanos: 0,
+            cursor_sample_count: 0,
+            first_frame_actual_size: None,
+        }
+    }
+}
+
+/// Diagnostics for cursor sampling rate and coverage.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorTimingDiagnostics {
+    /// Minimum interval between consecutive cursor samples (nanos).
+    pub sample_interval_min_nanos: u64,
+    /// Maximum interval between consecutive cursor samples (nanos).
+    pub sample_interval_max_nanos: u64,
+    /// Average interval between consecutive cursor samples (nanos).
+    pub sample_interval_avg_nanos: u64,
+    /// Number of cursor samples that were outside the capture geometry.
+    pub samples_outside_geometry: u64,
+    /// Accessibility permission status at recording start.
+    pub accessibility_permission_at_start: String,
+}
+
+impl Default for CursorTimingDiagnostics {
+    fn default() -> Self {
+        Self {
+            sample_interval_min_nanos: 0,
+            sample_interval_max_nanos: 0,
+            sample_interval_avg_nanos: 0,
+            samples_outside_geometry: 0,
+            accessibility_permission_at_start: "unknown".to_string(),
+        }
+    }
 }
 
 /// JSON sidecar reader/writer for cursor metadata and effect timelines.
@@ -118,6 +195,8 @@ mod tests {
             cursor_snapshot_error_count: 0,
             capture_geometry: None,
             cursor_kind_diagnostics: None,
+            media_timeline_diagnostics: None,
+            cursor_timing_diagnostics: None,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -146,6 +225,8 @@ mod tests {
             cursor_snapshot_error_count: 5,
             capture_geometry: None,
             cursor_kind_diagnostics: None,
+            media_timeline_diagnostics: None,
+            cursor_timing_diagnostics: None,
         };
 
         RecordingMetadataWriter::write_metadata(&path, &metadata).unwrap();
@@ -153,5 +234,81 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(parsed, metadata);
+    }
+
+    #[test]
+    fn recording_metadata_serializes_media_timeline_diagnostics() {
+        let metadata = RecordingMetadata {
+            fps: 30,
+            duration_nanos: 5_000_000_000,
+            cursor_samples: vec![],
+            cursor_clicks: vec![],
+            beautify_config: BeautifyConfigSnapshot {
+                cursor_magnification: false,
+                magnification_factor: 1.0,
+                cursor_smoothing: false,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+            cursor_snapshot_success_count: 0,
+            cursor_snapshot_error_count: 0,
+            capture_geometry: None,
+            cursor_kind_diagnostics: None,
+            media_timeline_diagnostics: Some(MediaTimelineDiagnostics {
+                first_video_pts_nanos_raw: 100_000_000,
+                first_video_session_entry_nanos: 50_000_000,
+                first_video_normalized_nanos: 0,
+                last_video_normalized_nanos: 5_000_000_000,
+                video_frame_count: 150,
+                first_cursor_sample_nanos: 10_000_000,
+                last_cursor_sample_nanos: 5_010_000_000,
+                cursor_sample_count: 500,
+                first_frame_actual_size: Some((1920, 1080)),
+            }),
+            cursor_timing_diagnostics: Some(CursorTimingDiagnostics {
+                sample_interval_min_nanos: 8_000_000,
+                sample_interval_max_nanos: 12_000_000,
+                sample_interval_avg_nanos: 10_000_000,
+                samples_outside_geometry: 0,
+                accessibility_permission_at_start: "granted".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let deserialized: RecordingMetadata = serde_json::from_str(&json).unwrap();
+
+        let mtd = deserialized.media_timeline_diagnostics.unwrap();
+        assert_eq!(mtd.first_video_pts_nanos_raw, 100_000_000);
+        assert_eq!(mtd.video_frame_count, 150);
+        assert_eq!(mtd.first_frame_actual_size, Some((1920, 1080)));
+
+        let ctd = deserialized.cursor_timing_diagnostics.unwrap();
+        assert_eq!(ctd.sample_interval_avg_nanos, 10_000_000);
+        assert_eq!(ctd.accessibility_permission_at_start, "granted");
+    }
+
+    #[test]
+    fn new_fields_default_when_absent_from_json() {
+        // Simulate legacy metadata without new fields.
+        let json = r#"{
+            "fps": 30,
+            "durationNanos": 1000000000,
+            "cursorSamples": [],
+            "cursorClicks": [],
+            "beautifyConfig": {
+                "cursorMagnification": false,
+                "magnificationFactor": 1.0,
+                "cursorSmoothing": false,
+                "autoTrimSilences": false,
+                "trimSensitivity": "medium",
+                "rawSystemCursorVisible": false
+            }
+        }"#;
+
+        let parsed: RecordingMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.fps, 30);
+        assert!(parsed.media_timeline_diagnostics.is_none());
+        assert!(parsed.cursor_timing_diagnostics.is_none());
     }
 }

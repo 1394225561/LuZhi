@@ -1274,6 +1274,8 @@ mod tests {
             cursor_snapshot_error_count: 0,
             capture_geometry: None,
             cursor_kind_diagnostics: None,
+            media_timeline_diagnostics: None,
+            cursor_timing_diagnostics: None,
         }
     }
 
