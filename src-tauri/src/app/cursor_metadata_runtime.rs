@@ -156,21 +156,24 @@ impl CursorMetadataRecorder {
         if let Some(previous) = self.previous_snapshot {
             self.record_button_transition(
                 timestamp,
-                snapshot,
+                norm_x,
+                norm_y,
                 MouseButton::Left,
                 previous.left_down,
                 snapshot.left_down,
             );
             self.record_button_transition(
                 timestamp,
-                snapshot,
+                norm_x,
+                norm_y,
                 MouseButton::Right,
                 previous.right_down,
                 snapshot.right_down,
             );
             self.record_button_transition(
                 timestamp,
-                snapshot,
+                norm_x,
+                norm_y,
                 MouseButton::Middle,
                 previous.middle_down,
                 snapshot.middle_down,
@@ -183,7 +186,8 @@ impl CursorMetadataRecorder {
     fn record_button_transition(
         &mut self,
         timestamp: MediaTimestamp,
-        snapshot: CursorSnapshot,
+        norm_x: f32,
+        norm_y: f32,
         button: MouseButton,
         was_down: bool,
         is_down: bool,
@@ -204,8 +208,8 @@ impl CursorMetadataRecorder {
             } else {
                 ClickPhase::Up
             },
-            x: snapshot.x,
-            y: snapshot.y,
+            x: norm_x,
+            y: norm_y,
         });
     }
 
@@ -775,5 +779,62 @@ mod tests {
         assert_eq!(metadata.cursor_samples[0].kind, CursorKind::Arrow);
         assert_eq!(metadata.cursor_samples[1].kind, CursorKind::Hand);
         assert_eq!(metadata.cursor_samples[2].kind, CursorKind::IBeam);
+    }
+
+    #[test]
+    fn recorder_normalizes_click_coordinates() {
+        let geo = CaptureGeometry {
+            display_id: 1,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            content_width: 1920.0,
+            content_height: 1080.0,
+            point_pixel_scale: 1.0,
+            stream_width: 1920,
+            stream_height: 1080,
+        };
+        let mut recorder = CursorMetadataRecorder::new(
+            30,
+            BeautifyConfigSnapshot {
+                cursor_magnification: false,
+                magnification_factor: 1.0,
+                cursor_smoothing: false,
+                auto_trim_silences: false,
+                trim_sensitivity: "medium".to_string(),
+                raw_system_cursor_visible: false,
+            },
+            Some(geo),
+        );
+
+        // First snapshot: no click.
+        recorder.record_snapshot(
+            MediaTimestamp::from_nanos(0),
+            CursorSnapshot {
+                x: 960.0,
+                y: 540.0,
+                left_down: false,
+                right_down: false,
+                middle_down: false,
+                kind: CursorKind::Arrow,
+            },
+        );
+        // Second snapshot: left button pressed.
+        recorder.record_snapshot(
+            MediaTimestamp::from_nanos(16_666_666),
+            CursorSnapshot {
+                x: 960.0,
+                y: 540.0,
+                left_down: true,
+                right_down: false,
+                middle_down: false,
+                kind: CursorKind::Arrow,
+            },
+        );
+
+        let metadata = recorder.finish(33_333_333, Some(geo));
+        assert_eq!(metadata.cursor_clicks.len(), 1);
+        // Click coordinates should be in source video pixel space.
+        assert!((metadata.cursor_clicks[0].x - 960.0).abs() < 0.01);
+        assert!((metadata.cursor_clicks[0].y - 540.0).abs() < 0.01);
     }
 }
