@@ -296,6 +296,28 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
       })
   }
 
+  const handlePlayPause = () => {
+    const video = videoRef.current
+    if (!video) return
+    if (video.paused) {
+      void video.play()
+    } else {
+      video.pause()
+    }
+  }
+
+  const handleSkipBack = () => {
+    const video = videoRef.current
+    if (!video) return
+    video.currentTime = Math.max(0, video.currentTime - 10)
+  }
+
+  const handleSkipForward = () => {
+    const video = videoRef.current
+    if (!video) return
+    video.currentTime = Math.min(video.duration, video.currentTime + 10)
+  }
+
   const exportPresets: Array<{
     id: ExportPreset
     name: string
@@ -385,14 +407,14 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
             {/* Playback Controls */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full">
+                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={handleSkipBack}>
                   <SkipBack className="w-4 h-4" />
                 </Button>
                 <Button
                   variant="ghost"
                   size="icon"
                   className="h-10 w-10 rounded-full bg-surface hover:bg-surface-hover text-foreground"
-                  onClick={() => setIsPlaying(!isPlaying)}
+                  onClick={handlePlayPause}
                 >
                   {isPlaying ? (
                     <Pause className="w-5 h-5" />
@@ -400,7 +422,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
                     <Play className="w-5 h-5 ml-0.5" />
                   )}
                 </Button>
-                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full">
+                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={handleSkipForward}>
                   <SkipForward className="w-4 h-4" />
                 </Button>
               </div>
