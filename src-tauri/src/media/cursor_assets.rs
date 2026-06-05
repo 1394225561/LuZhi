@@ -9,7 +9,6 @@
 //!
 //! Cursor bitmaps are always provided in **logical (point) coordinates**.
 //! The compositor multiplies by `scale_factor` to map to pixel coordinates.
-//! See `CursorTransformContext` for the full pipeline.
 //!
 //! ## References
 //!
@@ -158,10 +157,10 @@ mod tests {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let cursors_dir = Path::new(manifest_dir).join("assets").join("cursors");
 
-        if !cursors_dir.exists() {
-            eprintln!("跳过测试：assets/cursors 目录不存在");
-            return;
-        }
+        assert!(
+            cursors_dir.exists(),
+            "assets/cursors 目录不存在，请确保 PNG 光标素材已提交到仓库"
+        );
 
         let assets = load_cursor_assets(&cursors_dir);
         assert!(
