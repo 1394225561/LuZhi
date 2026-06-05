@@ -58,6 +58,7 @@ export default function App() {
   const [micEnabled, setMicEnabled] = useState(false)
   const [micDevice, setMicDevice] = useState<string | null>(null)
   const [micVolume, setMicVolume] = useState(0)
+  const [denoiseEnabled, setDenoiseEnabled] = useState(false)
   const [elapsedTime, setElapsedTime] = useState(0)
   const [isPaused, setIsPaused] = useState(false)
   const [permissions, setPermissions] = useState<RecordingPermissions>({
@@ -175,6 +176,7 @@ export default function App() {
         microphoneDevice: micDevice,
         sampleRate: 48000,
         channels: 2,
+        denoiseMode: denoiseEnabled ? 'highpass' : 'none',
       })
       await startRecording()
       // Fallback: sync state via backend query in case recording-state-changed event is lost.
@@ -189,7 +191,7 @@ export default function App() {
       setErrorMessage(String(e))
       isStartingRef.current = false
     }
-  }, [appState, recordingMode, systemAudioEnabled, micEnabled, micDevice, resolution, fps])
+  }, [appState, recordingMode, systemAudioEnabled, micEnabled, micDevice, denoiseEnabled, resolution, fps])
 
   const handlePauseRecording = useCallback(async () => {
     if (appState !== 'recording') return
@@ -314,6 +316,8 @@ export default function App() {
             micDevice={micDevice}
             setMicDevice={setMicDevice}
             micVolume={micVolume}
+            denoiseEnabled={denoiseEnabled}
+            onDenoiseChange={setDenoiseEnabled}
             onStartRecording={handleStartRecording}
             resolution={resolution}
             setResolution={setResolution}

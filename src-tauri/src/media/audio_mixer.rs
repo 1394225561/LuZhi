@@ -1,5 +1,9 @@
+use std::sync::Mutex;
+
 use crate::app::error::{AppError, AppResult};
+use crate::core::capture::DenoiseMode;
 use crate::core::frame::{AudioChunk, MediaTimestamp, MixedAudioChunk};
+use crate::media::audio_denoise::HighpassFilter;
 
 /// Unified output sample rate for mixed audio (48 kHz).
 const MIXED_SAMPLE_RATE: u32 = 48_000;
@@ -23,17 +27,43 @@ pub trait AudioMixer: Send {
 /// 2. Channel layout normalization to stereo
 /// 3. Timestamp-based alignment with silence padding for missing segments
 /// 4. Weighted sum mixing with hard clipping protection
-pub struct SimpleAudioMixer;
+/// 5. Optional highpass filter for microphone noise reduction
+pub struct SimpleAudioMixer {
+    /// 高通滤波器状态（每个通道一个），使用 Mutex 提供内部可变性
+    highpass_filters: Mutex<Option<Vec<HighpassFilter>>>,
+    /// 降噪模式
+    denoise_mode: DenoiseMode,
+}
 
 impl SimpleAudioMixer {
-    pub fn new() -> Self {
-        Self
+    pub fn new(denoise_mode: DenoiseMode) -> Self {
+        Self {
+            highpass_filters: Mutex::new(None),
+            denoise_mode,
+        }
+    }
+
+    /// 获取或初始化滤波器（每个通道一个）。
+    fn get_or_init_filters(&self, channels: usize) -> Option<Vec<HighpassFilter>> {
+        if self.denoise_mode != DenoiseMode::Highpass {
+            return None;
+        }
+
+        let mut filters = self.highpass_filters.lock().unwrap();
+        if filters.is_none() {
+            *filters = Some(
+                (0..channels)
+                    .map(|_| HighpassFilter::new(80.0, MIXED_SAMPLE_RATE as f64))
+                    .collect(),
+            );
+        }
+        filters.clone()
     }
 }
 
 impl Default for SimpleAudioMixer {
     fn default() -> Self {
-        Self::new()
+        Self::new(DenoiseMode::default())
     }
 }
 
@@ -44,14 +74,29 @@ impl AudioMixer for SimpleAudioMixer {
         mic: Option<&AudioChunk>,
     ) -> AppResult<MixedAudioChunk> {
         match (system, mic) {
-            (Some(sys), Some(mic)) => mix_two(sys, mic),
-            (Some(sys), None) => passthrough(sys),
-            (None, Some(mic)) => passthrough(mic),
+            (Some(sys), Some(mic)) => mix_two(sys, mic, self),
+            (Some(sys), None) => passthrough(sys, self),
+            (None, Some(mic)) => passthrough(mic, self),
             (None, None) => Err(AppError::AudioMixFailed {
                 reason: "系统音频和麦克风均无数据".to_string(),
             }),
         }
     }
+}
+
+/// 对音频样本应用高通滤波器。
+///
+/// 滤波器按通道独立处理（每个通道有独立的状态）。
+fn apply_highpass(samples: &[f32], channels: u16, filters: &mut [HighpassFilter]) -> Vec<f32> {
+    let channels = channels as usize;
+    let mut output = Vec::with_capacity(samples.len());
+
+    for (i, &sample) in samples.iter().enumerate() {
+        let ch = i % channels;
+        output.push(filters[ch].process(sample));
+    }
+
+    output
 }
 
 /// Validate audio chunk metadata before processing.
@@ -82,10 +127,22 @@ fn validate_audio_chunk(chunk: &AudioChunk) -> AppResult<()> {
 }
 
 /// Single-source passthrough: resample + convert to stereo if needed.
-fn passthrough(chunk: &AudioChunk) -> AppResult<MixedAudioChunk> {
+fn passthrough(chunk: &AudioChunk, mixer: &SimpleAudioMixer) -> AppResult<MixedAudioChunk> {
     validate_audio_chunk(chunk)?;
     let resampled = resample(chunk, MIXED_SAMPLE_RATE);
-    let stereo = to_stereo(&resampled, chunk.channels);
+
+    // 仅对麦克风通道应用降噪
+    let filtered = if mixer.denoise_mode == DenoiseMode::Highpass {
+        if let Some(mut filters) = mixer.get_or_init_filters(chunk.channels as usize) {
+            apply_highpass(&resampled, chunk.channels, &mut filters)
+        } else {
+            resampled
+        }
+    } else {
+        resampled
+    };
+
+    let stereo = to_stereo(&filtered, chunk.channels);
     let clamped = clamp_samples(&stereo);
 
     Ok(MixedAudioChunk {
@@ -104,14 +161,30 @@ fn passthrough(chunk: &AudioChunk) -> AppResult<MixedAudioChunk> {
 /// 3. Overlap region: equal-weight sum (0.5 * system + 0.5 * mic)
 /// 4. Non-overlapping tail: passthrough from the longer source
 /// 5. Hard clamp to [-1.0, 1.0] to prevent clipping
-fn mix_two(system: &AudioChunk, mic: &AudioChunk) -> AppResult<MixedAudioChunk> {
+fn mix_two(
+    system: &AudioChunk,
+    mic: &AudioChunk,
+    mixer: &SimpleAudioMixer,
+) -> AppResult<MixedAudioChunk> {
     validate_audio_chunk(system)?;
     validate_audio_chunk(mic)?;
+
     let sys_resampled = resample(system, MIXED_SAMPLE_RATE);
     let mic_resampled = resample(mic, MIXED_SAMPLE_RATE);
 
+    // 仅对麦克风通道应用降噪
+    let mic_filtered = if mixer.denoise_mode == DenoiseMode::Highpass {
+        if let Some(mut filters) = mixer.get_or_init_filters(mic.channels as usize) {
+            apply_highpass(&mic_resampled, mic.channels, &mut filters)
+        } else {
+            mic_resampled
+        }
+    } else {
+        mic_resampled
+    };
+
     let sys_stereo = to_stereo(&sys_resampled, system.channels);
-    let mic_stereo = to_stereo(&mic_resampled, mic.channels);
+    let mic_stereo = to_stereo(&mic_filtered, mic.channels);
 
     // Determine the overlap window based on timestamps.
     // The output starts at the earlier timestamp and ends at the later one.
@@ -273,7 +346,7 @@ mod tests {
 
     #[test]
     fn passthrough_single_source() {
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         let chunk = make_chunk(0, 48000, 2, vec![0.5, -0.5, 0.3, -0.3]);
 
         let result = mixer.mix(Some(&chunk), None).unwrap();
@@ -287,7 +360,7 @@ mod tests {
 
     #[test]
     fn mix_two_aligned_sources() {
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         let sys = make_chunk(0, 48000, 2, vec![0.6, 0.6, 0.6, 0.6]);
         let mic = make_chunk(0, 48000, 2, vec![0.4, 0.4, 0.4, 0.4]);
 
@@ -301,7 +374,7 @@ mod tests {
 
     #[test]
     fn clipping_protection() {
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         // Both sources at full amplitude
         let sys = make_chunk(0, 48000, 2, vec![1.0, 1.0]);
         let mic = make_chunk(0, 48000, 2, vec![1.0, 1.0]);
@@ -337,7 +410,7 @@ mod tests {
 
     #[test]
     fn mix_both_none_returns_error() {
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         let result = mixer.mix(None, None);
 
         assert!(result.is_err());
@@ -345,7 +418,7 @@ mod tests {
 
     #[test]
     fn mixed_output_stereo_48k() {
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         let sys = make_chunk(0, 44100, 1, vec![0.5, 0.5, 0.5]);
 
         let result = mixer.mix(Some(&sys), None).unwrap();
@@ -356,7 +429,7 @@ mod tests {
 
     #[test]
     fn timestamp_alignment_with_offset() {
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         // System audio starts at 0ms, mic starts at 100ms
         let sys = make_chunk(0, 48000, 2, vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
         let mic = make_chunk(100_000_000, 48000, 2, vec![0.5, 0.5, 0.5, 0.5]);
@@ -394,7 +467,7 @@ mod tests {
     #[test]
     fn simple_mixer_rejects_zero_channel_input_without_panic() {
         // R3: channels==0 must return an error, not panic (division by zero).
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         let chunk = make_chunk(0, 48000, 0, vec![0.5, 0.5, 0.5]);
         let result = mixer.mix(Some(&chunk), None);
         assert!(result.is_err(), "0-channel input must be rejected");
@@ -407,7 +480,7 @@ mod tests {
     #[test]
     fn simple_mixer_rejects_zero_sample_rate_input_without_panic() {
         // R3: sample_rate==0 must return an error, not cause NaN in resample.
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         let chunk = make_chunk(0, 0, 2, vec![0.5, 0.5]);
         let result = mixer.mix(Some(&chunk), None);
         assert!(result.is_err(), "0-sample-rate input must be rejected");
@@ -420,7 +493,7 @@ mod tests {
     #[test]
     fn simple_mixer_rejects_sample_len_not_multiple_of_channels() {
         // R3: odd sample count with 2ch means misaligned interleaved data.
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         let chunk = make_chunk(0, 48000, 2, vec![0.5, 0.5, 0.5]); // 3 samples, 2ch
         let result = mixer.mix(Some(&chunk), None);
         assert!(result.is_err(), "misaligned samples must be rejected");
@@ -433,7 +506,7 @@ mod tests {
     #[test]
     fn mix_two_rejects_zero_channel_mic_input() {
         // R3: mix_two must also validate both inputs.
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         let sys = make_chunk(0, 48000, 2, vec![0.5, 0.5]);
         let mic = make_chunk(0, 48000, 0, vec![0.5]);
         let result = mixer.mix(Some(&sys), Some(&mic));
@@ -443,7 +516,7 @@ mod tests {
     #[test]
     fn mixed_output_sample_len_matches_declared_stereo_channels() {
         // Verify that MixedAudioChunk.samples.len() is always even (stereo).
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         let chunk = make_chunk(0, 24000, 1, vec![0.5, 0.5, 0.5]);
         let result = mixer.mix(Some(&chunk), None).unwrap();
         assert_eq!(result.channels, 2);
@@ -456,5 +529,62 @@ mod tests {
         let duration_secs =
             result.samples.len() as f64 / result.channels as f64 / result.sample_rate as f64;
         assert!(duration_secs > 0.0, "duration must be positive");
+    }
+
+    #[test]
+    fn mixer_with_highpass_removes_dc_offset_from_mic() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::Highpass);
+
+        // 创建带有 DC 偏移的麦克风输入
+        let mic = make_chunk(0, 48000, 1, vec![0.5; 4800]);
+
+        let result = mixer.mix(None, Some(&mic)).unwrap();
+
+        // 经过高通滤波，DC 应被衰减
+        let avg: f32 = result.samples.iter().sum::<f32>() / result.samples.len() as f32;
+        assert!(
+            avg.abs() < 0.05,
+            "DC offset should be removed, got avg {}",
+            avg
+        );
+    }
+
+    #[test]
+    fn mixer_without_highpass_preserves_dc_offset() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::None);
+
+        let mic = make_chunk(0, 48000, 1, vec![0.5; 4800]);
+
+        let result = mixer.mix(None, Some(&mic)).unwrap();
+
+        // 无降噪时，DC 应保持（经过 resample 和 to_stereo，值可能有微小变化）
+        let avg: f32 = result.samples.iter().sum::<f32>() / result.samples.len() as f32;
+        assert!(
+            avg > 0.3,
+            "DC offset should be preserved without filter, got avg {}",
+            avg
+        );
+    }
+
+    #[test]
+    fn mixer_highpass_only_affects_mic_not_system() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::Highpass);
+
+        // 系统音频带有 DC 偏移
+        let sys = make_chunk(0, 48000, 1, vec![0.5; 4800]);
+        // 麦克风带有 DC 偏移
+        let mic = make_chunk(0, 48000, 1, vec![0.5; 4800]);
+
+        let result = mixer.mix(Some(&sys), Some(&mic)).unwrap();
+
+        // 混音后，系统音频的 DC 应保留（0.5 * 0.5 = 0.25）
+        // 麦克风的 DC 应被滤除（接近 0）
+        // 总体应接近 0.25
+        let avg: f32 = result.samples.iter().sum::<f32>() / result.samples.len() as f32;
+        assert!(
+            avg > 0.1 && avg < 0.4,
+            "System audio DC should be preserved, mic DC should be removed, got avg {}",
+            avg
+        );
     }
 }

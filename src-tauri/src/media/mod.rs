@@ -1,3 +1,4 @@
+pub mod audio_denoise;
 pub mod audio_mixer;
 pub mod audio_synchronizer;
 pub mod cursor_assets;

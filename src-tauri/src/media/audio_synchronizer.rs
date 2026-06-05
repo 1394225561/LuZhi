@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::app::error::AppResult;
+use crate::core::capture::DenoiseMode;
 use crate::core::frame::{AudioChunk, MixedAudioChunk};
 use crate::media::audio_mixer::{AudioMixer, SimpleAudioMixer};
 
@@ -496,7 +497,10 @@ impl<M: AudioMixer> AudioSynchronizer<M> {
 
 impl Default for AudioSynchronizer<SimpleAudioMixer> {
     fn default() -> Self {
-        Self::new(SimpleAudioMixer::new(), AudioSynchronizerConfig::default())
+        Self::new(
+            SimpleAudioMixer::new(DenoiseMode::default()),
+            AudioSynchronizerConfig::default(),
+        )
     }
 }
 
@@ -529,7 +533,7 @@ mod tests {
 
     fn dual_source_synchronizer() -> AudioSynchronizer<SimpleAudioMixer> {
         AudioSynchronizer::new(
-            SimpleAudioMixer::new(),
+            SimpleAudioMixer::new(DenoiseMode::default()),
             AudioSynchronizerConfig {
                 requested_system_audio: true,
                 requested_microphone: true,
@@ -1047,7 +1051,8 @@ mod tests {
             source_start_grace_nanos: 500_000_000, // 500ms grace
             ..Default::default()
         };
-        let mut sync = AudioSynchronizer::new(SimpleAudioMixer::new(), config);
+        let mut sync =
+            AudioSynchronizer::new(SimpleAudioMixer::new(DenoiseMode::default()), config);
 
         // System arrives at t=0
         sync.push_system(chunk(0, vec![0.3, 0.3]));
@@ -1074,7 +1079,8 @@ mod tests {
             source_start_grace_nanos: 100_000_000, // 100ms grace
             ..Default::default()
         };
-        let mut sync = AudioSynchronizer::new(SimpleAudioMixer::new(), config);
+        let mut sync =
+            AudioSynchronizer::new(SimpleAudioMixer::new(DenoiseMode::default()), config);
 
         // System arrives at t=0
         sync.push_system(chunk(0, vec![0.3, 0.3]));
@@ -1104,7 +1110,8 @@ mod tests {
             source_start_grace_nanos: 0,
             ..Default::default()
         };
-        let mut sync = AudioSynchronizer::new(SimpleAudioMixer::new(), config);
+        let mut sync =
+            AudioSynchronizer::new(SimpleAudioMixer::new(DenoiseMode::default()), config);
 
         // Both sources start together at t=0
         sync.push_system(chunk(0, vec![0.3, 0.3]));

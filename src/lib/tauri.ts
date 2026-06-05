@@ -19,12 +19,15 @@ export type RecordingPermissions = {
 
 export type CaptureMode = 'fullscreen' | 'window' | 'area'
 
+export type DenoiseMode = 'none' | 'highpass'
+
 export type AudioConfig = {
   captureSystemAudio: boolean
   captureMicrophone: boolean
   microphoneDevice: string | null
   sampleRate: number
   channels: number
+  denoiseMode?: DenoiseMode
 }
 
 export type CaptureConfig = {

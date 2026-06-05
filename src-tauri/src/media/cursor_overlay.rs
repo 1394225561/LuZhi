@@ -257,7 +257,15 @@ impl CursorOverlayRenderer {
 
         // Draw the cursor asset with RGBA alpha blending on Y/U/V planes.
         Self::draw_rgba_cursor(
-            frame, w as i64, h as i64, draw_x, draw_y, scaled_w, scaled_h, asset, scale,
+            frame,
+            w as i64,
+            h as i64,
+            draw_x,
+            draw_y,
+            scaled_w,
+            scaled_h,
+            asset,
+            scale,
             cursor_frame.opacity,
         );
 
@@ -432,8 +440,7 @@ impl CursorOverlayRenderer {
                 let uv_x = px / 2;
                 let u_offset = uv_y * u_linesize + uv_x;
                 if let Some(existing_u) = u_data.get(u_offset) {
-                    let blended_u =
-                        (u_val * alpha + *existing_u as f32 * inv_alpha).round() as u8;
+                    let blended_u = (u_val * alpha + *existing_u as f32 * inv_alpha).round() as u8;
                     u_data[u_offset] = blended_u;
                 }
             }
@@ -449,8 +456,7 @@ impl CursorOverlayRenderer {
                 let uv_x = px / 2;
                 let v_offset = uv_y * v_linesize + uv_x;
                 if let Some(existing_v) = v_data.get(v_offset) {
-                    let blended_v =
-                        (v_val * alpha + *existing_v as f32 * inv_alpha).round() as u8;
+                    let blended_v = (v_val * alpha + *existing_v as f32 * inv_alpha).round() as u8;
                     v_data[v_offset] = blended_v;
                 }
             }
@@ -603,9 +609,7 @@ mod tests {
         let y_plane = frame.data(0);
         let linesize = y_plane.len() / 1080;
         let near_center = 540 * linesize + 960;
-        let has_visible = y_plane[near_center..near_center + 8]
-            .iter()
-            .any(|&b| b > 0);
+        let has_visible = y_plane[near_center..near_center + 8].iter().any(|&b| b > 0);
         assert!(
             has_visible,
             "cursor asset should be visible near cursor position"
@@ -838,7 +842,9 @@ mod tests {
     fn rendered_arrow_rgba_blends_yuv_planes() {
         // Use the real SVG assets for this test.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let cursors_dir = std::path::Path::new(manifest_dir).join("assets").join("cursors");
+        let cursors_dir = std::path::Path::new(manifest_dir)
+            .join("assets")
+            .join("cursors");
         let assets = crate::media::cursor_assets::load_cursor_assets(&cursors_dir);
 
         let timeline = make_timeline(vec![cursor_frame(0, 960.0, 540.0)], true);
@@ -866,9 +872,7 @@ mod tests {
         let y_plane = frame.data(0);
         let linesize = frame.stride(0);
         let tip_offset = 540 * linesize + 960;
-        let has_visible = y_plane[tip_offset..tip_offset + 10]
-            .iter()
-            .any(|&b| b > 0);
+        let has_visible = y_plane[tip_offset..tip_offset + 10].iter().any(|&b| b > 0);
         assert!(
             has_visible,
             "arrow cursor should be visible on Y plane near cursor position"

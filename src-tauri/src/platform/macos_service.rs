@@ -13,7 +13,7 @@ use super::macos::screen_capture_kit::MacScreenCapture;
 use crate::app::cursor_metadata_runtime::CursorMetadataRuntime;
 use crate::app::error::AppResult;
 use crate::app::state_machine::{RecordingState, RecordingStateMachine};
-use crate::core::capture::{AudioCapture, AudioConfig, ScreenCapture};
+use crate::core::capture::{AudioCapture, AudioConfig, DenoiseMode, ScreenCapture};
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
@@ -120,7 +120,7 @@ impl MacRecordingService {
             screen_capture: MacScreenCapture::new(),
             mic_capture: CpalMicrophoneCapture::new(),
             state_machine: RecordingStateMachine::new(),
-            _mixer: SimpleAudioMixer::new(),
+            _mixer: SimpleAudioMixer::new(DenoiseMode::default()),
             video_receiver: None,
             system_audio_receiver: None,
             mic_receiver: None,
@@ -262,6 +262,7 @@ impl MacRecordingService {
         let requested_system_audio = audio_config.capture_system_audio;
         let requested_microphone = audio_config.capture_microphone;
         let microphone_device = audio_config.microphone_device.clone();
+        let denoise_mode = audio_config.denoise_mode;
 
         // Save for export contract validation.
         self.last_requested_system_audio = requested_system_audio;
@@ -283,6 +284,7 @@ impl MacRecordingService {
                 requested_system_audio,
                 requested_microphone,
                 microphone_device,
+                denoise_mode,
             );
             let _ = consumer_result_tx.send(output);
         }));
@@ -640,9 +642,10 @@ impl MacRecordingService {
         requested_system_audio: bool,
         requested_microphone: bool,
         microphone_device: Option<String>,
+        denoise_mode: DenoiseMode,
     ) -> RecordingConsumerOutput {
         let mut synchronizer = crate::media::audio_synchronizer::AudioSynchronizer::new(
-            SimpleAudioMixer::new(),
+            SimpleAudioMixer::new(denoise_mode),
             crate::media::audio_synchronizer::AudioSynchronizerConfig {
                 requested_system_audio,
                 requested_microphone,
@@ -1472,6 +1475,7 @@ mod tests {
             false,
             false,
             None,
+            DenoiseMode::default(),
         );
 
         assert!(
@@ -1536,6 +1540,7 @@ mod tests {
             false,
             false,
             None,
+            DenoiseMode::default(),
         );
 
         stopper.join().unwrap();
@@ -1596,6 +1601,7 @@ mod tests {
             false,
             false,
             None,
+            DenoiseMode::default(),
         );
 
         stopper.join().unwrap();
@@ -1682,6 +1688,7 @@ mod tests {
             true, // requested_system_audio
             true, // requested_microphone
             Some("Built-in Microphone".to_string()),
+            DenoiseMode::default(),
         );
 
         assert!(output.diagnostics.requested_system_audio);
@@ -1761,6 +1768,7 @@ mod tests {
             true,  // requested_system_audio
             false, // requested_microphone
             None,
+            DenoiseMode::default(),
         );
 
         // Should have received 11 chunks in final drain.
@@ -1835,6 +1843,7 @@ mod tests {
             true,  // requested_system_audio
             false, // requested_microphone
             None,
+            DenoiseMode::default(),
         );
 
         // Should have received 10 chunks in final drain.
@@ -1898,6 +1907,7 @@ mod tests {
             true,
             false,
             None,
+            DenoiseMode::default(),
         );
 
         // Consumer should have drained the 5 chunks in final drain.
@@ -1957,6 +1967,7 @@ mod tests {
             true,
             false,
             None,
+            DenoiseMode::default(),
         );
 
         stopper.join().unwrap();
@@ -2026,6 +2037,7 @@ mod tests {
             true,
             false,
             None,
+            DenoiseMode::default(),
         );
 
         assert_eq!(output.diagnostics.system_chunks_received, 100);
@@ -2094,6 +2106,7 @@ mod tests {
             true,
             false,
             None,
+            DenoiseMode::default(),
         );
 
         assert_eq!(output.diagnostics.system_chunks_received, 100);
@@ -2155,6 +2168,7 @@ mod tests {
             true,
             false,
             None,
+            DenoiseMode::default(),
         );
 
         // push_audio fails, so per-source counters should be 0
@@ -2219,6 +2233,7 @@ mod tests {
             true,
             false,
             None,
+            DenoiseMode::default(),
         );
 
         // push_audio succeeds (CountingRecordingWriter never fails),

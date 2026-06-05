@@ -3,6 +3,21 @@ use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::MediaSender;
 
+/// 音频降噪模式。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum DenoiseMode {
+    /// 不降噪
+    None,
+    /// 高通滤波器（滤除低频噪声）
+    Highpass,
+}
+
+impl Default for DenoiseMode {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// Channel sender used by native capture adapters to hand video frames to Rust services.
 pub type VideoFrameSink = MediaSender<VideoFrameRef>;
 
@@ -62,6 +77,8 @@ pub struct AudioConfig {
     pub sample_rate: u32,
     /// Number of audio channels (1 = mono, 2 = stereo).
     pub channels: u16,
+    /// 降噪模式。
+    pub denoise_mode: DenoiseMode,
 }
 
 /// An audio input or output device available on the system.

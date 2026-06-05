@@ -992,6 +992,7 @@ fn encoder_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::capture::DenoiseMode;
     use crate::core::frame::MediaTimestamp;
     use crate::test_support::ffmpeg_helpers::{test_audio_chunk_at, test_video_frame_at};
     use std::sync::Arc;
@@ -1571,7 +1572,7 @@ mod tests {
         let mic_chunk_samples = 480usize; // 20ms @ 24kHz
         let chunk_duration = 20_000_000u64; // 20ms
         let num_chunks = 3_000_000_000u64 / chunk_duration;
-        let mixer = SimpleAudioMixer::new();
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
 
         for i in 0..num_chunks {
             let ts = i * chunk_duration;

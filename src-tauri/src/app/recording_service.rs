@@ -1,6 +1,6 @@
 use crate::app::error::AppResult;
 use crate::app::state_machine::{RecordingState, RecordingStateMachine};
-use crate::core::capture::{AudioCapture, AudioConfig, ScreenCapture};
+use crate::core::capture::{AudioCapture, AudioConfig, DenoiseMode, ScreenCapture};
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
@@ -27,7 +27,7 @@ impl<C: ScreenCapture, A: AudioCapture> RecordingService<C, A> {
             capture,
             audio_capture,
             state_machine: RecordingStateMachine::new(),
-            mixer: SimpleAudioMixer::new(),
+            mixer: SimpleAudioMixer::new(DenoiseMode::default()),
             video_receiver: None,
             audio_receiver: None,
             mic_receiver: None,
@@ -181,6 +181,7 @@ mod tests {
                     microphone_device: None,
                     sample_rate: 48000,
                     channels: 2,
+                    denoise_mode: DenoiseMode::default(),
                 },
             )
             .unwrap();
@@ -204,6 +205,7 @@ mod tests {
                     microphone_device: None,
                     sample_rate: 48000,
                     channels: 2,
+                    denoise_mode: DenoiseMode::default(),
                 },
             )
             .unwrap();
@@ -231,6 +233,7 @@ mod tests {
                     microphone_device: None,
                     sample_rate: 48000,
                     channels: 2,
+                    denoise_mode: DenoiseMode::default(),
                 },
             )
             .unwrap_err();
@@ -257,6 +260,7 @@ mod tests {
                     microphone_device: None,
                     sample_rate: 48000,
                     channels: 2,
+                    denoise_mode: DenoiseMode::default(),
                 },
             )
             .unwrap_err();

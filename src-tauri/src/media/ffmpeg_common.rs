@@ -1183,7 +1183,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result_with_mic = validate_source_artifact_with_audio_contract(&path, &contract_with_mic);
+        let result_with_mic =
+            validate_source_artifact_with_audio_contract(&path, &contract_with_mic);
         assert!(
             result_with_mic.is_err(),
             "BUG-0013: silent audio should still be rejected when microphone is requested"
@@ -1201,7 +1202,10 @@ mod tests {
             allow_silent_if_system_only: true,
             ..Default::default()
         };
-        assert!(c1.should_allow_silent_audio(), "should allow silent when system-only with flag=true");
+        assert!(
+            c1.should_allow_silent_audio(),
+            "should allow silent when system-only with flag=true"
+        );
 
         let c2 = RequestedAudioContract {
             requested_system_audio: true,
@@ -1209,7 +1213,10 @@ mod tests {
             allow_silent_if_system_only: false,
             ..Default::default()
         };
-        assert!(!c2.should_allow_silent_audio(), "should not allow silent when flag=false");
+        assert!(
+            !c2.should_allow_silent_audio(),
+            "should not allow silent when flag=false"
+        );
 
         let c3 = RequestedAudioContract {
             requested_system_audio: true,
@@ -1217,7 +1224,10 @@ mod tests {
             allow_silent_if_system_only: true,
             ..Default::default()
         };
-        assert!(!c3.should_allow_silent_audio(), "should not allow silent when mic requested");
+        assert!(
+            !c3.should_allow_silent_audio(),
+            "should not allow silent when mic requested"
+        );
 
         let c4 = RequestedAudioContract {
             requested_system_audio: false,
@@ -1225,6 +1235,9 @@ mod tests {
             allow_silent_if_system_only: true,
             ..Default::default()
         };
-        assert!(!c4.should_allow_silent_audio(), "should not allow silent when no audio requested");
+        assert!(
+            !c4.should_allow_silent_audio(),
+            "should not allow silent when no audio requested"
+        );
     }
 }

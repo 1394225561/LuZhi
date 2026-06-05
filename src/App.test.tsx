@@ -402,6 +402,7 @@ describe('App', () => {
         microphoneDevice: null,
         sampleRate: 48000,
         channels: 2,
+        denoiseMode: 'none',
       },
     })
     expect(invokeMock).toHaveBeenNthCalledWith(3, 'start_recording', undefined)

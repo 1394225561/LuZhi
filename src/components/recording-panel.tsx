@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Monitor, AppWindow, Square, Volume2, Mic, Circle, AlertTriangle } from 'lucide-react'
+import { Monitor, AppWindow, Square, Volume2, Mic, Circle, AlertTriangle, AudioWaveform } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -8,6 +8,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
+import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 import { motion } from 'framer-motion'
 import { listMicrophoneDevices, type MicrophoneDeviceInfo } from '@/lib/tauri'
@@ -36,6 +38,8 @@ interface RecordingPanelProps {
   micDevice: string | null
   setMicDevice: (device: string | null) => void
   micVolume: number
+  denoiseEnabled: boolean
+  onDenoiseChange: (enabled: boolean) => void
   onStartRecording: () => void
   resolution: ResolutionOption
   setResolution: (res: ResolutionOption) => void
@@ -53,6 +57,8 @@ export function RecordingPanel({
   micDevice,
   setMicDevice,
   micVolume,
+  denoiseEnabled,
+  onDenoiseChange,
   onStartRecording,
   resolution,
   setResolution,
@@ -258,6 +264,23 @@ export function RecordingPanel({
                 检测到蓝牙音频设备 — 使用内置麦克风可避免音质下降
               </p>
             )}
+          </div>
+        )}
+
+        {/* Denoise toggle — shown when mic is enabled */}
+        {micEnabled && (
+          <div className="mt-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AudioWaveform className="w-4 h-4 text-muted-foreground" />
+              <Label htmlFor="denoise" className="text-xs text-muted-foreground cursor-pointer">
+                降噪（去除电流声）
+              </Label>
+            </div>
+            <Switch
+              id="denoise"
+              checked={denoiseEnabled}
+              onCheckedChange={onDenoiseChange}
+            />
           </div>
         )}
       </div>

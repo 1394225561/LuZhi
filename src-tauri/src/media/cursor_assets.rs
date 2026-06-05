@@ -256,7 +256,10 @@ mod tests {
 
         let arrow = &assets[&CursorKind::Arrow];
         assert!(arrow.width > 0 && arrow.height > 0);
-        assert_eq!(arrow.pixels.len() as u64, arrow.width as u64 * arrow.height as u64);
+        assert_eq!(
+            arrow.pixels.len() as u64,
+            arrow.width as u64 * arrow.height as u64
+        );
     }
 
     #[test]

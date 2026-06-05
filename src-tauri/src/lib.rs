@@ -20,7 +20,7 @@ use app::mic_level_runtime::MicLevelRuntime;
 use app::permission_service::{PermissionStatus, RecordingPermissions};
 use app::recording_runtime::TickRuntime;
 use app::state_machine::RecordingState;
-use core::capture::AudioConfig;
+use core::capture::{AudioConfig, DenoiseMode};
 use core::config::CaptureConfig;
 use core::cut::{TrimConfig, TrimSensitivity};
 use core::processor::{CursorProcessor, SilenceDetector};
@@ -100,6 +100,7 @@ impl Default for AppState {
                 microphone_device: None,
                 sample_rate: 48000,
                 channels: 2,
+                denoise_mode: DenoiseMode::default(),
             })),
             tick_runtime: Arc::new(Mutex::new(None)),
             mic_level_runtime: Arc::new(Mutex::new(None)),
@@ -373,6 +374,8 @@ struct SetAudioConfigPayload {
     microphone_device: Option<String>,
     sample_rate: u32,
     channels: u16,
+    #[serde(default)]
+    denoise_mode: DenoiseMode,
 }
 
 #[tauri::command]
@@ -390,6 +393,7 @@ fn set_audio_config(
         microphone_device: payload.microphone_device,
         sample_rate: payload.sample_rate,
         channels: payload.channels,
+        denoise_mode: payload.denoise_mode,
     };
     Ok(())
 }
