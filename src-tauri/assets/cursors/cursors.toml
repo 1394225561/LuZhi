@@ -1,0 +1,14 @@
+# 光标热点坐标配置
+# hotspot_x/y 为相对于 SVG 视口左上角的像素坐标
+
+[arrow-cursor]
+hotspot_x = 4.0
+hotspot_y = 2.0
+
+[hand-cursor]
+hotspot_x = 14.0
+hotspot_y = 4.0
+
+[ibeam-cursor]
+hotspot_x = 8.0
+hotspot_y = 16.0

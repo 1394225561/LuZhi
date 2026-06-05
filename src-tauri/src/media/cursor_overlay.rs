@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn rendered_arrow_rgba_blends_yuv_planes() {
-        // Use the real PNG assets for this test.
+        // Use the real SVG assets for this test.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let cursors_dir = std::path::Path::new(manifest_dir).join("assets").join("cursors");
         let assets = crate::media::cursor_assets::load_cursor_assets(&cursors_dir);
