@@ -66,9 +66,12 @@ function messageForBeautifyError(error: unknown, fallback: string): string {
 }
 
 export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewViewProps) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const videoContainerRef = useRef<HTMLDivElement>(null)
+  const isSeekingRef = useRef(false)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [currentTime, setCurrentTime] = useState(45)
-  const [duration] = useState(180)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
   const [volume, setVolume] = useState(80)
 
   // AI Beautification settings
@@ -137,6 +140,36 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
       })
     return () => {
       cancelled = true
+    }
+  }, [])
+
+  // Sync video element events with React state
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+
+    const onLoadedMetadata = () => setDuration(video.duration)
+    const onTimeUpdate = () => {
+      if (!isSeekingRef.current) {
+        setCurrentTime(video.currentTime)
+      }
+    }
+    const onPlay = () => setIsPlaying(true)
+    const onPause = () => setIsPlaying(false)
+    const onEnded = () => setIsPlaying(false)
+
+    video.addEventListener('loadedmetadata', onLoadedMetadata)
+    video.addEventListener('timeupdate', onTimeUpdate)
+    video.addEventListener('play', onPlay)
+    video.addEventListener('pause', onPause)
+    video.addEventListener('ended', onEnded)
+
+    return () => {
+      video.removeEventListener('loadedmetadata', onLoadedMetadata)
+      video.removeEventListener('timeupdate', onTimeUpdate)
+      video.removeEventListener('play', onPlay)
+      video.removeEventListener('pause', onPause)
+      video.removeEventListener('ended', onEnded)
     }
   }, [])
 
@@ -300,11 +333,12 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
         {/* Video Preview */}
         <div className="flex-1 bg-card rounded-2xl border border-border/50 overflow-hidden flex flex-col">
           {/* Video Area */}
-          <div className="flex-1 bg-black/50 flex items-center justify-center relative">
+          <div className="flex-1 bg-black/50 flex items-center justify-center relative" ref={videoContainerRef}>
             {recordingResult?.outputPath ? (
               <video
+                ref={videoRef}
                 src={convertFileSrc(recordingResult.outputPath)}
-                controls
+                playsInline
                 className="w-full h-full object-contain"
               />
             ) : (
