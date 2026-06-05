@@ -36,6 +36,9 @@ objc2-core-foundation = "0.3"
 cpal = "0.15"
 block2 = "0.6"
 
+# PNG decoding for cursor assets
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # Video/audio encoding (optional — requires FFmpeg development libraries)
 ffmpeg-next = { version = "7", optional = true }
 
