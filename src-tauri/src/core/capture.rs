@@ -5,6 +5,7 @@ use crate::core::media_channel::MediaSender;
 
 /// 音频降噪模式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum DenoiseMode {
     /// 不降噪
     None,
