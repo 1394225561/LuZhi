@@ -7,7 +7,7 @@ use crate::core::frame::MediaTimestamp;
 /// Used by the overlay renderer to draw the appropriate glyph instead of
 /// a generic white circle. Defaults to `Arrow` for backward compatibility
 /// with timelines that lack kind information.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CursorKind {
     /// Standard arrow pointer (default).

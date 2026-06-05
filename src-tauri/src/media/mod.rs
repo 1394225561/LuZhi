@@ -1,5 +1,6 @@
 pub mod audio_mixer;
 pub mod audio_synchronizer;
+pub mod cursor_assets;
 pub mod cursor_engine;
 #[cfg(feature = "ffmpeg")]
 pub mod cursor_overlay;
