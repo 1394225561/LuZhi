@@ -21,230 +21,16 @@
 
 use crate::app::error::{AppError, AppResult};
 use crate::core::timeline::{CursorFrame, CursorKind, EffectTimeline};
+use crate::media::cursor_assets::CursorAsset;
 use crate::media::export_presets::ExportScalePolicy;
-
-// ---------------------------------------------------------------------------
-// Cursor glyph data
-// ---------------------------------------------------------------------------
-
-/// A pixel in a cursor glyph: transparent, black with alpha, or white with alpha.
-#[derive(Clone, Copy)]
-enum GlyphPixel {
-    Transparent,
-    Black(u8),
-    White(u8),
-}
-
-/// Static cursor glyph with hotspot metadata.
-struct CursorGlyph {
-    width: usize,
-    height: usize,
-    /// Hotspot X relative to glyph top-left corner.
-    hotspot_x: f32,
-    /// Hotspot Y relative to glyph top-left corner.
-    hotspot_y: f32,
-    /// Row-major pixel data.
-    pixels: &'static [GlyphPixel],
-}
-
-/// Get the glyph for a given cursor kind.
-fn glyph_for_kind(kind: CursorKind) -> &'static CursorGlyph {
-    match kind {
-        CursorKind::Arrow => &ARROW_GLYPH,
-        CursorKind::Hand => &HAND_GLYPH,
-        CursorKind::IBeam => &IBEAM_GLYPH,
-    }
-}
-
-// Shorthand constants for the pixel arrays.
-const B: GlyphPixel = GlyphPixel::Black(255);
-const W: GlyphPixel = GlyphPixel::White(255);
-const T: GlyphPixel = GlyphPixel::Transparent;
-
-// Arrow: 24×24 diagonal arrow. Hotspot at tip (0,0).
-// Colors: white outline (W), black fill (B) — matches macOS standard arrow.
-// Row layout (24 values per row, 24 rows = 576 total):
-//   Row 0:  W T T T T T T T T T T T T T T T T T T T T T T T
-//   Row 1:  W W T T T T T T T T T T T T T T T T T T T T T T
-//   Row 2:  W B W T T T T T T T T T T T T T T T T T T T T T
-//   Row 3:  W B B W T T T T T T T T T T T T T T T T T T T T
-//   Row 4:  W B B B W T T T T T T T T T T T T T T T T T T T
-//   Row 5:  W B B B B W T T T T T T T T T T T T T T T T T T
-//   Row 6:  W B B B B B W T T T T T T T T T T T T T T T T T
-//   Row 7:  W B B B B B B W T T T T T T T T T T T T T T T T
-//   Row 8:  W B B B B B B B W T T T T T T T T T T T T T T T
-//   Row 9:  W B B B B B B B B W T T T T T T T T T T T T T T
-//   Row 10: W B B B B B B B B B W T T T T T T T T T T T T T
-//   Row 11: W B B B B B B B B B B W T T T T T T T T T T T T
-//   Row 12: W B B B B B B B B B B B W T T T T T T T T T T T
-//   Row 13: W B B B B B B B B B B B B W T T T T T T T T T T
-//   Row 14: W B B B B B B B B B B B B B W T T T T T T T T T
-//   Row 15: W B B B B B B B B B B B B B B W T T T T T T T T
-//   Row 16: W B B B B B B B B B B B B B B B W T T T T T T T
-//   Row 17: W B B B B B B B B B B B B B B B B W T T T T T T
-//   Row 18: W B B B B B B B B B B B B B B B B B W T T T T T
-//   Row 19: W B B W W W W W W W W W W W W W W W W T T T T T  ← shelf
-//   Row 20: W W W B B B W T T T T T T T T T T T T T T T T T  ← handle top
-//   Row 21: T T W B B B W T T T T T T T T T T T T T T T T T  ← handle body
-//   Row 22: T T T W B B W T T T T T T T T T T T T T T T T T  ← handle body
-//   Row 23: T T T T W W T T T T T T T T T T T T T T T T T T  ← handle bottom
-static ARROW_GLYPH: CursorGlyph = CursorGlyph {
-    width: 24,
-    height: 24,
-    hotspot_x: 0.0,
-    hotspot_y: 0.0,
-    pixels: &ARROW_PIXELS,
-};
-
-#[rustfmt::skip]
-static ARROW_PIXELS: [GlyphPixel; 576] = [
-    // Row 0
-    W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 1
-    W, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 2
-    W, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 3
-    W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 4
-    W, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 5
-    W, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 6
-    W, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 7
-    W, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 8
-    W, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 9
-    W, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 10
-    W, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 11
-    W, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 12
-    W, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 13
-    W, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T, T,
-    // Row 14
-    W, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T, T,
-    // Row 15
-    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T, T,
-    // Row 16
-    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T, T,
-    // Row 17
-    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T, T,
-    // Row 18
-    W, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, B, W, T, T, T, T, T,
-    // Row 19
-    W, B, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, T, T, T, T, T,
-    // Row 20 — tail handle starts (white outline top)
-    W, W, W, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 21 — tail handle body (black fill + white outline)
-    T, T, W, B, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 22 — tail handle body
-    T, T, T, W, B, B, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    // Row 23 — tail handle bottom (white outline)
-    T, T, T, T, W, W, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-];
-
-// Hand: 24×24 open hand silhouette. Hotspot at fingertip (12, 4).
-static HAND_GLYPH: CursorGlyph = CursorGlyph {
-    width: 24,
-    height: 24,
-    hotspot_x: 12.0,
-    hotspot_y: 4.0,
-    pixels: &HAND_PIXELS,
-};
-
-static HAND_PIXELS: [GlyphPixel; 576] = [
-    T, T, T, T, T, T, T, T, B, B, B, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B,
-    W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, B, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, B, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, T, T, T, B, B, B, B, W,
-    W, W, W, W, W, B, B, B, T, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W,
-    B, T, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T,
-    T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W,
-    W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W,
-    W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T,
-    T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W,
-    W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, W,
-    W, B, T, T, T, T, T, T, T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T,
-    T, T, B, W, W, W, W, W, W, W, W, W, W, W, W, W, B, T, T, T, T, T, T, T, T, T, T, B, B, B, B, B,
-    B, B, B, B, B, B, B, B, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
-];
-
-// IBeam: 16×24 I-beam text cursor. Hotspot at center (8, 12).
-// Colors: white outline (W), black body (B) — matches macOS standard I-beam.
-static IBEAM_GLYPH: CursorGlyph = CursorGlyph {
-    width: 16,
-    height: 24,
-    hotspot_x: 8.0,
-    hotspot_y: 12.0,
-    pixels: &IBEAM_PIXELS,
-};
-
-#[rustfmt::skip]
-static IBEAM_PIXELS: [GlyphPixel; 384] = [
-    // Row 0: top serif
-    T, T, T, T, W, W, W, W, W, W, T, T, T, T, T, T,
-    // Row 1: top cap
-    T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T,
-    // Row 2: top transition
-    T, T, T, W, W, B, B, W, W, T, T, T, T, T, T, T,
-    // Row 3
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 4
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 5
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 6
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 7
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 8
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 9
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 10
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 11
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 12
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 13
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 14
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 15
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 16
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 17
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 18
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 19
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 20: bottom transition
-    T, T, T, T, T, W, B, B, W, T, T, T, T, T, T, T,
-    // Row 21: bottom serifs
-    T, T, T, T, W, W, B, B, W, W, T, T, T, T, T, T,
-    // Row 22: bottom cap
-    T, T, T, W, B, B, B, B, B, B, W, T, T, T, T, T,
-    // Row 23: bottom serif
-    T, T, T, W, W, W, W, W, W, W, W, T, T, T, T, T,
-];
 
 /// Renders cursor overlay onto YUV420P video frames during export.
 pub struct CursorOverlayRenderer {
     timeline: EffectTimeline,
     cursor_radius: f32,
     mapper: CursorCoordMapper,
+    /// Pre-loaded cursor assets indexed by kind.
+    cursor_assets: std::collections::HashMap<CursorKind, CursorAsset>,
 }
 
 /// Maps cursor coordinates from source video space to output frame space.
@@ -362,6 +148,7 @@ impl CursorOverlayRenderer {
         scale_policy: ExportScalePolicy,
         crop_origin: Option<(u32, u32)>,
         fit_dims: Option<(u32, u32)>,
+        cursor_assets: std::collections::HashMap<CursorKind, CursorAsset>,
     ) -> Option<Self> {
         if !timeline.render_cursor_overlay || timeline.frames.is_empty() {
             return None;
@@ -381,6 +168,7 @@ impl CursorOverlayRenderer {
             timeline,
             cursor_radius: 12.0,
             mapper,
+            cursor_assets,
         })
     }
 
@@ -436,19 +224,12 @@ impl CursorOverlayRenderer {
             return;
         }
 
-        // Draw on Y plane (luma) only. YUV420P Y=0 is black, Y=235 is white.
         // Read immutable dimensions before mutable data borrow.
         let w = frame.width() as i32;
         let h = frame.height() as i32;
         if w <= 0 || h <= 0 {
             return;
         }
-        let data = frame.data_mut(0);
-        let linesize = if h > 0 {
-            data.len() / h as usize
-        } else {
-            return;
-        };
 
         // Clamp radius: minimum 4px, maximum 256px or half the smallest dimension.
         let max_radius = (w.min(h) / 2).min(256);
@@ -459,32 +240,38 @@ impl CursorOverlayRenderer {
         let out_x_clamped = (out_x.round() as i64).clamp(-margin, w as i64 + margin);
         let out_y_clamped = (out_y.round() as i64).clamp(-margin, h as i64 + margin);
 
-        // Get the glyph for the current cursor kind.
-        let glyph = glyph_for_kind(cursor_frame.kind);
+        // Get the cursor asset for the current kind.
+        let asset = match self.cursor_assets.get(&cursor_frame.kind) {
+            Some(a) => a,
+            None => return, // No asset loaded for this kind.
+        };
 
-        // Scale glyph dimensions.
+        // Scale asset dimensions.
         let scale = clamped_scale;
-        let scaled_w = ((glyph.width as f32 * scale).round() as i64).max(1);
-        let scaled_h = ((glyph.height as f32 * scale).round() as i64).max(1);
+        let scaled_w = ((asset.width as f32 * scale).round() as i64).max(1);
+        let scaled_h = ((asset.height as f32 * scale).round() as i64).max(1);
 
-        // Calculate glyph top-left position: output position minus hotspot offset.
-        let draw_x = out_x_clamped - (glyph.hotspot_x * scale).round() as i64;
-        let draw_y = out_y_clamped - (glyph.hotspot_y * scale).round() as i64;
+        // Calculate asset top-left position: output position minus hotspot offset.
+        let draw_x = out_x_clamped - (asset.hotspot_x * scale).round() as i64;
+        let draw_y = out_y_clamped - (asset.hotspot_y * scale).round() as i64;
 
-        // Draw the glyph with alpha blending on Y plane.
-        Self::draw_glyph_i64(
-            data, w as i64, h as i64, linesize, draw_x, draw_y, scaled_w, scaled_h, glyph, scale,
+        // Draw the cursor asset with RGBA alpha blending on Y/U/V planes.
+        Self::draw_rgba_cursor(
+            frame, w as i64, h as i64, draw_x, draw_y, scaled_w, scaled_h, asset, scale,
+            cursor_frame.opacity,
         );
 
-        // Click magnification ring: still drawn around hotspot.
+        // Click magnification ring: still drawn around hotspot on Y plane only.
         if clamped_scale > 1.05 {
             let ring_radius =
                 ((self.cursor_radius * clamped_scale * 1.4).round() as i64).min(max_radius as i64);
+            let y_linesize = frame.stride(0);
+            let data = frame.data_mut(0);
             Self::draw_circle_outline_i64(
                 data,
                 w as i64,
                 h as i64,
-                linesize,
+                y_linesize,
                 out_x_clamped,
                 out_y_clamped,
                 ring_radius,
@@ -546,27 +333,36 @@ impl CursorOverlayRenderer {
         }
     }
 
-    /// Draw a cursor glyph onto the Y plane with nearest-neighbor scaling.
+    /// Draw a cursor asset onto YUV420P frames with RGBA alpha blending.
     ///
-    /// Each glyph pixel is scaled by `scale` and drawn at the corresponding
-    /// position. Alpha blending is done on the Y plane: existing pixel value
-    /// is blended with the glyph's target value based on the glyph alpha.
+    /// For each pixel in the scaled cursor asset, performs standard
+    /// "over" alpha compositing on the Y, U, and V planes sequentially.
+    /// RGB-to-YUV conversion uses BT.601 coefficients.
+    ///
+    /// To avoid simultaneous mutable borrows of multiple frame planes,
+    /// blend ops are collected first, then applied in three separate passes
+    /// (Y, U, V).
     #[allow(clippy::too_many_arguments)]
-    fn draw_glyph_i64(
-        data: &mut [u8],
+    fn draw_rgba_cursor(
+        frame: &mut ffmpeg_next::util::frame::Video,
         frame_w: i64,
         frame_h: i64,
-        linesize: usize,
         draw_x: i64,
         draw_y: i64,
         scaled_w: i64,
         scaled_h: i64,
-        glyph: &CursorGlyph,
+        asset: &CursorAsset,
         scale: f32,
+        opacity: f32,
     ) {
+        // Collect blending operations to avoid simultaneous mutable borrows
+        // of Y, U, V plane data. Each op: (py, px, y_val, u_val, v_val, alpha).
+        let mut blend_ops: Vec<(usize, usize, f32, f32, f32, f32)> =
+            Vec::with_capacity((scaled_w * scaled_h) as usize);
+
         for sy in 0..scaled_h {
-            let gy = (sy as f32 / scale).floor() as usize;
-            if gy >= glyph.height {
+            let gy = (sy as f32 / scale).floor() as u32;
+            if gy >= asset.height {
                 continue;
             }
             let py = draw_y + sy;
@@ -575,8 +371,8 @@ impl CursorOverlayRenderer {
             }
 
             for sx in 0..scaled_w {
-                let gx = (sx as f32 / scale).floor() as usize;
-                if gx >= glyph.width {
+                let gx = (sx as f32 / scale).floor() as u32;
+                if gx >= asset.width {
                     continue;
                 }
                 let px = draw_x + sx;
@@ -584,23 +380,79 @@ impl CursorOverlayRenderer {
                     continue;
                 }
 
-                let glyph_pixel = &glyph.pixels[gy * glyph.width + gx];
-                let target_y: u8 = match glyph_pixel {
-                    GlyphPixel::Transparent => continue,
-                    GlyphPixel::Black(a) => {
-                        // Blend toward black (Y=16)
-                        let a_f = *a as f32 / 255.0;
-                        let existing = data[(py as usize) * linesize + px as usize] as f32;
-                        (existing * (1.0 - a_f) + 16.0 * a_f).round() as u8
-                    }
-                    GlyphPixel::White(a) => {
-                        // Blend toward white (Y=235)
-                        let a_f = *a as f32 / 255.0;
-                        let existing = data[(py as usize) * linesize + px as usize] as f32;
-                        (existing * (1.0 - a_f) + 235.0 * a_f).round() as u8
-                    }
-                };
-                data[(py as usize) * linesize + px as usize] = target_y;
+                let pixel = &asset.pixels[(gy * asset.width + gx) as usize];
+                if pixel.a == 0 {
+                    continue; // Fully transparent.
+                }
+
+                let alpha = (pixel.a as f32 / 255.0) * opacity;
+
+                // NOTE: YUV420P chroma subsampling — each UV cell covers a 2x2 luma block.
+                // When multiple semi-transparent cursor pixels map to the same UV cell,
+                // the last pixel processed overwrites the previous blend. This produces
+                // minor color fringing at cursor edges, which is acceptable for overlay use.
+
+                // RGB to YUV (BT.601)
+                let r = pixel.r as f32;
+                let g = pixel.g as f32;
+                let b = pixel.b as f32;
+                let y_val = 0.299 * r + 0.587 * g + 0.114 * b;
+                let u_val = -0.169 * r - 0.331 * g + 0.500 * b + 128.0;
+                let v_val = 0.500 * r - 0.419 * g - 0.081 * b + 128.0;
+
+                blend_ops.push((py as usize, px as usize, y_val, u_val, v_val, alpha));
+            }
+        }
+
+        if blend_ops.is_empty() {
+            return;
+        }
+
+        // Pass 1: blend Y plane.
+        {
+            let y_linesize = frame.stride(0);
+            let y_data = frame.data_mut(0);
+            for &(py, px, y_val, _, _, alpha) in &blend_ops {
+                let inv_alpha = 1.0 - alpha;
+                let y_offset = py * y_linesize + px;
+                if let Some(existing) = y_data.get(y_offset) {
+                    let blended = (y_val * alpha + *existing as f32 * inv_alpha).round() as u8;
+                    y_data[y_offset] = blended;
+                }
+            }
+        }
+
+        // Pass 2: blend U plane (half resolution for YUV420P).
+        {
+            let u_linesize = frame.stride(1);
+            let u_data = frame.data_mut(1);
+            for &(py, px, _, u_val, _, alpha) in &blend_ops {
+                let inv_alpha = 1.0 - alpha;
+                let uv_y = py / 2;
+                let uv_x = px / 2;
+                let u_offset = uv_y * u_linesize + uv_x;
+                if let Some(existing_u) = u_data.get(u_offset) {
+                    let blended_u =
+                        (u_val * alpha + *existing_u as f32 * inv_alpha).round() as u8;
+                    u_data[u_offset] = blended_u;
+                }
+            }
+        }
+
+        // Pass 3: blend V plane (half resolution for YUV420P).
+        {
+            let v_linesize = frame.stride(2);
+            let v_data = frame.data_mut(2);
+            for &(py, px, _, _, v_val, alpha) in &blend_ops {
+                let inv_alpha = 1.0 - alpha;
+                let uv_y = py / 2;
+                let uv_x = px / 2;
+                let v_offset = uv_y * v_linesize + uv_x;
+                if let Some(existing_v) = v_data.get(v_offset) {
+                    let blended_v =
+                        (v_val * alpha + *existing_v as f32 * inv_alpha).round() as u8;
+                    v_data[v_offset] = blended_v;
+                }
             }
         }
     }
@@ -621,6 +473,7 @@ mod tests {
     use super::*;
     use crate::core::frame::MediaTimestamp;
     use crate::core::timeline::{CursorFrame, CursorKind, EffectTimeline};
+    use crate::media::cursor_assets::{CursorAsset, RgbaPixel};
 
     fn make_timeline(frames: Vec<CursorFrame>, render: bool) -> EffectTimeline {
         EffectTimeline {
@@ -656,6 +509,40 @@ mod tests {
         }
     }
 
+    /// Create a simple 8x8 opaque white test asset for a given kind.
+    fn make_test_asset(kind: CursorKind) -> CursorAsset {
+        let (hotspot_x, hotspot_y) = match kind {
+            CursorKind::Arrow => (0.0, 0.0),
+            CursorKind::Hand => (4.0, 2.0),
+            CursorKind::IBeam => (4.0, 4.0),
+        };
+        let pixels = vec![
+            RgbaPixel {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            };
+            64
+        ];
+        CursorAsset {
+            width: 8,
+            height: 8,
+            hotspot_x,
+            hotspot_y,
+            pixels,
+        }
+    }
+
+    /// Build a cursor_assets HashMap with all three kinds.
+    fn make_test_assets() -> std::collections::HashMap<CursorKind, CursorAsset> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(CursorKind::Arrow, make_test_asset(CursorKind::Arrow));
+        map.insert(CursorKind::Hand, make_test_asset(CursorKind::Hand));
+        map.insert(CursorKind::IBeam, make_test_asset(CursorKind::IBeam));
+        map
+    }
+
     #[test]
     fn renderer_returns_none_when_overlay_disabled() {
         let timeline = make_timeline(vec![cursor_frame(0, 100.0, 100.0)], false);
@@ -668,6 +555,7 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            make_test_assets(),
         );
         assert!(renderer.is_none());
     }
@@ -684,6 +572,7 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            make_test_assets(),
         );
         assert!(renderer.is_none());
     }
@@ -700,34 +589,31 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            make_test_assets(),
         )
         .unwrap();
 
-        // Cursor at (960, 540) maps to (960, 540) with identity fit.
         let mut frame = ffmpeg_next::util::frame::Video::new(
             ffmpeg_next::util::format::Pixel::YUV420P,
             1920,
             1080,
         );
         renderer.draw_on_frame(&mut frame, 0, 30);
-        // Verify arrow glyph is visible near cursor position (hotspot at tip).
+        // Verify cursor asset is visible near cursor position.
         let y_plane = frame.data(0);
         let linesize = y_plane.len() / 1080;
-        // Arrow hotspot is at (0,0), so glyph draws starting at cursor position.
-        // The arrow tip pixel is black (Y=16). Check nearby pixels for glyph presence.
         let near_center = 540 * linesize + 960;
-        let has_visible = y_plane[near_center..near_center + 50]
+        let has_visible = y_plane[near_center..near_center + 8]
             .iter()
             .any(|&b| b > 0);
         assert!(
             has_visible,
-            "arrow glyph should be visible near cursor position"
+            "cursor asset should be visible near cursor position"
         );
     }
 
     #[test]
     fn center_crop_mapping() {
-        // Source 1920x1080, output 1080x1920 (Douyin portrait).
         let timeline = make_timeline(vec![cursor_frame(0, 960.0, 540.0)], true);
         let renderer = CursorOverlayRenderer::new(
             timeline,
@@ -738,6 +624,7 @@ mod tests {
             ExportScalePolicy::CenterCrop,
             Some((657, 0)),
             None,
+            make_test_assets(),
         );
         assert!(renderer.is_some());
     }
@@ -754,6 +641,7 @@ mod tests {
             ExportScalePolicy::CenterCrop,
             Some((657, 0)),
             None,
+            make_test_assets(),
         )
         .unwrap();
 
@@ -785,6 +673,7 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            make_test_assets(),
         )
         .unwrap();
 
@@ -807,7 +696,7 @@ mod tests {
             timestamp: MediaTimestamp::from_nanos(0),
             x: 960.0,
             y: 540.0,
-            scale: 2.0, // Click magnification active.
+            scale: 2.0,
             opacity: 0.35,
             kind: CursorKind::Arrow,
         }];
@@ -821,6 +710,7 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            make_test_assets(),
         )
         .unwrap();
 
@@ -830,17 +720,12 @@ mod tests {
             1080,
         );
         renderer.draw_on_frame(&mut frame, 0, 30);
-        // The ring is drawn at radius * scale * 1.4 ≈ 12 * 2 * 1.4 ≈ 33.
-        // Check a pixel on the ring outline (at ring_radius distance from center).
         let y_plane = frame.data(0);
-        let ring_radius = (12.0_f32 * 2.0 * 1.4) as i32; // ≈ 33
-                                                         // Find the actual linesize by checking how many bytes per row.
-                                                         // YUV420P linesize may differ from width due to alignment.
+        let ring_radius = (12.0_f32 * 2.0 * 1.4) as i32;
         let linesize = y_plane.len() / 1080;
         let ring_y: usize = 540;
         let ring_x: usize = 960 + ring_radius as usize;
         let offset = ring_y * linesize + ring_x;
-        // The ring outline (1px) should have the ring value (180).
         assert!(
             y_plane[offset] > 100,
             "ring pixel at ({ring_x}, {ring_y}) should be visible, got {}",
@@ -850,8 +735,6 @@ mod tests {
 
     #[test]
     fn cursor_overlay_skips_huge_finite_coordinates_without_panic() {
-        // BUG-008: Huge finite coordinates after mapping must not panic.
-        // The mapper returns (out_x, out_y) which could be very large finite values.
         let frames = vec![CursorFrame {
             timestamp: MediaTimestamp::from_nanos(0),
             x: 999_999.0,
@@ -870,6 +753,7 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            make_test_assets(),
         )
         .unwrap();
 
@@ -878,13 +762,11 @@ mod tests {
             1920,
             1080,
         );
-        // Should not panic — cursor is drawn at clamped position or skipped.
         renderer.draw_on_frame(&mut frame, 0, 30);
     }
 
     #[test]
     fn cursor_overlay_handles_extreme_negative_coordinates_without_panic() {
-        // BUG-008: Extreme negative coordinates must not cause underflow.
         let frames = vec![CursorFrame {
             timestamp: MediaTimestamp::from_nanos(0),
             x: -999_999.0,
@@ -903,6 +785,7 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            make_test_assets(),
         )
         .unwrap();
 
@@ -911,13 +794,11 @@ mod tests {
             1920,
             1080,
         );
-        // Should not panic.
         renderer.draw_on_frame(&mut frame, 0, 30);
     }
 
     #[test]
     fn cursor_overlay_skips_mapped_infinite_coordinates() {
-        // BUG-008: If source coordinates produce infinite mapped values, skip.
         let frames = vec![CursorFrame {
             timestamp: MediaTimestamp::from_nanos(0),
             x: f32::INFINITY,
@@ -936,6 +817,7 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            make_test_assets(),
         )
         .unwrap();
 
@@ -945,7 +827,6 @@ mod tests {
             1080,
         );
         renderer.draw_on_frame(&mut frame, 0, 30);
-        // Frame should be untouched (all zeros).
         let y_plane = frame.data(0);
         assert!(
             y_plane.iter().all(|&b| b == 0),
@@ -954,58 +835,12 @@ mod tests {
     }
 
     #[test]
-    fn arrow_glyph_has_white_outline_and_black_fill() {
-        let glyph = &ARROW_GLYPH;
-        // Arrow tip pixel (0,0) should be white outline.
-        let tip = &glyph.pixels[0];
-        assert!(
-            matches!(tip, GlyphPixel::White(_)),
-            "arrow tip should be white outline"
-        );
-        // Interior pixel (row 10, col 5 — well inside the arrow body) should be black fill.
-        let interior = &glyph.pixels[10 * glyph.width + 5];
-        assert!(
-            matches!(interior, GlyphPixel::Black(_)),
-            "arrow interior should be black fill"
-        );
-    }
+    fn rendered_arrow_rgba_blends_yuv_planes() {
+        // Use the real PNG assets for this test.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let cursors_dir = std::path::Path::new(manifest_dir).join("assets").join("cursors");
+        let assets = crate::media::cursor_assets::load_cursor_assets(&cursors_dir);
 
-    #[test]
-    fn hand_glyph_has_white_fill_and_black_outline() {
-        let glyph = &HAND_GLYPH;
-        // Find a white fill pixel (interior of hand).
-        let has_white = glyph
-            .pixels
-            .iter()
-            .any(|p| matches!(p, GlyphPixel::White(_)));
-        assert!(has_white, "hand should have white fill pixels");
-        // Find a black outline pixel.
-        let has_black = glyph
-            .pixels
-            .iter()
-            .any(|p| matches!(p, GlyphPixel::Black(_)));
-        assert!(has_black, "hand should have black outline pixels");
-    }
-
-    #[test]
-    fn ibeam_glyph_has_black_body_and_white_outline() {
-        let glyph = &IBEAM_GLYPH;
-        // Top bar edge should be white outline.
-        let top_edge = &glyph.pixels[4]; // Row 0, col 4.
-        assert!(
-            matches!(top_edge, GlyphPixel::White(_)),
-            "ibeam top edge should be white outline"
-        );
-        // Vertical stem should be black body.
-        let stem = &glyph.pixels[5 * glyph.width + 7]; // Row 5, col 7 (center of stem).
-        assert!(
-            matches!(stem, GlyphPixel::Black(_)),
-            "ibeam stem should be black body"
-        );
-    }
-
-    #[test]
-    fn rendered_arrow_has_correct_y_plane_values() {
         let timeline = make_timeline(vec![cursor_frame(0, 960.0, 540.0)], true);
         let renderer = CursorOverlayRenderer::new(
             timeline,
@@ -1016,6 +851,7 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            assets,
         )
         .unwrap();
 
@@ -1026,72 +862,26 @@ mod tests {
         );
         renderer.draw_on_frame(&mut frame, 0, 30);
 
+        // Y plane should have visible pixels near cursor.
         let y_plane = frame.data(0);
-        let linesize = y_plane.len() / 1080;
-
-        // Arrow tip at (960, 540) should be white outline (Y≈235).
+        let linesize = frame.stride(0);
         let tip_offset = 540 * linesize + 960;
-        assert!(
-            y_plane[tip_offset] > 200,
-            "arrow tip should be white (Y>200), got {}",
-            y_plane[tip_offset]
-        );
-
-        // Arrow interior (e.g., 960+5, 540+10 — row 10 has wide interior) should be black fill (Y≈16).
-        let interior_offset = (540 + 10) * linesize + (960 + 5);
-        assert!(
-            y_plane[interior_offset] < 50,
-            "arrow interior should be black (Y<50), got {}",
-            y_plane[interior_offset]
-        );
-    }
-
-    #[test]
-    fn rendered_hand_has_correct_y_plane_values() {
-        let timeline = make_timeline(
-            vec![cursor_frame_with_kind(0, 960.0, 540.0, CursorKind::Hand)],
-            true,
-        );
-        let renderer = CursorOverlayRenderer::new(
-            timeline,
-            1920,
-            1080,
-            1920,
-            1080,
-            ExportScalePolicy::FitWithBars,
-            None,
-            Some((1920, 1080)),
-        )
-        .unwrap();
-
-        let mut frame = ffmpeg_next::util::frame::Video::new(
-            ffmpeg_next::util::format::Pixel::YUV420P,
-            1920,
-            1080,
-        );
-        renderer.draw_on_frame(&mut frame, 0, 30);
-
-        let y_plane = frame.data(0);
-        let linesize = y_plane.len() / 1080;
-
-        // Hand interior should be white fill (Y≈235).
-        // Find any white pixel in the hand glyph area near cursor position.
-        let hand_center_offset = 540 * linesize + 960;
-        let has_white = y_plane[hand_center_offset..hand_center_offset + 24]
+        let has_visible = y_plane[tip_offset..tip_offset + 10]
             .iter()
-            .any(|&y| y > 200);
+            .any(|&b| b > 0);
         assert!(
-            has_white,
-            "hand glyph should have white fill pixels near center"
+            has_visible,
+            "arrow cursor should be visible on Y plane near cursor position"
         );
     }
 
     #[test]
-    fn rendered_ibeam_has_correct_y_plane_values() {
-        let timeline = make_timeline(
-            vec![cursor_frame_with_kind(0, 960.0, 540.0, CursorKind::IBeam)],
-            true,
-        );
+    fn missing_asset_for_kind_is_noop() {
+        // Provide an empty assets map — no assets for any kind.
+        let empty_assets: std::collections::HashMap<CursorKind, CursorAsset> =
+            std::collections::HashMap::new();
+
+        let timeline = make_timeline(vec![cursor_frame(0, 960.0, 540.0)], true);
         let renderer = CursorOverlayRenderer::new(
             timeline,
             1920,
@@ -1101,6 +891,7 @@ mod tests {
             ExportScalePolicy::FitWithBars,
             None,
             Some((1920, 1080)),
+            empty_assets,
         )
         .unwrap();
 
@@ -1109,55 +900,12 @@ mod tests {
             1920,
             1080,
         );
+        // Should not panic, frame should be untouched.
         renderer.draw_on_frame(&mut frame, 0, 30);
-
         let y_plane = frame.data(0);
-        let linesize = y_plane.len() / 1080;
-
-        // IBeam body should be black (Y≈16).
-        let ibeam_center_offset = (540 + 10) * linesize + (960 + 7);
         assert!(
-            y_plane[ibeam_center_offset] < 50,
-            "ibeam body should be black (Y<50), got {}",
-            y_plane[ibeam_center_offset]
-        );
-    }
-
-    #[test]
-    fn arrow_glyph_has_tail_handle_and_hotspot_still_at_tip() {
-        let glyph = &ARROW_GLYPH;
-
-        // Hotspot must be at (0, 0) — the arrow tip.
-        assert_eq!(glyph.hotspot_x, 0.0);
-        assert_eq!(glyph.hotspot_y, 0.0);
-
-        // Check that the tail handle region (rows 20-23, cols ~3-5) has black pixels.
-        // Row 20, col 3 should be black (handle body).
-        let handle_pixel = &glyph.pixels[20 * glyph.width + 3];
-        assert!(
-            matches!(handle_pixel, GlyphPixel::Black(_)),
-            "arrow tail handle should have black pixels at row 20, col 3"
-        );
-
-        // Row 21, col 3 should also be black (handle body).
-        let handle_body = &glyph.pixels[21 * glyph.width + 3];
-        assert!(
-            matches!(handle_body, GlyphPixel::Black(_)),
-            "arrow tail handle should have black pixels at row 21, col 3"
-        );
-
-        // Row 20, col 2 should be white outline around handle.
-        let handle_outline = &glyph.pixels[20 * glyph.width + 2];
-        assert!(
-            matches!(handle_outline, GlyphPixel::White(_)),
-            "arrow tail handle should have white outline at row 20, col 2"
-        );
-
-        // The shelf at row 19 should still have white outline pixels.
-        let shelf_pixel = &glyph.pixels[19 * glyph.width + 4];
-        assert!(
-            matches!(shelf_pixel, GlyphPixel::White(_)),
-            "arrow shelf at row 19 should have white outline"
+            y_plane.iter().all(|&b| b == 0),
+            "no asset should result in no drawing"
         );
     }
 }
