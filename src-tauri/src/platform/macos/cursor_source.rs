@@ -3,15 +3,16 @@
 // - CGEventSourceButtonState only reads button state; it must not post or synthesize input.
 // - This source is polled from CursorMetadataRuntime, not from ScreenCaptureKit callbacks.
 // - Polling failures return a structured Rust error and must not panic.
-// - Kind query uses CursorKindProvider trait (production: MacCursorKindProvider with AX).
+// - Kind query uses CursorKindProvider trait (production: MacCursorKindProvider with NSCursor).
 
 use std::sync::Arc;
 
 use crate::app::cursor_metadata_runtime::{CursorSnapshot, CursorSnapshotSource};
 use crate::app::error::{AppError, AppResult};
 use crate::core::clock::SessionClock;
-use crate::core::timeline::CursorKind;
-use crate::platform::macos::cursor_kind::{CursorKindProvider, MacCursorKindProvider};
+use crate::platform::macos::cursor_kind::{
+    CursorKindProvider, CursorMainThreadDispatcher, MacCursorKindProvider,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -56,11 +57,14 @@ pub struct MacCursorSource {
 }
 
 impl MacCursorSource {
-    /// Create with the production `MacCursorKindProvider` (Accessibility API, 10Hz).
-    pub fn new(session_clock: Arc<SessionClock>) -> Self {
+    /// Create with the production `MacCursorKindProvider` (NSCursor API, 10Hz).
+    pub fn new(
+        session_clock: Arc<SessionClock>,
+        main_thread_dispatcher: Box<dyn CursorMainThreadDispatcher>,
+    ) -> Self {
         Self {
             session_clock,
-            kind_provider: Box::new(MacCursorKindProvider::new()),
+            kind_provider: Box::new(MacCursorKindProvider::new(main_thread_dispatcher)),
         }
     }
 
@@ -125,6 +129,7 @@ impl CursorSnapshotSource for MacCursorSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::timeline::CursorKind;
     use std::time::Duration;
 
     /// Mock provider that always returns a fixed kind.
@@ -138,7 +143,7 @@ mod tests {
         }
     }
 
-    /// Mock provider that always fails (simulates no Accessibility permission).
+    /// Mock provider that always falls back to Arrow.
     struct FailingKindProvider;
 
     impl CursorKindProvider for FailingKindProvider {

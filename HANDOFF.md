@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-04 | BUG-0011 方案B（前台应用 AX 查询）已实现但 WebView 不可穿透；待尝试方案A（NSCursor API）。
+> 最后更新：2026-06-05 | BUG-0011 NSCursor 方案人工验证通过；FFI review findings 已修复并通过自动化验证。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,88 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-05：BUG-0011 第 6 轮 FFI Code Review Findings 修复
+
+输入文件：
+
+- 用户反馈：第 6 轮人工验证效果没问题
+- Code review findings：重点修复 NSCursor FFI selector guard、AppKit 线程边界、autorelease 生命周期、C string 类型安全和 clippy 近邻告警
+- `BUG.md` BUG-0011 预防规则 25-29
+
+已完成：
+
+1. 新增 `CursorMainThreadDispatcher`，生产录制链路通过 Tauri `AppHandle::run_on_main_thread` 执行 AppKit cursor 读取
+2. `MacCursorKindProvider` 构造时必须接收 main-thread dispatcher，避免生产路径在 cursor metadata 后台线程直接调用 AppKit
+3. ObjC 消息发送前增加 class/instance method guard，缺失 selector 时 fail closed
+4. selector 参数改为 `&CStr` / `c"..."`，移除裸 `&[u8]` C string 边界
+5. autorelease pool 改为 `objc_autoreleasePoolPush/Pop`
+6. legacy AX 的 `NSWorkspace` ObjC 调用同步使用 guarded helper
+7. 新增 main-thread reader 调度成功/失败测试
+8. 清理本轮 review 指出的 `cursor_source.rs` / `cursor_metadata_runtime.rs` unused import 告警
+9. 更新 BUG.md 和本轮自测清单
+
+当前验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib cursor_kind` **12 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` **294 tests** 通过
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --lib` 通过；剩余 **32 个既有 warning**
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过
+- `npm test -- --run` **55 tests** 通过
+- `git diff --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/platform/macos/cursor_kind.rs`, `src-tauri/src/platform/macos/cursor_source.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/app/cursor_metadata_runtime.rs`, `BUG.md`, `HANDOFF.md`
+- **新增**: `tests/2026-06-05-bug-0011-ffi-review-findings-checklist.md`
+
+人工复核建议：
+
+1. 普通桌面/空白区域：导出美化光标为 Arrow
+2. WebView/浏览器按钮或链接：导出美化光标为 Hand
+3. 文本输入框：导出美化光标为 IBeam
+4. 四指上划进入 Mission Control：macOS 显示 Arrow，导出美化视频也显示 Arrow
+
+### 2026-06-05：BUG-0011 第 6 轮整改（NSCursor 真实系统光标来源）
+
+输入文件：
+
+- 用户反馈：第 5 轮后导出视频仍无法正确切换光标形态
+- 用户反馈：四指上划进入 Mission Control 时，macOS 显示 Arrow，但导出美化视频变成 Hand
+- `HANDOFF.md` 冬眠记录：AX 方案无法穿透 WebView，下一步尝试 NSCursor API
+
+已完成：
+
+1. `MacCursorKindProvider` 生产主路径改为读取 `NSCursor.currentSystemCursor`
+2. 新增系统光标映射：Arrow / PointingHand / IBeam
+3. 系统光标匹配支持对象指针、`isEqual:`、hot spot + TIFF 图像数据
+4. 未知或读取失败 fallback Arrow，避免 AX false positive 误画 Hand
+5. AppKit 轮询增加 `NSAutoreleasePool`
+6. 移除前端“需要辅助功能权限才能识别手形/文本光标”的误导提示
+7. 新增回归测试覆盖 Mission Control false positive：系统 Arrow 必须保持 Arrow
+8. 新增本轮计划与自测清单
+9. 更新 BUG.md
+
+当前验证结果：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib cursor_kind` **10 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` **292 tests** 通过
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过
+- `npm test -- --run` **55 tests** 通过
+- Objective-C runtime selector check 通过：`currentSystemCursor` / `arrowCursor` / `pointingHandCursor` / `IBeamCursor` 均存在
+
+改动文件：
+
+- **修改**: `src-tauri/src/platform/macos/cursor_kind.rs`, `src-tauri/src/platform/macos/cursor_source.rs`, `src-tauri/src/app/permission_service.rs`, `src-tauri/src/app/events.rs`, `src/lib/tauri.ts`, `src/App.tsx`, `BUG.md`, `HANDOFF.md`
+- **新增**: `docs/superpowers/plans/2026-06-05-bug-0011-nscursor-provider.md`, `tests/2026-06-05-bug-0011-nscursor-provider-checklist.md`
+
+人工验证门禁：
+
+1. 普通桌面/空白区域：导出美化光标为 Arrow
+2. WebView/浏览器按钮或链接：导出美化光标为 Hand
+3. 文本输入框：导出美化光标为 IBeam
+4. 四指上划进入 Mission Control：macOS 显示 Arrow，导出美化视频也显示 Arrow
+5. 未授权 Accessibility：仍能根据系统当前光标识别 Arrow/Hand/IBeam
 
 ### 2026-06-04：BUG-0011 方案B（前台应用 AX 查询）实现与测试
 

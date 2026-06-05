@@ -29,7 +29,7 @@ impl From<RecordingState> for RecordingStatusPayload {
 pub struct PermissionPayload {
     pub screen_recording: PermissionStatusPayload,
     pub microphone: PermissionStatusPayload,
-    /// Accessibility permission — required for target-aware cursor kind (Hand/IBeam).
+    /// Accessibility permission retained for diagnostics/future AX probes.
     pub accessibility: PermissionStatusPayload,
 }
 

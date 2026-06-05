@@ -319,11 +319,6 @@ export default function App() {
               <p>需要麦克风权限才能录制音频，请在启动录制时授权</p>
             </div>
           )}
-          {permissions.accessibility !== 'granted' && (
-            <div className="mt-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400/80">
-              <p>需要辅助功能权限才能识别手形/文本光标。当前将显示标准箭头。</p>
-            </div>
-          )}
           <div className="flex w-full items-start justify-end mt-4">
             <LicenseStatus status={licenseStatus} />
           </div>

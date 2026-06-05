@@ -12,8 +12,8 @@ pub enum PermissionStatus {
 pub struct RecordingPermissions {
     pub screen_recording: PermissionStatus,
     pub microphone: PermissionStatus,
-    /// Accessibility permission — required for target-aware cursor kind (Hand/IBeam).
-    /// When Denied/NotDetermined, cursor kind will always fallback to Arrow.
+    /// Accessibility permission. Currently retained for diagnostics and future
+    /// AX-specific probes; NSCursor-based cursor kind does not require it.
     pub accessibility: PermissionStatus,
 }
 

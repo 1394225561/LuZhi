@@ -4,7 +4,11 @@
 
 ## 未解决
 
-### BUG-0010: 导出的视频光标定位不对 ✅ 已修复-第五轮待人工验证
+暂无。
+
+## 已解决
+
+### BUG-0010: 导出的视频光标定位不对 ✅ 已解决-人工验证通过
 
 **现象**：经过美化后导出的视频，光标的定位显示向左上方产生偏移了。
 
@@ -112,7 +116,7 @@
 
 #### BUG-0010_8: 第 5 轮整改状态
 
-✅ 已修复-第五轮待人工验证
+✅ 第五轮人工验证通过，已解决
 
 **本轮根因**：水平漂移仅在开启平滑/贝塞尔时出现，说明问题不在坐标映射或 PTS 对齐，而在光标平滑算法本身。(1) 简单移动平均在光标移动时产生恒定滞后（~2-4 帧），停止后需 `window_size/2` 帧才能收敛；(2) Catmull-Rom Bezier 控制点在方向变化时产生过冲，放大了移动平均的滞后，导致"沿移动方向漂移"的现象。
 
@@ -131,7 +135,7 @@
 
 ---
 
-### BUG-0011: 美化后的光标不好看 ✅ 已修复-待人工验证
+### BUG-0011: 美化后的光标不好看 ✅ 已解决-第 6 轮人工验证通过
 
 **现象**：经过美化后导出的视频，显示的光标是个白色的圆，不好看。
 
@@ -268,7 +272,7 @@
 
 #### BUG-0011_8: 第 5 轮整改状态
 
-✅ 已修复-第五轮待人工验证
+⚠️ 第五轮方案仍不可靠，已由第 6 轮替换生产主路径
 
 **本轮根因**：`AXUIElementCopyElementAtPosition` 的坐标空间与 `CGEventGetLocation` 不同。CGEvent 使用 top-left origin（Y 向下递增），AX API 使用 bottom-left origin（Y 向上递增）。未翻转 Y 坐标导致 AX 查询始终命中屏幕顶部的 AXMenuBar，从未到达下方的按钮/文本框/链接。
 
@@ -285,9 +289,58 @@
 23. `AXUIElementCopyElementAtPosition` 坐标空间与 `CGEventGetLocation` 不同（Y 轴方向相反）。调用 AX API 前必须用显示器高度翻转 Y 坐标。
 24. cursor kind 分类诊断日志必须同时显示 CGEvent 坐标和 AX 坐标，便于排查坐标空间问题。
 
+#### BUG-0011_9: 第 6 轮整改状态
+
+✅ 第 6 轮人工验证通过；FFI code review findings 已收口
+
+**本轮人工反馈**：第 5 轮后，美化导出视频依旧无法正确切换光标形态。特殊场景：四指上划调出 macOS Mission Control 时，macOS 实际显示 Arrow，但导出的美化视频会把光标渲染成 Hand。
+
+**本轮根因**：AX role inference 不是系统光标形态的真实来源。`AXUIElementCopyElementAtPosition` 只能说明某个坐标下的辅助功能元素可能可交互，不能证明 macOS 当前显示的是 Hand/IBeam。WebView 内容对 AX hit-test 不透明会导致漏判；Mission Control 等系统 UI 又可能命中可交互 AX 元素而误判 Hand。因此继续修 AX 坐标或 role chain 只能缓解局部症状，无法保证导出光标和系统真实光标一致。
+
+**本轮整改内容**：
+
+1. `MacCursorKindProvider` 改为优先读取 `NSCursor.currentSystemCursor`，以 macOS 当前实际显示的系统光标作为生产主来源。
+2. 新增 `SystemCursorShape` 映射：`arrowCursor -> Arrow`、`pointingHandCursor -> Hand`、`IBeamCursor -> IBeam`。
+3. 系统光标匹配先尝试对象指针/`isEqual:`，再比较 hot spot + TIFF 图像数据，兼容 `currentSystemCursor` 返回等价 cursor 对象的情况。
+4. 未知系统光标或读取失败时 fallback 为 Arrow，避免未知状态被 AX role 误判为 Hand。
+5. NSCursor 读取包裹 `NSAutoreleasePool`，避免后台 10Hz 轮询积累 autorelease 对象。
+6. 移除前端“需要辅助功能权限才能识别手形/文本光标”的误导提示；NSCursor-based cursor kind 不依赖 Accessibility 权限。
+7. 新增回归测试：系统 Arrow 不会被推断为 Hand，覆盖 Mission Control false positive；未知系统光标不能误判为 Hand。
+
+**新增预防规则**：
+
+25. cursor kind 的生产主来源必须是系统实际显示的 cursor shape，不能把 AX role/action 当作真实 cursor shape。
+26. AX hit-test 可作为诊断信息，但不得在生产路径中覆盖 `NSCursor.currentSystemCursor` 的 Arrow/Hand/IBeam 结果。
+27. 未知系统 cursor shape 必须 fallback Arrow，不能为了“更智能”猜测为 Hand/IBeam。
+28. AppKit cursor 轮询必须有 autorelease pool 或等价释放边界，避免后台线程长期轮询造成 autorelease 对象堆积。
+29. Mission Control/桌面调度场景必须进入人工门禁：macOS 显示 Arrow 时，导出美化视频也必须为 Arrow。
+
+#### BUG-0011_10: 第 6 轮 FFI Code Review 收口
+
+✅ 已修复并通过自动化验证
+
+**本轮背景**：人工验证确认第 6 轮 NSCursor 方案效果正常后，对本次改动涉及的 FFI 安全性和正确性做了专项 code review。Review 重点为 Objective-C selector 可用性、异常安全、autorelease 生命周期、C string 类型边界、AppKit 线程边界和 clippy 近邻告警。
+
+**本轮整改内容**：
+
+1. 新增 `CursorMainThreadDispatcher`，生产录制链路通过 Tauri `AppHandle::run_on_main_thread` 执行 AppKit cursor 读取。
+2. `MacCursorKindProvider` 构造时必须接收 main-thread dispatcher，避免生产路径在 cursor metadata 后台线程直接调用 AppKit。
+3. `NSCursor.currentSystemCursor`、class cursor、`image`、`hotSpot`、`TIFFRepresentation`、`isEqual:`、`isEqualToData:` 均在 `objc_msgSend` 前检查 class/instance method 是否存在；缺失时 fail closed 并 fallback Arrow。
+4. ObjC selector 参数改为 `&CStr` / `c"..."`，不再把 `&[u8]` 当作 C string 传给 `sel_registerName`。
+5. autorelease pool 改为 runtime `objc_autoreleasePoolPush/Pop`，每次系统 cursor 读取都有释放边界。
+6. legacy AX 的 `NSWorkspace` ObjC 调用同步改用 guarded helper，避免留下另一条未防护消息发送路径。
+7. 新增测试覆盖 main-thread reader 调度成功/失败行为。
+
+**新增预防规则**：
+
+30. ObjC `objc_msgSend` 前必须验证 selector 对应 class/instance method 存在；缺失时必须 fallback，不得让 Objective-C exception 跨 Rust FFI 边界。
+31. AppKit cursor shape 读取必须通过主线程 dispatcher 或等价主线程机制执行；后台 cursor metadata 线程不得直接调用 AppKit。
+32. ObjC selector/C string FFI 参数必须使用 `CStr` 或 `c"..."` 字面量，不得用裸 `&[u8]` 作为 C string。
+33. 高频 AppKit/Objective-C 轮询必须有强制 autorelease pool 边界；不得在 pool 创建失败或缺失时继续执行会产生 autoreleased 对象的调用。
+
 ---
 
-### BUG-0012: 点击导出按钮后的交互不够优雅 ✅ 已修复-待人工验证
+### BUG-0012: 点击导出按钮后的交互不够优雅 ✅ 已解决-人工验证通过
 
 **现象**：点击导出，没有进度条反馈，直接从 0% 变成导出完成。
 
@@ -315,7 +368,7 @@
 
 #### BUG-0012_2: 第 2 轮整改（terminal error UI 边界）
 
-✅ 已修复-第二轮待人工验证
+✅ 第二轮人工验证通过，已解决
 
 **整改内容**：terminal export error 写入 `beautifyError` 确保错误显示。当 `!payload.cancellable && payload.error` 时，除了设置 `isExporting=false`，还设置 `beautifyError=payload.error`。
 
@@ -325,8 +378,6 @@
 12. no-FFmpeg gate、取消、失败都必须让 UI 清理 exporting 状态并显示明确结果。
 
 ---
-
-## 已解决
 
 ### BUG-005: 音频捕获失败
 

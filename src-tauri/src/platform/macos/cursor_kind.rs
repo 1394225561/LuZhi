@@ -1,30 +1,35 @@
-//! macOS CursorKind provider using Accessibility hit-test.
+//! macOS CursorKind provider using AppKit's current system cursor.
 //!
-//! Queries the Accessibility API (`AXUIElementCopyElementAtPosition`) to determine
-//! the type of UI element under the cursor. Falls back to `Arrow` on failure.
+//! Queries `NSCursor.currentSystemCursor` to determine the cursor macOS is
+//! actually showing. This is more reliable than inferring cursor kind from
+//! Accessibility roles: WebView content may be opaque to AX hit-testing, and
+//! system UI such as Mission Control can expose clickable AX elements while the
+//! visible cursor remains the standard arrow.
 //!
 //! # Safety
 //!
-//! `AXUIElementCopyElementAtPosition` requires the app to have Accessibility
-//! permission (System Preferences → Privacy & Security → Accessibility).
-//! If not granted, the call returns an error and we fall back to `Arrow`.
+//! AppKit calls may create autoreleased Objective-C objects and are dispatched
+//! onto the application main thread. The production reader wraps each cursor
+//! shape read in an autorelease pool.
 //!
 //! This module is polled from `CursorMetadataRuntime`, NOT from
 //! ScreenCaptureKit callbacks — it must not block the capture main loop.
 //!
 //! # Diagnostics
 //!
-//! `AtomicU64` counters track query failures, fallback-to-Arrow counts, and
-//! per-kind distribution. These are exposed via `cursor_kind_diagnostics_snapshot()`
-//! for diagnostic logging.
+//! `AtomicU64` counters track legacy AX query failures, fallback-to-Arrow
+//! counts, and per-kind distribution. The kind distribution is updated by the
+//! NSCursor-backed provider; AX counters remain for diagnostic compatibility.
 //!
-//! # System-Wide Root
+//! # Legacy AX Reference
 //!
-//! Uses `AXUIElementCreateSystemWide()` (not `AXUIElementCreateApplication(0)`)
-//! as the root for cross-app hit-testing, per Apple SDK documentation.
+//! The AX hit-test helpers are retained for diagnostics/reference, but the
+//! production provider no longer lets AX role inference emit cursor kind.
 
 use crate::core::timeline::CursorKind;
+use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -46,30 +51,15 @@ static KIND_IBEAM_COUNT: AtomicU64 = AtomicU64::new(0);
 // FFI types and bindings
 // ---------------------------------------------------------------------------
 
-type CFTypeRef = *const std::ffi::c_void;
-type AXUIElementRef = *const std::ffi::c_void;
-type CFStringRef = *const std::ffi::c_void;
-type CGDirectDisplayID = u32;
+type CFTypeRef = *const c_void;
+type AXUIElementRef = *const c_void;
+type CFStringRef = *const c_void;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CGRect {
-    origin: CGPoint,
-    size: CGSize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGPoint {
+struct NSPoint {
     x: f64,
     y: f64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGSize {
-    width: f64,
-    height: f64,
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -91,30 +81,32 @@ extern "C" {
     fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFTypeRef) -> i32;
 }
 
-// NSWorkspace for getting frontmost application PID.
-type id = *mut std::ffi::c_void;
-type SEL = *const std::ffi::c_void;
+type ObjcId = *mut c_void;
+type Sel = *const c_void;
+type ObjcMethod = *const c_void;
 
 #[link(name = "AppKit", kind = "framework")]
+extern "C" {}
+
+#[link(name = "objc")]
 extern "C" {
-    fn objc_getClass(name: *const std::ffi::c_char) -> id;
-    fn sel_registerName(name: *const std::ffi::c_char) -> SEL;
+    fn objc_getClass(name: *const c_char) -> ObjcId;
+    fn sel_registerName(name: *const c_char) -> Sel;
+    fn class_getClassMethod(cls: ObjcId, name: Sel) -> ObjcMethod;
+    fn class_getInstanceMethod(cls: ObjcId, name: Sel) -> ObjcMethod;
+    fn object_getClass(obj: ObjcId) -> ObjcId;
+    fn objc_autoreleasePoolPush() -> *mut c_void;
+    fn objc_autoreleasePoolPop(context: *mut c_void);
     // objc_msgSend is variadic — we transmute to typed fn pointers at call sites.
     fn objc_msgSend();
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGMainDisplayID() -> CGDirectDisplayID;
-    fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFRelease(cf: CFTypeRef);
     fn CFStringCreateWithCString(
-        allocator: *const std::ffi::c_void,
-        c_str: *const std::ffi::c_char,
+        allocator: *const c_void,
+        c_str: *const c_char,
         encoding: u32,
     ) -> CFStringRef;
     fn CFGetTypeID(cf: CFTypeRef) -> u64;
@@ -122,18 +114,15 @@ extern "C" {
     fn CFStringGetLength(the_string: CFStringRef) -> i64;
     fn CFStringGetCString(
         the_string: CFStringRef,
-        buffer: *mut std::ffi::c_char,
+        buffer: *mut c_char,
         buffer_size: i64,
         encoding: u32,
     ) -> bool;
-    fn CFArrayGetCount(the_array: *const std::ffi::c_void) -> i64;
-    fn CFArrayGetValueAtIndex(
-        the_array: *const std::ffi::c_void,
-        idx: i64,
-    ) -> *const std::ffi::c_void;
+    fn CFArrayGetCount(the_array: *const c_void) -> i64;
+    fn CFArrayGetValueAtIndex(the_array: *const c_void, idx: i64) -> *const c_void;
 }
 
-const K_CFStringEncoding_UTF8: u32 = 0x08000100;
+const K_CFSTRING_ENCODING_UTF8: u32 = 0x08000100;
 const K_AX_ERROR_SUCCESS: i32 = 0;
 
 // ---------------------------------------------------------------------------
@@ -230,67 +219,319 @@ pub trait CursorKindProvider: Send + 'static {
     fn query(&mut self, global_x: f32, global_y: f32) -> CursorKind;
 }
 
-/// Production macOS cursor kind provider using Accessibility API.
+/// Runs AppKit cursor reads on the application's main thread.
+pub trait CursorMainThreadDispatcher: Send + Sync + 'static {
+    fn run_on_main_thread(&self, task: Box<dyn FnOnce() + Send>) -> Result<(), String>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemCursorShape {
+    Arrow,
+    PointingHand,
+    IBeam,
+    Other,
+}
+
+trait SystemCursorReader: Send + 'static {
+    fn read_current_cursor_shape(&mut self) -> Option<SystemCursorShape>;
+}
+
+fn system_cursor_shape_to_kind(shape: SystemCursorShape) -> Option<CursorKind> {
+    match shape {
+        SystemCursorShape::Arrow => Some(CursorKind::Arrow),
+        SystemCursorShape::PointingHand => Some(CursorKind::Hand),
+        SystemCursorShape::IBeam => Some(CursorKind::IBeam),
+        SystemCursorShape::Other => None,
+    }
+}
+
+/// Production macOS cursor kind provider using AppKit's current system cursor.
 ///
-/// Uses `AXUIElementCreateSystemWide()` for cross-app hit-testing.
+/// Uses `NSCursor.currentSystemCursor` so the exported overlay follows the
+/// cursor shape macOS is actually displaying.
 /// Rate-limited to 10Hz (100ms cache TTL).
-///
-/// The AX API (`AXUIElementCopyElementAtPosition`) uses a coordinate space
-/// where Y increases upward (bottom-left origin), while `CGEventGetLocation`
-/// returns coordinates where Y increases downward (top-left origin).
-/// The provider flips the Y coordinate using the main display height.
 pub struct MacCursorKindProvider {
     kind_cache_ttl: Duration,
     cached_kind: CursorKind,
     last_query_at: Instant,
-    /// Main display height in points, used to flip Y coordinate for AX API.
-    display_height: f64,
+    system_cursor_reader: Box<dyn SystemCursorReader>,
 }
 
 impl MacCursorKindProvider {
-    pub fn new() -> Self {
-        let display_height = unsafe {
-            let main_display = CGMainDisplayID();
-            let bounds = CGDisplayBounds(main_display);
-            eprintln!(
-                "[cursor-kind] display_height={:.1} main_display={} bounds_origin=({:.1},{:.1}) bounds_size=({:.1}×{:.1})",
-                bounds.size.height, main_display,
-                bounds.origin.x, bounds.origin.y,
-                bounds.size.width, bounds.size.height,
-            );
-            bounds.size.height
-        };
+    pub fn new(main_thread_dispatcher: Box<dyn CursorMainThreadDispatcher>) -> Self {
         Self {
             kind_cache_ttl: Duration::from_millis(100),
             cached_kind: CursorKind::Arrow,
             last_query_at: Instant::now() - Duration::from_secs(1),
-            display_height,
+            system_cursor_reader: Box::new(MainThreadSystemCursorReader::new(
+                main_thread_dispatcher,
+            )),
         }
     }
-}
 
-impl Default for MacCursorKindProvider {
-    fn default() -> Self {
-        Self::new()
+    #[cfg(test)]
+    fn with_system_reader_for_test(system_cursor_reader: Box<dyn SystemCursorReader>) -> Self {
+        Self {
+            kind_cache_ttl: Duration::from_millis(100),
+            cached_kind: CursorKind::Arrow,
+            last_query_at: Instant::now() - Duration::from_secs(1),
+            system_cursor_reader,
+        }
     }
 }
 
 impl CursorKindProvider for MacCursorKindProvider {
-    fn query(&mut self, global_x: f32, global_y: f32) -> CursorKind {
+    fn query(&mut self, _global_x: f32, _global_y: f32) -> CursorKind {
         let now = Instant::now();
         if now.duration_since(self.last_query_at) < self.kind_cache_ttl {
             return self.cached_kind;
         }
-        // Flip Y: CGEventGetLocation uses top-down, AX API uses bottom-up.
-        let ax_y = self.display_height - global_y as f64;
-        eprintln!(
-            "[cursor-kind] CGEvent=({:.0},{:.0}) → AX=({:.0},{:.0}) display_h={:.0}",
-            global_x, global_y, global_x, ax_y, self.display_height
-        );
-        self.cached_kind = query_cursor_kind(global_x, ax_y);
+
+        let kind = self
+            .system_cursor_reader
+            .read_current_cursor_shape()
+            .and_then(system_cursor_shape_to_kind)
+            .unwrap_or(CursorKind::Arrow);
+        record_kind_count(kind);
+        self.cached_kind = kind;
         self.last_query_at = now;
         self.cached_kind
     }
+}
+
+fn record_kind_count(kind: CursorKind) {
+    match kind {
+        CursorKind::Arrow => {
+            KIND_ARROW_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        CursorKind::Hand => {
+            KIND_HAND_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        CursorKind::IBeam => {
+            KIND_IBEAM_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+type SystemCursorReadFn = Arc<dyn Fn() -> Option<SystemCursorShape> + Send + Sync>;
+
+const MAIN_THREAD_CURSOR_READ_TIMEOUT: Duration = Duration::from_millis(50);
+
+struct MainThreadSystemCursorReader {
+    dispatcher: Box<dyn CursorMainThreadDispatcher>,
+    read_current_shape: SystemCursorReadFn,
+    read_timeout: Duration,
+}
+
+impl MainThreadSystemCursorReader {
+    fn new(dispatcher: Box<dyn CursorMainThreadDispatcher>) -> Self {
+        Self {
+            dispatcher,
+            read_current_shape: Arc::new(|| unsafe { read_current_system_cursor_shape() }),
+            read_timeout: MAIN_THREAD_CURSOR_READ_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_read_fn_for_test(
+        dispatcher: Box<dyn CursorMainThreadDispatcher>,
+        read_current_shape: SystemCursorReadFn,
+    ) -> Self {
+        Self {
+            dispatcher,
+            read_current_shape,
+            read_timeout: MAIN_THREAD_CURSOR_READ_TIMEOUT,
+        }
+    }
+}
+
+impl SystemCursorReader for MainThreadSystemCursorReader {
+    fn read_current_cursor_shape(&mut self) -> Option<SystemCursorShape> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let read_current_shape = self.read_current_shape.clone();
+        let dispatch_result = self.dispatcher.run_on_main_thread(Box::new(move || {
+            let _ = sender.send(read_current_shape());
+        }));
+        if dispatch_result.is_err() {
+            return None;
+        }
+
+        receiver.recv_timeout(self.read_timeout).ok().flatten()
+    }
+}
+
+struct AutoreleasePool {
+    context: *mut c_void,
+}
+
+impl AutoreleasePool {
+    unsafe fn new() -> Self {
+        Self {
+            context: objc_autoreleasePoolPush(),
+        }
+    }
+}
+
+impl Drop for AutoreleasePool {
+    fn drop(&mut self) {
+        unsafe {
+            objc_autoreleasePoolPop(self.context);
+        }
+    }
+}
+
+unsafe fn read_current_system_cursor_shape() -> Option<SystemCursorShape> {
+    let _pool = AutoreleasePool::new();
+
+    let cursor_class = objc_class(c"NSCursor")?;
+
+    let current = objc_send_class_id(cursor_class, c"currentSystemCursor")?;
+
+    if ns_cursor_matches_class_cursor(current, cursor_class, c"arrowCursor") {
+        return Some(SystemCursorShape::Arrow);
+    }
+    if ns_cursor_matches_class_cursor(current, cursor_class, c"pointingHandCursor") {
+        return Some(SystemCursorShape::PointingHand);
+    }
+    if ns_cursor_matches_class_cursor(current, cursor_class, c"IBeamCursor") {
+        return Some(SystemCursorShape::IBeam);
+    }
+
+    Some(SystemCursorShape::Other)
+}
+
+unsafe fn ns_cursor_matches_class_cursor(
+    current: ObjcId,
+    cursor_class: ObjcId,
+    selector_name: &'static CStr,
+) -> bool {
+    let Some(expected) = objc_send_class_id(cursor_class, selector_name) else {
+        return false;
+    };
+
+    current == expected
+        || objc_send_bool_id(current, c"isEqual:", expected).unwrap_or(false)
+        || ns_cursor_image_and_hotspot_match(current, expected)
+}
+
+unsafe fn ns_cursor_image_and_hotspot_match(current: ObjcId, expected: ObjcId) -> bool {
+    if !ns_cursor_hotspot_matches(current, expected) {
+        return false;
+    }
+
+    let Some(current_image) = objc_send_id(current, c"image") else {
+        return false;
+    };
+    let Some(expected_image) = objc_send_id(expected, c"image") else {
+        return false;
+    };
+
+    let Some(current_data) = objc_send_id(current_image, c"TIFFRepresentation") else {
+        return false;
+    };
+    let Some(expected_data) = objc_send_id(expected_image, c"TIFFRepresentation") else {
+        return false;
+    };
+
+    objc_send_bool_id(current_data, c"isEqualToData:", expected_data).unwrap_or(false)
+}
+
+unsafe fn ns_cursor_hotspot_matches(current: ObjcId, expected: ObjcId) -> bool {
+    let Some(current_hotspot) = objc_send_ns_point(current, c"hotSpot") else {
+        return false;
+    };
+    let Some(expected_hotspot) = objc_send_ns_point(expected, c"hotSpot") else {
+        return false;
+    };
+    (current_hotspot.x - expected_hotspot.x).abs() < 0.01
+        && (current_hotspot.y - expected_hotspot.y).abs() < 0.01
+}
+
+unsafe fn objc_class(class_name: &'static CStr) -> Option<ObjcId> {
+    let class = objc_getClass(class_name.as_ptr());
+    if class.is_null() {
+        None
+    } else {
+        Some(class)
+    }
+}
+
+unsafe fn register_selector(selector_name: &'static CStr) -> Option<Sel> {
+    let sel = sel_registerName(selector_name.as_ptr());
+    if sel.is_null() {
+        None
+    } else {
+        Some(sel)
+    }
+}
+
+unsafe fn class_method_selector(class: ObjcId, selector_name: &'static CStr) -> Option<Sel> {
+    let sel = register_selector(selector_name)?;
+    if class.is_null() || class_getClassMethod(class, sel).is_null() {
+        return None;
+    }
+    Some(sel)
+}
+
+unsafe fn instance_method_selector(receiver: ObjcId, selector_name: &'static CStr) -> Option<Sel> {
+    if receiver.is_null() {
+        return None;
+    }
+    let sel = register_selector(selector_name)?;
+    let class = object_getClass(receiver);
+    if class.is_null() || class_getInstanceMethod(class, sel).is_null() {
+        return None;
+    }
+    Some(sel)
+}
+
+unsafe fn objc_send_class_id(receiver: ObjcId, selector_name: &'static CStr) -> Option<ObjcId> {
+    let sel = class_method_selector(receiver, selector_name)?;
+    type MsgSendId = extern "C" fn(ObjcId, Sel) -> ObjcId;
+    let msg_send_id: MsgSendId = std::mem::transmute(objc_msgSend as *const ());
+    let result = msg_send_id(receiver, sel);
+    if result.is_null() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+unsafe fn objc_send_id(receiver: ObjcId, selector_name: &'static CStr) -> Option<ObjcId> {
+    let sel = instance_method_selector(receiver, selector_name)?;
+    type MsgSendId = extern "C" fn(ObjcId, Sel) -> ObjcId;
+    let msg_send_id: MsgSendId = std::mem::transmute(objc_msgSend as *const ());
+    let result = msg_send_id(receiver, sel);
+    if result.is_null() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+unsafe fn objc_send_bool_id(
+    receiver: ObjcId,
+    selector_name: &'static CStr,
+    arg: ObjcId,
+) -> Option<bool> {
+    let sel = instance_method_selector(receiver, selector_name)?;
+    type MsgSendBoolId = extern "C" fn(ObjcId, Sel, ObjcId) -> i8;
+    let msg_send_bool_id: MsgSendBoolId = std::mem::transmute(objc_msgSend as *const ());
+    Some(msg_send_bool_id(receiver, sel, arg) != 0)
+}
+
+unsafe fn objc_send_ns_point(receiver: ObjcId, selector_name: &'static CStr) -> Option<NSPoint> {
+    let sel = instance_method_selector(receiver, selector_name)?;
+    type MsgSendPoint = extern "C" fn(ObjcId, Sel) -> NSPoint;
+    let msg_send_point: MsgSendPoint = std::mem::transmute(objc_msgSend as *const ());
+    Some(msg_send_point(receiver, sel))
+}
+
+unsafe fn objc_send_i32(receiver: ObjcId, selector_name: &'static CStr) -> Option<i32> {
+    let sel = instance_method_selector(receiver, selector_name)?;
+    type MsgSendI32 = extern "C" fn(ObjcId, Sel) -> i32;
+    let msg_send_i32: MsgSendI32 = std::mem::transmute(objc_msgSend as *const ());
+    Some(msg_send_i32(receiver, sel))
 }
 
 // ---------------------------------------------------------------------------
@@ -346,28 +587,16 @@ fn maybe_log_classification(log: &AxClassificationLog, point: (f32, f32)) {
 /// Uses `[NSWorkspace sharedWorkspace].frontmostApplication.processIdentifier`.
 /// Returns 0 on failure.
 unsafe fn get_frontmost_app_pid() -> i32 {
-    // objc_msgSend is variadic; cast to typed function pointers.
-    type MsgSendId = extern "C" fn(id, SEL) -> id;
-    type MsgSendI32 = extern "C" fn(id, SEL) -> i32;
-    let msg_send_id: MsgSendId = std::mem::transmute(objc_msgSend as *const ());
-    let msg_send_i32: MsgSendI32 = std::mem::transmute(objc_msgSend as *const ());
-
-    let workspace_class = objc_getClass(b"NSWorkspace\0".as_ptr() as *const std::ffi::c_char);
-    if workspace_class.is_null() {
+    let Some(workspace_class) = objc_class(c"NSWorkspace") else {
         return 0;
-    }
-    let sel_shared = sel_registerName(b"sharedWorkspace\0".as_ptr() as *const std::ffi::c_char);
-    let workspace = msg_send_id(workspace_class, sel_shared);
-    if workspace.is_null() {
+    };
+    let Some(workspace) = objc_send_class_id(workspace_class, c"sharedWorkspace") else {
         return 0;
-    }
-    let sel_front = sel_registerName(b"frontmostApplication\0".as_ptr() as *const std::ffi::c_char);
-    let app = msg_send_id(workspace, sel_front);
-    if app.is_null() {
+    };
+    let Some(app) = objc_send_id(workspace, c"frontmostApplication") else {
         return 0;
-    }
-    let sel_pid = sel_registerName(b"processIdentifier\0".as_ptr() as *const std::ffi::c_char);
-    msg_send_i32(app, sel_pid)
+    };
+    objc_send_i32(app, c"processIdentifier").unwrap_or(0)
 }
 
 /// Query the cursor kind at the given position.
@@ -539,8 +768,6 @@ unsafe fn element_role_to_cursor_kind(element: AXUIElementRef) -> (CursorKind, V
             Some("AXList") | Some("AXRow") | Some("AXTable") => {
                 cleanup_refs(&retained_refs);
                 return (CursorKind::Hand, role_chain, has_ax_press);
-                cleanup_refs(&retained_refs);
-                return (CursorKind::Hand, role_chain, has_ax_press);
             }
             _ => {}
         }
@@ -578,8 +805,8 @@ unsafe fn cleanup_refs(refs: &[AXUIElementRef]) {
 unsafe fn read_role(element: AXUIElementRef) -> Option<String> {
     let role_attr = CFStringCreateWithCString(
         std::ptr::null(),
-        b"AXRole\0".as_ptr() as *const std::ffi::c_char,
-        K_CFStringEncoding_UTF8,
+        c"AXRole".as_ptr(),
+        K_CFSTRING_ENCODING_UTF8,
     );
     if role_attr.is_null() {
         return None;
@@ -612,9 +839,9 @@ unsafe fn element_supports_press(element: AXUIElementRef) -> bool {
     }
 
     // names is a CFArray of CFStrings.
-    let count = CFArrayGetCount(names as *const std::ffi::c_void);
+    let count = CFArrayGetCount(names);
     for i in 0..count {
-        let item = CFArrayGetValueAtIndex(names as *const std::ffi::c_void, i);
+        let item = CFArrayGetValueAtIndex(names, i);
         if !item.is_null() {
             if let Some(s) = cfstring_to_rust_string(item) {
                 if s == "AXPress" {
@@ -632,8 +859,8 @@ unsafe fn element_supports_press(element: AXUIElementRef) -> bool {
 unsafe fn element_parent(element: AXUIElementRef) -> Option<AXUIElementRef> {
     let parent_attr = CFStringCreateWithCString(
         std::ptr::null(),
-        b"AXParent\0".as_ptr() as *const std::ffi::c_char,
-        K_CFStringEncoding_UTF8,
+        c"AXParent".as_ptr(),
+        K_CFSTRING_ENCODING_UTF8,
     );
     if parent_attr.is_null() {
         return None;
@@ -663,9 +890,9 @@ unsafe fn cfstring_to_rust_string(cf_str: CFTypeRef) -> Option<String> {
 
     if CFStringGetCString(
         cf_str,
-        buf.as_mut_ptr() as *mut std::ffi::c_char,
+        buf.as_mut_ptr() as *mut c_char,
         buf_size as i64,
-        K_CFStringEncoding_UTF8,
+        K_CFSTRING_ENCODING_UTF8,
     ) {
         if let Some(null_pos) = buf.iter().position(|&b| b == 0) {
             return String::from_utf8(buf[..null_pos].to_vec()).ok();
@@ -682,6 +909,37 @@ unsafe fn cfstring_to_rust_string(cf_str: CFTypeRef) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    struct FixedSystemCursorReader {
+        shape: Option<SystemCursorShape>,
+    }
+
+    impl SystemCursorReader for FixedSystemCursorReader {
+        fn read_current_cursor_shape(&mut self) -> Option<SystemCursorShape> {
+            self.shape
+        }
+    }
+
+    struct InlineMainThreadDispatcher {
+        did_run: std::sync::Arc<AtomicBool>,
+    }
+
+    impl CursorMainThreadDispatcher for InlineMainThreadDispatcher {
+        fn run_on_main_thread(&self, task: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+            self.did_run.store(true, Ordering::Relaxed);
+            task();
+            Ok(())
+        }
+    }
+
+    struct FailingMainThreadDispatcher;
+
+    impl CursorMainThreadDispatcher for FailingMainThreadDispatcher {
+        fn run_on_main_thread(&self, _task: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+            Err("main thread unavailable".to_string())
+        }
+    }
 
     /// Mock provider for testing.
     struct MockCursorKindProvider {
@@ -708,6 +966,98 @@ mod tests {
             kind: CursorKind::IBeam,
         };
         assert_eq!(provider.query(50.0, 50.0), CursorKind::IBeam);
+    }
+
+    #[test]
+    fn system_cursor_shape_mapping_covers_supported_kinds() {
+        assert_eq!(
+            system_cursor_shape_to_kind(SystemCursorShape::Arrow),
+            Some(CursorKind::Arrow)
+        );
+        assert_eq!(
+            system_cursor_shape_to_kind(SystemCursorShape::PointingHand),
+            Some(CursorKind::Hand)
+        );
+        assert_eq!(
+            system_cursor_shape_to_kind(SystemCursorShape::IBeam),
+            Some(CursorKind::IBeam)
+        );
+    }
+
+    #[test]
+    fn system_cursor_unknown_does_not_become_hand() {
+        assert_eq!(system_cursor_shape_to_kind(SystemCursorShape::Other), None);
+
+        let mut provider =
+            MacCursorKindProvider::with_system_reader_for_test(Box::new(FixedSystemCursorReader {
+                shape: Some(SystemCursorShape::Other),
+            }));
+
+        assert_eq!(provider.query(320.0, 240.0), CursorKind::Arrow);
+    }
+
+    #[test]
+    fn system_cursor_arrow_wins_for_mission_control_false_positive_case() {
+        let mut provider =
+            MacCursorKindProvider::with_system_reader_for_test(Box::new(FixedSystemCursorReader {
+                shape: Some(SystemCursorShape::Arrow),
+            }));
+
+        assert_eq!(provider.query(960.0, 540.0), CursorKind::Arrow);
+    }
+
+    #[test]
+    fn system_cursor_reader_can_emit_hand_and_ibeam() {
+        let mut provider =
+            MacCursorKindProvider::with_system_reader_for_test(Box::new(FixedSystemCursorReader {
+                shape: Some(SystemCursorShape::PointingHand),
+            }));
+        assert_eq!(provider.query(960.0, 540.0), CursorKind::Hand);
+
+        let mut provider =
+            MacCursorKindProvider::with_system_reader_for_test(Box::new(FixedSystemCursorReader {
+                shape: Some(SystemCursorShape::IBeam),
+            }));
+        assert_eq!(provider.query(960.0, 540.0), CursorKind::IBeam);
+    }
+
+    #[test]
+    fn main_thread_reader_dispatches_system_cursor_read() {
+        let did_run = std::sync::Arc::new(AtomicBool::new(false));
+        let read_called = std::sync::Arc::new(AtomicBool::new(false));
+        let read_called_for_closure = read_called.clone();
+        let mut reader = MainThreadSystemCursorReader::with_read_fn_for_test(
+            Box::new(InlineMainThreadDispatcher {
+                did_run: did_run.clone(),
+            }),
+            std::sync::Arc::new(move || {
+                read_called_for_closure.store(true, Ordering::Relaxed);
+                Some(SystemCursorShape::IBeam)
+            }),
+        );
+
+        assert_eq!(
+            reader.read_current_cursor_shape(),
+            Some(SystemCursorShape::IBeam)
+        );
+        assert!(did_run.load(Ordering::Relaxed));
+        assert!(read_called.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn main_thread_reader_returns_none_when_dispatch_fails() {
+        let read_called = std::sync::Arc::new(AtomicBool::new(false));
+        let read_called_for_closure = read_called.clone();
+        let mut reader = MainThreadSystemCursorReader::with_read_fn_for_test(
+            Box::new(FailingMainThreadDispatcher),
+            std::sync::Arc::new(move || {
+                read_called_for_closure.store(true, Ordering::Relaxed);
+                Some(SystemCursorShape::PointingHand)
+            }),
+        );
+
+        assert_eq!(reader.read_current_cursor_shape(), None);
+        assert!(!read_called.load(Ordering::Relaxed));
     }
 
     #[test]

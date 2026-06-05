@@ -12,7 +12,7 @@ use crate::core::timeline::{
     MouseButton,
 };
 use crate::media::recording_metadata::RecordingMetadata;
-use crate::platform::macos::cursor_kind::{cursor_kind_diagnostics_merged, CursorKindDiagnostics};
+use crate::platform::macos::cursor_kind::cursor_kind_diagnostics_merged;
 
 const DEFAULT_MAX_CURSOR_SAMPLES: usize = 120_000;
 const DEFAULT_MAX_CURSOR_CLICKS: usize = 10_000;

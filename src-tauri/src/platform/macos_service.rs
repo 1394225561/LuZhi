@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::macos::cpal_microphone::CpalMicrophoneCapture;
+use super::macos::cursor_kind::CursorMainThreadDispatcher;
 use super::macos::cursor_source::MacCursorSource;
 use super::macos::screen_capture_kit::MacScreenCapture;
 use crate::app::cursor_metadata_runtime::CursorMetadataRuntime;
@@ -164,6 +165,7 @@ impl MacRecordingService {
         config: CaptureConfig,
         audio_config: AudioConfig,
         beautify_snapshot: BeautifyConfigSnapshot,
+        cursor_main_thread_dispatcher: Box<dyn CursorMainThreadDispatcher>,
     ) -> AppResult<()> {
         self.state_machine.start()?;
 
@@ -228,7 +230,7 @@ impl MacRecordingService {
 
         // Start cursor metadata runtime for cursor effects.
         self.cursor_runtime = Some(CursorMetadataRuntime::spawn(
-            MacCursorSource::new(session_clock.clone()),
+            MacCursorSource::new(session_clock.clone(), cursor_main_thread_dispatcher),
             config.fps,
             session_clock.clone(),
             beautify_snapshot,

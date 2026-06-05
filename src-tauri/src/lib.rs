@@ -33,11 +33,26 @@ use media::silence_detector::SilenceDetectorEngine;
 use media::trim_exporter::ExportProgressReporter;
 use media::trim_metadata::TrimMetadataWriter;
 #[cfg(target_os = "macos")]
+use platform::macos::cursor_kind::CursorMainThreadDispatcher;
+#[cfg(target_os = "macos")]
 use platform::macos_service::MacRecordingService;
 #[cfg(not(target_os = "macos"))]
 compile_error!("LuZhi recording service currently supports macOS builds only; Windows app wiring requires a WindowsRecordingService.");
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct TauriCursorMainThreadDispatcher {
+    app: AppHandle,
+}
+
+#[cfg(target_os = "macos")]
+impl CursorMainThreadDispatcher for TauriCursorMainThreadDispatcher {
+    fn run_on_main_thread(&self, task: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+        self.app.run_on_main_thread(task).map_err(|e| e.to_string())
+    }
+}
 
 /// Shared recording state managed by Tauri.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -172,11 +187,18 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
         trim_sensitivity: beautify_config.trim_sensitivity.clone(),
         raw_system_cursor_visible: config.show_system_cursor,
     };
+    let cursor_main_thread_dispatcher =
+        Box::new(TauriCursorMainThreadDispatcher { app: app.clone() });
 
     let new_state = tauri::async_runtime::spawn_blocking(move || {
         let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
         service
-            .start(config, audio_config, beautify_snapshot)
+            .start(
+                config,
+                audio_config,
+                beautify_snapshot,
+                cursor_main_thread_dispatcher,
+            )
             .map_err(|e| e.to_string())?;
         Ok::<_, String>(service.state())
     })
