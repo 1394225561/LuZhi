@@ -337,6 +337,15 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
     setIsMuted(newMuted)
   }
 
+  const handleFullscreen = () => {
+    if (!videoContainerRef.current) return
+    if (document.fullscreenElement) {
+      void document.exitFullscreen()
+    } else {
+      void videoContainerRef.current.requestFullscreen()
+    }
+  }
+
   const exportPresets: Array<{
     id: ExportPreset
     name: string
@@ -472,7 +481,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
                     className="w-24"
                   />
                 </div>
-                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full">
+                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={handleFullscreen}>
                   <Maximize2 className="w-4 h-4" />
                 </Button>
               </div>
