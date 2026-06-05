@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-05 | BUG-0014 第三轮修复完成；美化界面主预览/右侧边栏空白可拖，文本和按钮不可拖。
+> 最后更新：2026-06-05 | 播放控件完整功能实现完成；美化界面主预览/右侧边栏空白可拖，文本和按钮不可拖。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,55 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-05：播放控件完整功能实现
+
+输入文件：
+
+- `docs/superpowers/specs/2026-06-05-playback-controls-design.md`
+- `docs/superpowers/plans/2026-06-05-playback-controls.md`
+- `reference/ui/ui_spec.md`
+- `.claude/rules/0-global.md`
+- `.claude/rules/1-coding-style.md`
+- `.claude/rules/2-testing.md`
+
+已完成：
+
+1. 添加 `videoRef`、`videoContainerRef`、`isSeekingRef` 引用
+2. 修改初始状态：`currentTime` 从 45→0，`duration` 从 180→0（由视频元数据驱动），新增 `isMuted` 状态
+3. 添加视频事件监听 useEffect（`loadedmetadata`、`timeupdate`、`play`、`pause`、`ended`）
+4. 移除 `<video>` 标签的原生 `controls` 属性，添加 `ref` 和 `playsInline`
+5. 实现 `handlePlayPause`（调用 `video.play()` / `video.pause()`）
+6. 实现 `handleSkipBack` / `handleSkipForward`（±10 秒跳转）
+7. 进度条使用 `onValueCommit` 实现松手 seek，`isSeekingRef` 防止拖拽时跳动
+8. 实现 `handleVolumeChange` 和 `handleMuteToggle`，音量图标切换 `Volume2` / `VolumeX`
+9. 实现 `handleFullscreen`（`requestFullscreen()` / `exitFullscreen()`）
+10. 所有播放控件按钮添加 `disabled={!recordingResult?.outputPath}`
+11. 新增 3 个前端测试：play/pause 按钮调用 video.play()、无视频源时按钮禁用、slider 存在性验证
+
+当前验证结果：
+
+- `npm test -- --run` **63 tests** 通过（+3 相比之前）
+- `npm run build` 通过
+- `git diff --check` 通过
+
+改动文件：
+
+- **修改**: `src/components/preview-view.tsx`, `src/App.test.tsx`
+- **新增**: `docs/superpowers/specs/2026-06-05-playback-controls-design.md`, `docs/superpowers/plans/2026-06-05-playback-controls.md`
+
+人工复核建议：
+
+1. 播放按钮点击 → 视频开始播放，图标变为 Pause
+2. 暂停按钮点击 → 视频暂停，图标变为 Play
+3. 后退按钮 → 视频后退 10 秒
+4. 前进按钮 → 视频前进 10 秒
+5. 进度条拖拽 → 视频 seek 到目标位置，松手前不跳动
+6. 音量滑块 → 视频音量实时变化
+7. 静音图标点击 → 视频静音/取消静音，图标切换
+8. 全屏按钮 → 视频容器进入全屏
+9. 播放结束 → 自动暂停在最后一帧
+10. 无录制文件 → 控件按钮禁用
 
 ### 2026-06-05：BUG-0014 美化界面拖拽触发范围第三轮修复
 
