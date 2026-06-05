@@ -4,11 +4,31 @@
 
 ## 未解决
 
-暂无。
-
 ---
 
 ## 已解决
+
+### BUG-0013: 结束录制报错 ✅ 已解决
+
+**现象**：录制前只开启系统音频，没有开启麦克风采集，但是录制过程中系统并没有音频输出，点击结束录制会报错。如果有系统音频输出，比如开启音乐播放，结束录制、导出功能都正常。
+
+**期望**：开启了系统音频采集，哪怕录制全程都是静音状态，也能正常录制、导出。
+
+**根因**：`RequestedAudioContract` 验证逻辑假设"如果用户请求了音频录制，那么录制的音频不应该是静音的"。当用户仅开启系统音频采集，但录制过程中系统确实没有音频输出时，录制的音频确实是静音的（RMS=0.000000, peak=0.000000），导致 `validate_source_artifact_with_audio_contract` 验证失败。
+
+**修复**：
+
+1. **`RequestedAudioContract` 结构体**：新增 `allow_silent_if_system_only` 字段（默认 `false`），用于标识是否允许仅系统音频场景下的静音音频。
+2. **`should_allow_silent_audio()` 方法**：新增方法，当 `allow_silent_if_system_only=true` 且仅请求了系统音频（无麦克风）时返回 `true`。
+3. **验证逻辑**：在 `validate_source_artifact_with_audio_contract` 和 `validate_export_artifact_with_audio_contract` 中，当 `should_allow_silent_audio()` 返回 `true` 时，允许静音音频通过验证（打印日志但不报错）。
+4. **调用方设置**：在 `macos_service.rs` 和 `lib.rs` 中，当 `requested_system_audio=true` 且 `requested_microphone=false` 时，设置 `allow_silent_if_system_only=true`。
+
+**预防规则**：
+
+1. 音频 contract 验证必须区分"用户请求了音频但完全没有音频轨道"（错误）和"用户请求了音频且有音频轨道但内容静音"（可能正常）两种场景。
+2. 当仅请求系统音频时，必须允许静音音频通过验证，因为系统可能确实没有音频输出。
+3. 验证逻辑的假设必须与实际使用场景对齐，不能假设"请求了音频就一定有音频输出"。
+4. 新增 contract 字段时，必须同步更新所有调用方和导出验证逻辑。
 
 ### BUG-0010: 导出的视频光标定位不对 ✅ 已解决-人工验证通过
 

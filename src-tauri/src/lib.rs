@@ -964,9 +964,15 @@ async fn export_video(
                     .service
                     .lock()
                     .map_err(|_| "录制服务锁已损坏".to_string())?;
+                let requested_system_audio = svc.last_requested_system_audio();
+                let requested_microphone = svc.last_requested_microphone();
                 media::ffmpeg_common::RequestedAudioContract {
-                    requested_system_audio: svc.last_requested_system_audio(),
-                    requested_microphone: svc.last_requested_microphone(),
+                    requested_system_audio,
+                    requested_microphone,
+                    // BUG-0013: Allow silent audio when only system audio was requested.
+                    // This handles the legitimate case where the user captures system audio
+                    // but the system has no audio output during the recording session.
+                    allow_silent_if_system_only: requested_system_audio && !requested_microphone,
                     ..Default::default()
                 }
             };

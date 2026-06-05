@@ -29,6 +29,15 @@ pub struct RequestedAudioContract {
     /// global RMS well below this threshold. This field is NOT used as a hard gate;
     /// it only produces `eprintln!` warnings for diagnostics.
     pub audible_min_rms: f64,
+    /// Whether to allow silent audio when only system audio was requested (no microphone).
+    ///
+    /// When `true` and `requested_system_audio == true` and `requested_microphone == false`,
+    /// the validation will allow silent audio (RMS=0, peak=0) without returning an error.
+    /// This handles the legitimate case where the user captures system audio but the
+    /// system has no audio output during the recording session (BUG-0013).
+    ///
+    /// Default: `false` (strict validation — silent audio is rejected).
+    pub allow_silent_if_system_only: bool,
 }
 
 impl Default for RequestedAudioContract {
@@ -39,6 +48,7 @@ impl Default for RequestedAudioContract {
             min_rms: 0.003,
             min_peak: 0.02,
             audible_min_rms: 0.015,
+            allow_silent_if_system_only: false,
         }
     }
 }
@@ -47,6 +57,21 @@ impl RequestedAudioContract {
     /// Returns true if any audio source was requested.
     pub fn any_audio_requested(&self) -> bool {
         self.requested_system_audio || self.requested_microphone
+    }
+
+    /// Returns true if silent audio should be allowed for this contract.
+    ///
+    /// Silent audio is allowed when:
+    /// - `allow_silent_if_system_only` is `true`, AND
+    /// - Only system audio was requested (no microphone), AND
+    /// - System audio was actually requested
+    ///
+    /// This handles the legitimate case where the user captures system audio
+    /// but the system has no audio output during the recording session (BUG-0013).
+    pub fn should_allow_silent_audio(&self) -> bool {
+        self.allow_silent_if_system_only
+            && self.requested_system_audio
+            && !self.requested_microphone
     }
 }
 
@@ -546,13 +571,22 @@ pub fn validate_source_artifact_with_audio_contract(
     }
 
     if rms < contract.min_rms && peak < contract.min_peak {
-        return Err(AppError::RecordingWriteFailed {
-            reason: format!(
-                "请求了音频录制但解码后音频近乎静音（RMS={:.6} < {:.6}，peak={:.6} < {:.6}，system={}, mic={}）",
-                rms, contract.min_rms, peak, contract.min_peak,
-                contract.requested_system_audio, contract.requested_microphone,
-            ),
-        });
+        // BUG-0013: Allow silent audio when only system audio was requested
+        // and the system has no audio output during the recording session.
+        if contract.should_allow_silent_audio() {
+            eprintln!(
+                "录制音频 contract 验证通过（允许静音）: RMS={:.6}, peak={:.6}, system={}, mic={}",
+                rms, peak, contract.requested_system_audio, contract.requested_microphone,
+            );
+        } else {
+            return Err(AppError::RecordingWriteFailed {
+                reason: format!(
+                    "请求了音频录制但解码后音频近乎静音（RMS={:.6} < {:.6}，peak={:.6} < {:.6}，system={}, mic={}）",
+                    rms, contract.min_rms, peak, contract.min_peak,
+                    contract.requested_system_audio, contract.requested_microphone,
+                ),
+            });
+        }
     }
 
     // Level 2: audible diagnostics — warn when aggregate RMS is below the
@@ -615,12 +649,21 @@ pub fn validate_export_artifact_with_audio_contract(
     }
 
     if rms < contract.min_rms && peak < contract.min_peak {
-        return Err(AppError::ExportFailed {
-            reason: format!(
-                "导出文件请求了音频但解码后近乎静音（RMS={:.6} < {:.6}，peak={:.6} < {:.6}）",
-                rms, contract.min_rms, peak, contract.min_peak,
-            ),
-        });
+        // BUG-0013: Allow silent audio when only system audio was requested
+        // and the system has no audio output during the recording session.
+        if contract.should_allow_silent_audio() {
+            eprintln!(
+                "导出文件 contract 验证通过（允许静音）: RMS={:.6}, peak={:.6}, system={}, mic={}",
+                rms, peak, contract.requested_system_audio, contract.requested_microphone,
+            );
+        } else {
+            return Err(AppError::ExportFailed {
+                reason: format!(
+                    "导出文件请求了音频但解码后近乎静音（RMS={:.6} < {:.6}，peak={:.6} < {:.6}）",
+                    rms, contract.min_rms, peak, contract.min_peak,
+                ),
+            });
+        }
     }
 
     // Level 2: audible diagnostics — warn only, do NOT hard fail.
@@ -1084,5 +1127,104 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bug_0013_allow_silent_audio_when_system_only() {
+        // BUG-0013: When only system audio is requested and the system has no
+        // audio output during the recording session, silent audio should be allowed.
+        use crate::media::ffmpeg_writer::FfmpegRecordingWriter;
+        use crate::media::recording_writer::RecordingWriter;
+        use crate::test_support::ffmpeg_helpers::{test_video_frame_at, unique_media_path};
+
+        let path = unique_media_path("bug-0013-silent-allow", "mp4");
+        // Create a video-only artifact (no real audio content).
+        {
+            let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
+            writer.push_video(test_video_frame_at(0)).unwrap();
+            writer.push_video(test_video_frame_at(33_333_333)).unwrap();
+            writer.finish().unwrap();
+        }
+
+        // Contract with allow_silent_if_system_only = true (BUG-0013 fix).
+        let contract = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            allow_silent_if_system_only: true,
+            ..Default::default()
+        };
+
+        let result = validate_source_artifact_with_audio_contract(&path, &contract);
+        assert!(
+            result.is_ok(),
+            "BUG-0013: silent audio should be allowed when only system audio requested and allow_silent_if_system_only=true: {:?}",
+            result.err()
+        );
+
+        // Contract with allow_silent_if_system_only = false (default behavior).
+        let contract_strict = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            allow_silent_if_system_only: false,
+            ..Default::default()
+        };
+
+        let result_strict = validate_source_artifact_with_audio_contract(&path, &contract_strict);
+        assert!(
+            result_strict.is_err(),
+            "BUG-0013: silent audio should still be rejected when allow_silent_if_system_only=false"
+        );
+
+        // Contract with microphone requested should still reject silent audio.
+        let contract_with_mic = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: true,
+            allow_silent_if_system_only: true,
+            ..Default::default()
+        };
+
+        let result_with_mic = validate_source_artifact_with_audio_contract(&path, &contract_with_mic);
+        assert!(
+            result_with_mic.is_err(),
+            "BUG-0013: silent audio should still be rejected when microphone is requested"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bug_0013_should_allow_silent_audio_method() {
+        // Test the should_allow_silent_audio() method.
+        let c1 = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            allow_silent_if_system_only: true,
+            ..Default::default()
+        };
+        assert!(c1.should_allow_silent_audio(), "should allow silent when system-only with flag=true");
+
+        let c2 = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: false,
+            allow_silent_if_system_only: false,
+            ..Default::default()
+        };
+        assert!(!c2.should_allow_silent_audio(), "should not allow silent when flag=false");
+
+        let c3 = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: true,
+            allow_silent_if_system_only: true,
+            ..Default::default()
+        };
+        assert!(!c3.should_allow_silent_audio(), "should not allow silent when mic requested");
+
+        let c4 = RequestedAudioContract {
+            requested_system_audio: false,
+            requested_microphone: false,
+            allow_silent_if_system_only: true,
+            ..Default::default()
+        };
+        assert!(!c4.should_allow_silent_audio(), "should not allow silent when no audio requested");
     }
 }

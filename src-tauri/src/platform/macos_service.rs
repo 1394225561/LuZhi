@@ -1071,6 +1071,10 @@ impl MacRecordingService {
             let contract = crate::media::ffmpeg_common::RequestedAudioContract {
                 requested_system_audio,
                 requested_microphone,
+                // BUG-0013: Allow silent audio when only system audio was requested.
+                // This handles the legitimate case where the user captures system audio
+                // but the system has no audio output during the recording session.
+                allow_silent_if_system_only: requested_system_audio && !requested_microphone,
                 ..Default::default()
             };
             if contract.any_audio_requested() {
