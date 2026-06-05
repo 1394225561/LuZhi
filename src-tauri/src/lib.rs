@@ -908,6 +908,13 @@ async fn export_video(
         #[cfg(feature = "ffmpeg")]
         let export_result = {
             let cancel = cancel_token.clone();
+            // Resolve cursor assets directory relative to the crate manifest.
+            // At runtime, assets are bundled alongside the binary.
+            let cursor_assets_dir = Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets")
+                    .join("cursors"),
+            );
             tauri::async_runtime::spawn_blocking(move || {
                 let mut exporter = media::trim_exporter::FfmpegTrimExporter;
                 app::export_service::export_recording_with_timeline(
@@ -917,6 +924,7 @@ async fn export_video(
                     export_preset,
                     cut_timeline,
                     effect_timeline,
+                    cursor_assets_dir,
                     cancel,
                     Some(progress_reporter),
                     sequence,

@@ -71,6 +71,9 @@ pub struct TrimExportRequest {
     pub preset: ExportPreset,
     pub cut_timeline: CutTimeline,
     pub effect_timeline_path: Option<PathBuf>,
+    /// Directory containing cursor PNG assets (arrow/hand/ibeam .png files).
+    /// Required when `effect_timeline_path` is set and `render_cursor_overlay` is true.
+    pub cursor_assets_dir: Option<PathBuf>,
     pub cancel_token: Arc<AtomicBool>,
     pub progress: Option<ExportProgressReporter>,
 }
@@ -82,6 +85,7 @@ impl PartialEq for TrimExportRequest {
             && self.preset == other.preset
             && self.cut_timeline == other.cut_timeline
             && self.effect_timeline_path == other.effect_timeline_path
+            && self.cursor_assets_dir == other.cursor_assets_dir
     }
 }
 
@@ -446,6 +450,11 @@ impl TrimExporter for FfmpegTrimExporter {
         if let Some(ref timeline_path) = request.effect_timeline_path {
             let timeline = crate::media::cursor_overlay::load_effect_timeline(timeline_path)?;
             let needs_overlay = timeline.render_cursor_overlay;
+            let cursor_assets = request
+                .cursor_assets_dir
+                .as_ref()
+                .map(|dir| crate::media::cursor_assets::load_cursor_assets(dir))
+                .unwrap_or_default();
             cursor_overlay = crate::media::cursor_overlay::CursorOverlayRenderer::new(
                 timeline,
                 src_width,
@@ -455,6 +464,7 @@ impl TrimExporter for FfmpegTrimExporter {
                 scale_policy,
                 center_crop_origin,
                 fit_dims,
+                cursor_assets,
             );
             // Safety contract: if raw cursor is hidden (overlay required) but
             // renderer couldn't be created, fail the export.
@@ -1367,6 +1377,7 @@ mod tests {
             preset: ExportPreset::Bilibili,
             cut_timeline: CutTimeline::empty(10_000_000_000),
             effect_timeline_path: None,
+            cursor_assets_dir: None,
             cancel_token: Arc::new(AtomicBool::new(false)),
             progress: None,
         };
@@ -1417,6 +1428,7 @@ mod tests {
                     preset: ExportPreset::Bilibili,
                     cut_timeline: CutTimeline::empty(500_000_000),
                     effect_timeline_path: None,
+                    cursor_assets_dir: None,
                     cancel_token: Arc::new(AtomicBool::new(false)),
                     progress: None,
                 })
@@ -1444,6 +1456,7 @@ mod tests {
                 preset: ExportPreset::Bilibili,
                 cut_timeline: CutTimeline::empty(1_000_000_000),
                 effect_timeline_path: None,
+                cursor_assets_dir: None,
                 cancel_token: Arc::new(AtomicBool::new(false)),
                 progress: None,
             });
@@ -1463,6 +1476,7 @@ mod tests {
                 preset: ExportPreset::Bilibili,
                 cut_timeline: CutTimeline::empty(500_000_000),
                 effect_timeline_path: None,
+                cursor_assets_dir: None,
                 cancel_token: Arc::new(AtomicBool::new(false)),
                 progress: None,
             });
@@ -1486,6 +1500,7 @@ mod tests {
                 preset: ExportPreset::Bilibili,
                 cut_timeline: CutTimeline::empty(500_000_000),
                 effect_timeline_path: None,
+                cursor_assets_dir: None,
                 cancel_token: cancel,
                 progress: None,
             });
@@ -1510,6 +1525,7 @@ mod tests {
                 preset: ExportPreset::Bilibili,
                 cut_timeline: CutTimeline::empty(500_000_000),
                 effect_timeline_path: None,
+                cursor_assets_dir: None,
                 cancel_token: cancel,
                 progress: None,
             });

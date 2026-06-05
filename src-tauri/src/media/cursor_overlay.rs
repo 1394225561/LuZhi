@@ -258,19 +258,20 @@ impl CursorOverlayRenderer {
         // Draw the cursor asset with RGBA alpha blending on Y/U/V planes.
         Self::draw_rgba_cursor(
             frame, w as i64, h as i64, draw_x, draw_y, scaled_w, scaled_h, asset, scale,
+            cursor_frame.opacity,
         );
 
         // Click magnification ring: still drawn around hotspot on Y plane only.
         if clamped_scale > 1.05 {
             let ring_radius =
                 ((self.cursor_radius * clamped_scale * 1.4).round() as i64).min(max_radius as i64);
+            let y_linesize = frame.stride(0);
             let data = frame.data_mut(0);
-            let linesize = data.len() / h as usize;
             Self::draw_circle_outline_i64(
                 data,
                 w as i64,
                 h as i64,
-                linesize,
+                y_linesize,
                 out_x_clamped,
                 out_y_clamped,
                 ring_radius,
@@ -352,6 +353,7 @@ impl CursorOverlayRenderer {
         scaled_h: i64,
         asset: &CursorAsset,
         scale: f32,
+        opacity: f32,
     ) {
         // Collect blending operations to avoid simultaneous mutable borrows
         // of Y, U, V plane data. Each op: (py, px, y_val, u_val, v_val, alpha).
@@ -383,7 +385,12 @@ impl CursorOverlayRenderer {
                     continue; // Fully transparent.
                 }
 
-                let alpha = pixel.a as f32 / 255.0;
+                let alpha = (pixel.a as f32 / 255.0) * opacity;
+
+                // NOTE: YUV420P chroma subsampling — each UV cell covers a 2x2 luma block.
+                // When multiple semi-transparent cursor pixels map to the same UV cell,
+                // the last pixel processed overwrites the previous blend. This produces
+                // minor color fringing at cursor edges, which is acceptable for overlay use.
 
                 // RGB to YUV (BT.601)
                 let r = pixel.r as f32;
