@@ -5,6 +5,7 @@ import {
   SkipBack,
   SkipForward,
   Volume2,
+  VolumeX,
   Maximize2,
   MousePointer2,
   Sparkles,
@@ -73,6 +74,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [volume, setVolume] = useState(80)
+  const [isMuted, setIsMuted] = useState(false)
 
   // AI Beautification settings
   const [cursorMagnification, setCursorMagnification] = useState(true)
@@ -318,6 +320,23 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
     video.currentTime = Math.min(video.duration, video.currentTime + 10)
   }
 
+  const handleVolumeChange = (value: number[]) => {
+    setVolume(value[0])
+    if (videoRef.current) {
+      videoRef.current.volume = value[0] / 100
+      videoRef.current.muted = value[0] === 0
+      setIsMuted(value[0] === 0)
+    }
+  }
+
+  const handleMuteToggle = () => {
+    const video = videoRef.current
+    if (!video) return
+    const newMuted = !video.muted
+    video.muted = newMuted
+    setIsMuted(newMuted)
+  }
+
   const exportPresets: Array<{
     id: ExportPreset
     name: string
@@ -438,12 +457,18 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
 
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2">
-                  <Volume2 className="w-4 h-4 text-muted-foreground" />
+                  <button onClick={handleMuteToggle} className="text-muted-foreground hover:text-foreground transition-colors">
+                    {isMuted || volume === 0 ? (
+                      <VolumeX className="w-4 h-4" />
+                    ) : (
+                      <Volume2 className="w-4 h-4" />
+                    )}
+                  </button>
                   <Slider
                     value={[volume]}
                     max={100}
                     step={1}
-                    onValueChange={(value) => setVolume(value[0])}
+                    onValueChange={handleVolumeChange}
                     className="w-24"
                   />
                 </div>
