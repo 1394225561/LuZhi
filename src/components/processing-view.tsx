@@ -11,7 +11,7 @@ export function ProcessingView({ message = '正在处理录制内容...' }: Proc
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
-      className="min-h-screen flex items-center justify-center bg-background" data-tauri-drag-region="deep"
+      className="min-h-screen flex items-center justify-center bg-background" data-luzhi-drag-region="surface"
     >
       <div className="flex flex-col items-center gap-4">
         <motion.div

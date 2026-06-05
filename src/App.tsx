@@ -29,6 +29,27 @@ type AppState = 'idle' | 'recording' | 'preview' | 'processing' | 'failed'
 
 const DEFAULT_RESOLUTION = { width: 1920, height: 1080, label: '1080p (1920×1080)' }
 const DEFAULT_FPS = 30
+const NON_DRAG_TARGET_SELECTOR = [
+  'button',
+  'input',
+  'select',
+  'textarea',
+  'a',
+  'video',
+  'audio',
+  '[controls]',
+  '[role="button"]',
+  '[role="link"]',
+  '[role="menuitem"]',
+  '[role="tab"]',
+  '[role="checkbox"]',
+  '[role="radio"]',
+  '[role="slider"]',
+  '[role="switch"]',
+  '[contenteditable]:not([contenteditable="false"])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(', ')
+const TEXT_DRAG_TARGET_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, span, code, pre, kbd, label, small, strong, em'
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>('idle')
@@ -241,14 +262,12 @@ export default function App() {
     handleBackToIdle()
   }, [handleBackToIdle])
 
-  // 禁用桌面端右键菜单和文本选中
+  // 禁用桌面端右键菜单，保留文本选择以便复制录制/导出信息。
   useEffect(() => {
     const handler = (e: Event) => e.preventDefault()
     document.addEventListener('contextmenu', handler)
-    document.addEventListener('selectstart', handler)
     return () => {
       document.removeEventListener('contextmenu', handler)
-      document.removeEventListener('selectstart', handler)
     }
   }, [])
 
@@ -257,16 +276,19 @@ export default function App() {
     const handleMouseDown = (e: MouseEvent) => {
       if (e.button !== 0) return
 
-      const target = e.target as HTMLElement
+      const target = e.target
+      if (!(target instanceof Element)) return
 
-      // 跳过交互元素
-      if (target.closest('button, input, select, textarea, a, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="slider"], [role="switch"], [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"])')) {
+      const dragRegion = target.closest('[data-luzhi-drag-region]')
+      if (!dragRegion) return
+
+      // 跳过交互元素和可复制文本。
+      if (
+        target.closest(NON_DRAG_TARGET_SELECTOR) ||
+        target.closest(TEXT_DRAG_TARGET_SELECTOR)
+      ) {
         return
       }
-
-      // 确认在拖拽区域内
-      const dragRegion = target.closest('[data-tauri-drag-region]')
-      if (!dragRegion) return
 
       import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
         getCurrentWindow().startDragging()
@@ -280,7 +302,7 @@ export default function App() {
   // Idle state
   if (appState === 'idle') {
     return (
-      <div className="min-h-screen flex items-center justify-center p-8" data-tauri-drag-region="deep">
+      <div className="min-h-screen flex items-center justify-center p-8" data-luzhi-drag-region="surface">
         <div className="relative">
           <RecordingPanel
             recordingMode={recordingMode}
@@ -330,7 +352,7 @@ export default function App() {
   // Recording state
   if (appState === 'recording') {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-between p-8" data-tauri-drag-region="deep">
+      <div className="min-h-screen flex flex-col items-center justify-between p-8" data-luzhi-drag-region="surface">
         <div className="pt-4">
           <AnimatePresence>
             <RecordingStatusBar

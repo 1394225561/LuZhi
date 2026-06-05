@@ -278,10 +278,10 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
-      className="flex h-screen bg-background" data-tauri-drag-region="deep"
+      className="flex h-screen bg-background"
     >
       {/* Main Preview Area */}
-      <div className="flex-1 flex flex-col p-6">
+      <div className="flex-1 flex flex-col p-6" data-luzhi-drag-region="preview-main">
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <button
@@ -392,7 +392,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
       </div>
 
       {/* Right Sidebar */}
-      <div className="w-[340px] border-l border-border/50 bg-card/30 p-5 overflow-y-auto">
+      <div className="w-[340px] border-l border-border/50 bg-card/30 p-5 overflow-y-auto" data-luzhi-drag-region="preview-sidebar">
         {/* AI Beautification Section */}
         <div className="mb-8">
           <div className="flex items-center gap-2 mb-4">

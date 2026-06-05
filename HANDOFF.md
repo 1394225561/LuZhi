@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-05 | BUG-0011 NSCursor 方案人工验证通过；FFI review findings 已修复并通过自动化验证。
+> 最后更新：2026-06-05 | BUG-0014 第三轮修复完成；美化界面主预览/右侧边栏空白可拖，文本和按钮不可拖。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,53 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-05：BUG-0014 美化界面拖拽触发范围第三轮修复
+
+输入文件：
+
+- `BUG.md` BUG-0014
+- 用户二次反馈：导出视频后保存路径文字无法拖选，仍会触发窗口拖拽
+- 用户三次反馈：第二轮修复过头，美化界面所有区域都无法触发窗口拖拽；期望主预览区域和右侧边栏空白可拖，按钮/文本不可拖
+- `reference/ui/ui_spec.md`
+- `reference/ui/ui-migration-spec.md`
+- `.codex/rules/0-global.md`
+- `.codex/rules/1-coding-style.md`
+- `.codex/rules/2-testing.md`
+
+已完成：
+
+1. 按 systematic debugging 完成根因调查：`App.tsx` 使用 `closest('[data-tauri-drag-region]')`，导致根拖拽区域下的标题/说明文本继承拖拽能力
+2. 识别第二个阻断复制的根因：全局 `selectstart` 被 `preventDefault()`，即使拖拽修复后也无法选择文本
+3. 根据用户二次反馈补充根因：`PreviewView` 根容器仍保留 `data-tauri-drag-region="deep"`，真实 Tauri WebView 原生拖拽机制会绕过程序化监听过滤，导出保存路径仍位于该祖先下
+4. 根据用户三次反馈补充根因：第二轮将 `data-luzhi-drag-region` 放在预览页根节点，并要求事件目标本身带标记；左右内容容器覆盖根节点，导致空白区域也无法命中拖拽标记
+5. 新增/调整前端回归测试覆盖：主预览区域空白触发拖拽、右侧边栏空白触发拖拽、预览文本不触发拖拽、预览文本允许 `selectstart`、导出保存路径不位于 Tauri 原生 drag-region 祖先下且不会触发 `startDragging()`
+6. 最小修复：保留右键菜单禁用；移除全局 `selectstart` 阻止；将 `src` 中真实 `data-tauri-drag-region` 全部替换为应用自定义 `data-luzhi-drag-region`
+7. `PreviewView` 改为在主预览区域和右侧边栏两个内容容器上放置 `data-luzhi-drag-region`
+8. 程序化窗口拖拽改为：命中自定义拖拽容器内空白区域才触发；按钮、输入控件、视频控件、可交互角色和文本元素不触发
+9. 更新 `BUG.md` 根因、修复内容和预防规则
+10. 新增并更新本轮自测清单
+
+当前验证结果：
+
+- 第一轮目标红绿测试：修复前 2 failed / 1 passed；修复后 `npm test -- src/App.test.tsx -t "does not start window drag|keeps direct blank|allows preview text selection"` **3 tests** 通过
+- 第二轮导出路径测试：修复前 `keeps exported output path outside Tauri native drag regions` 失败，失败证据显示最近祖先为 `data-tauri-drag-region="deep"` 的预览页根容器；修复后目标测试 **4 tests** 通过
+- 第三轮左右容器测试：修复前 `starts window drag from main preview container blank area` / `starts window drag from right sidebar blank area` 失败；修复后 BUG-0014 目标测试 **5 tests** 通过
+- `npm test -- --run` **60 tests** 通过
+- `npm run build` 通过
+- `git diff --check` 通过
+
+改动文件：
+
+- **修改**: `src/App.tsx`, `src/App.test.tsx`, `src/components/preview-view.tsx`, `src/components/processing-view.tsx`, `src/components/error-view.tsx`, `BUG.md`, `HANDOFF.md`
+- **新增**: `tests/2026-06-05-bug-0014-drag-region-checklist.md`
+
+人工复核建议：
+
+1. 预览美化界面拖动空白区域：窗口可以移动
+2. 拖动标题/说明文本：不会移动窗口，文本可被选择复制
+3. 导出成功后拖选保存路径文字：不会移动窗口，路径可被选中复制
+4. 点击/拖动返回、播放、滑块、开关、导出按钮：不会触发窗口拖拽
 
 ### 2026-06-05：BUG-0011 第 6 轮 FFI Code Review Findings 修复
 

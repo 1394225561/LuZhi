@@ -11,10 +11,17 @@ class ResizeObserverMock {
 globalThis.ResizeObserver = ResizeObserverMock as unknown as typeof ResizeObserver
 
 const invokeMock = vi.fn()
+const startDraggingMock = vi.fn()
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (command: string, args?: unknown) => invokeMock(command, args),
   convertFileSrc: (path: string) => `asset://localhost/${path}`,
+}))
+
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    startDragging: startDraggingMock,
+  }),
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -24,6 +31,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 describe('App', () => {
   beforeEach(async () => {
     invokeMock.mockReset()
+    startDraggingMock.mockReset()
     invokeMock.mockImplementation((command: string) => {
       if (command === 'recording_status') {
         return Promise.resolve({ state: 'idle', canStart: true })
@@ -446,6 +454,124 @@ describe('App', () => {
     render(<App />)
     await screen.findByText('录制失败')
     expect(document.querySelector('[data-tauri-drag-region="false"]')).toBeNull()
+  })
+
+  it('does not start window drag from preview text content', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true,
+          magnificationFactor: 2,
+          cursorSmoothing: true,
+          autoTrimSilences: false,
+          trimSensitivity: 'medium',
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    const title = await screen.findByText('预览与美化')
+    await act(async () => {
+      fireEvent.mouseDown(title, { button: 0 })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(startDraggingMock).not.toHaveBeenCalled()
+  })
+
+  it('starts window drag from main preview container blank area', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true,
+          magnificationFactor: 2,
+          cursorSmoothing: true,
+          autoTrimSilences: false,
+          trimSensitivity: 'medium',
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    await screen.findByText('预览与美化')
+    expect(document.querySelector('[data-tauri-drag-region]')).toBeNull()
+
+    const mainPreview = document.querySelector('[data-luzhi-drag-region="preview-main"]')
+    expect(mainPreview).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.mouseDown(mainPreview as Element, { button: 0 })
+    })
+
+    await vi.waitFor(() => {
+      expect(startDraggingMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('starts window drag from right sidebar blank area', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true,
+          magnificationFactor: 2,
+          cursorSmoothing: true,
+          autoTrimSilences: false,
+          trimSensitivity: 'medium',
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    await screen.findByText('预览与美化')
+    expect(document.querySelector('[data-tauri-drag-region]')).toBeNull()
+
+    const sidebar = document.querySelector('[data-luzhi-drag-region="preview-sidebar"]')
+    expect(sidebar).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.mouseDown(sidebar as Element, { button: 0 })
+    })
+
+    await vi.waitFor(() => {
+      expect(startDraggingMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('allows preview text selection for copying', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true,
+          magnificationFactor: 2,
+          cursorSmoothing: true,
+          autoTrimSilences: false,
+          trimSensitivity: 'medium',
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    const title = await screen.findByText('预览与美化')
+    const selectEvent = new Event('selectstart', { bubbles: true, cancelable: true })
+    title.dispatchEvent(selectEvent)
+
+    expect(selectEvent.defaultPrevented).toBe(false)
   })
 
   it('displays recording result after stop with camelCase fields', async () => {
@@ -2088,6 +2214,53 @@ describe('App', () => {
       expect(screen.getByText(/已生成可播放导出文件/)).toBeTruthy()
     })
     expect(screen.queryByText(/FFmpeg 编码器接入后/)).toBeNull()
+  })
+
+  it('keeps exported output path outside Tauri native drag regions', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: true,
+          magnificationFactor: 2,
+          cursorSmoothing: true,
+          autoTrimSilences: false,
+          trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'set_beautify_config') return Promise.resolve()
+      if (command === 'export_video') {
+        return Promise.resolve({
+          frameCount: 1,
+          clickEffectCount: 0,
+          effectTimelinePath: '/tmp/effects.json',
+          cutCount: 0,
+          totalCutNanos: 0,
+          cutTimelinePath: null,
+          outputPath: '/tmp/luzhi-export.mp4',
+        })
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findByText('预览与美化')
+
+    const exportButtons = screen.getAllByRole('button', { name: '导出' })
+    await act(async () => {
+      fireEvent.click(exportButtons[0])
+    })
+
+    const outputPath = await screen.findByText('/tmp/luzhi-export.mp4')
+    expect(outputPath.closest('[data-tauri-drag-region]')).toBeNull()
+
+    startDraggingMock.mockClear()
+    await act(async () => {
+      fireEvent.mouseDown(outputPath, { button: 0 })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(startDraggingMock).not.toHaveBeenCalled()
   })
 
   it('can request export cancellation from preview', async () => {

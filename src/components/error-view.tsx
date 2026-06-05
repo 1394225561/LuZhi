@@ -14,7 +14,7 @@ export function ErrorView({ message, onRetry, onBack }: ErrorViewProps) {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
-      className="min-h-screen flex items-center justify-center bg-background" data-tauri-drag-region="deep"
+      className="min-h-screen flex items-center justify-center bg-background" data-luzhi-drag-region="surface"
     >
       <div className="flex flex-col items-center gap-4 max-w-sm text-center">
         <AlertCircle className="w-10 h-10 text-destructive" />
