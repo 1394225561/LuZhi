@@ -393,9 +393,18 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
             <div className="mb-3">
               <Slider
                 value={[currentTime]}
-                max={duration}
-                step={1}
-                onValueChange={(value) => setCurrentTime(value[0])}
+                max={duration || 1}
+                step={0.1}
+                onValueChange={(value) => {
+                  isSeekingRef.current = true
+                  setCurrentTime(value[0])
+                }}
+                onValueCommit={(value) => {
+                  isSeekingRef.current = false
+                  if (videoRef.current) {
+                    videoRef.current.currentTime = value[0]
+                  }
+                }}
                 className="w-full"
               />
               <div className="flex justify-between text-xs text-muted-foreground mt-1 font-mono">
