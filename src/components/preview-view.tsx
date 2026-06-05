@@ -444,7 +444,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
             {/* Playback Controls */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={handleSkipBack}>
+                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={handleSkipBack} disabled={!recordingResult?.outputPath}>
                   <SkipBack className="w-4 h-4" />
                 </Button>
                 <Button
@@ -452,6 +452,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
                   size="icon"
                   className="h-10 w-10 rounded-full bg-surface hover:bg-surface-hover text-foreground"
                   onClick={handlePlayPause}
+                  disabled={!recordingResult?.outputPath}
                 >
                   {isPlaying ? (
                     <Pause className="w-5 h-5" />
@@ -459,7 +460,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
                     <Play className="w-5 h-5 ml-0.5" />
                   )}
                 </Button>
-                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={handleSkipForward}>
+                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={handleSkipForward} disabled={!recordingResult?.outputPath}>
                   <SkipForward className="w-4 h-4" />
                 </Button>
               </div>
@@ -481,7 +482,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
                     className="w-24"
                   />
                 </div>
-                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={handleFullscreen}>
+                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={handleFullscreen} disabled={!recordingResult?.outputPath}>
                   <Maximize2 className="w-4 h-4" />
                 </Button>
               </div>
