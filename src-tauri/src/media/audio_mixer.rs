@@ -43,21 +43,30 @@ impl SimpleAudioMixer {
         }
     }
 
-    /// 获取或初始化滤波器（每个通道一个）。
-    fn get_or_init_filters(&self, channels: usize) -> Option<Vec<HighpassFilter>> {
+    /// 使用滤波器处理音频样本。
+    ///
+    /// 在持有 MutexGuard 的情况下执行处理，确保滤波器状态被正确更新。
+    fn apply_denoise_if_enabled(&self, samples: &[f32], channels: u16) -> Vec<f32> {
         if self.denoise_mode != DenoiseMode::Highpass {
-            return None;
+            return samples.to_vec();
         }
 
-        let mut filters = self.highpass_filters.lock().unwrap();
-        if filters.is_none() {
-            *filters = Some(
-                (0..channels)
+        let mut filters_guard = self.highpass_filters.lock().unwrap();
+
+        // 懒初始化滤波器
+        if filters_guard.is_none() {
+            *filters_guard = Some(
+                (0..channels as usize)
                     .map(|_| HighpassFilter::new(80.0, MIXED_SAMPLE_RATE as f64))
                     .collect(),
             );
         }
-        filters.clone()
+
+        if let Some(ref mut filters) = *filters_guard {
+            apply_highpass(samples, channels, filters)
+        } else {
+            samples.to_vec()
+        }
     }
 }
 
@@ -132,15 +141,7 @@ fn passthrough(chunk: &AudioChunk, mixer: &SimpleAudioMixer) -> AppResult<MixedA
     let resampled = resample(chunk, MIXED_SAMPLE_RATE);
 
     // 仅对麦克风通道应用降噪
-    let filtered = if mixer.denoise_mode == DenoiseMode::Highpass {
-        if let Some(mut filters) = mixer.get_or_init_filters(chunk.channels as usize) {
-            apply_highpass(&resampled, chunk.channels, &mut filters)
-        } else {
-            resampled
-        }
-    } else {
-        resampled
-    };
+    let filtered = mixer.apply_denoise_if_enabled(&resampled, chunk.channels);
 
     let stereo = to_stereo(&filtered, chunk.channels);
     let clamped = clamp_samples(&stereo);
@@ -173,15 +174,7 @@ fn mix_two(
     let mic_resampled = resample(mic, MIXED_SAMPLE_RATE);
 
     // 仅对麦克风通道应用降噪
-    let mic_filtered = if mixer.denoise_mode == DenoiseMode::Highpass {
-        if let Some(mut filters) = mixer.get_or_init_filters(mic.channels as usize) {
-            apply_highpass(&mic_resampled, mic.channels, &mut filters)
-        } else {
-            mic_resampled
-        }
-    } else {
-        mic_resampled
-    };
+    let mic_filtered = mixer.apply_denoise_if_enabled(&mic_resampled, mic.channels);
 
     let sys_stereo = to_stereo(&sys_resampled, system.channels);
     let mic_stereo = to_stereo(&mic_filtered, mic.channels);
