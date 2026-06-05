@@ -145,7 +145,9 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
     }
   }, [])
 
-  // Sync video element events with React state
+  // Sync video element events with React state.
+  // Re-run when outputPath changes so that event listeners are re-attached
+  // after the <video> element mounts (it is conditionally rendered).
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
@@ -173,7 +175,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
       video.removeEventListener('pause', onPause)
       video.removeEventListener('ended', onEnded)
     }
-  }, [])
+  }, [recordingResult?.outputPath])
 
   // Flush any pending beautify config on unmount so user's last changes
   // are not silently discarded when navigating away from Preview.
