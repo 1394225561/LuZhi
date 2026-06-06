@@ -107,9 +107,9 @@ impl Display for AppError {
             AppError::LicenseFailed { reason } => {
                 write!(formatter, "授权状态处理失败：{reason}")
             }
-            Self::ImportFailed { reason } => write!(formatter, "导入失败: {reason}"),
-            Self::RecordingNotFound(id) => write!(formatter, "录制未找到: {id}"),
-            Self::IndexCorrupted { reason } => write!(formatter, "索引损坏: {reason}"),
+            Self::ImportFailed { reason } => write!(formatter, "导入失败：{reason}"),
+            Self::RecordingNotFound(id) => write!(formatter, "录制未找到：{id}"),
+            Self::IndexCorrupted { reason } => write!(formatter, "索引损坏：{reason}"),
         }
     }
 }
@@ -156,13 +156,13 @@ mod tests {
         let err = AppError::ImportFailed {
             reason: "非本应用录制的文件".to_string(),
         };
-        assert_eq!(err.to_string(), "导入失败: 非本应用录制的文件");
+        assert_eq!(err.to_string(), "导入失败：非本应用录制的文件");
     }
 
     #[test]
     fn recording_not_found_chinese_message() {
         let err = AppError::RecordingNotFound("rec-123".to_string());
-        assert_eq!(err.to_string(), "录制未找到: rec-123");
+        assert_eq!(err.to_string(), "录制未找到：rec-123");
     }
 
     #[test]
@@ -170,6 +170,6 @@ mod tests {
         let err = AppError::IndexCorrupted {
             reason: "JSON 解析失败".to_string(),
         };
-        assert_eq!(err.to_string(), "索引损坏: JSON 解析失败");
+        assert_eq!(err.to_string(), "索引损坏：JSON 解析失败");
     }
 }
