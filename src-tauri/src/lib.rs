@@ -7,7 +7,7 @@ pub mod test_support;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use app::events::{
@@ -18,6 +18,7 @@ use app::events::{
 use app::mic_level_runtime::MicLevelRuntime;
 #[cfg(not(target_os = "macos"))]
 use app::permission_service::{PermissionStatus, RecordingPermissions};
+use app::recording_library::{LibraryEntrySummary, RecordingContextPayload, RecordingLibrary};
 use app::recording_runtime::TickRuntime;
 use app::state_machine::RecordingState;
 use core::capture::{AudioConfig, DenoiseMode};
@@ -87,6 +88,7 @@ struct AppState {
     beautify_revision: Arc<AtomicU64>,
     export_cancel_token: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
     export_sequence: Arc<AtomicU64>,
+    library: Arc<Mutex<RecordingLibrary>>,
 }
 
 impl Default for AppState {
@@ -108,7 +110,18 @@ impl Default for AppState {
             beautify_revision: Arc::new(AtomicU64::new(0)),
             export_cancel_token: Arc::new(Mutex::new(None)),
             export_sequence: Arc::new(AtomicU64::new(0)),
+            library: Arc::new(Mutex::new(RecordingLibrary::new(
+                &std::env::temp_dir().join("luzhi-recordings"),
+            ))),
         }
+    }
+}
+
+impl AppState {
+    fn init_library(&self, app_data_dir: &Path) {
+        let mut lib = self.library.lock().expect("library lock poisoned");
+        *lib = RecordingLibrary::new(app_data_dir);
+        lib.repair_on_startup();
     }
 }
 
@@ -729,6 +742,51 @@ fn activate_license(_app: AppHandle, code: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn list_recordings(state: tauri::State<'_, AppState>) -> Result<Vec<LibraryEntrySummary>, String> {
+    let library = state.library.lock().map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
+    Ok(library.list())
+}
+
+#[tauri::command]
+fn get_recording_context(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<RecordingContextPayload, String> {
+    let library = state.library.lock().map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
+    let ctx = library.get_recording(&id).map_err(|e| e.to_string())?;
+    Ok(RecordingContextPayload {
+        video_path: ctx.entry.video_path.to_string_lossy().to_string(),
+        cursor_metadata_path: ctx.entry.cursor_metadata_path.to_string_lossy().to_string(),
+        effect_timeline_path: ctx.entry.effect_timeline_path.to_string_lossy().to_string(),
+        trim_metadata_path: ctx.entry.trim_metadata_path.to_string_lossy().to_string(),
+        cut_timeline_path: ctx.entry.cut_timeline_path.to_string_lossy().to_string(),
+        metadata_json: ctx.metadata_json,
+        effect_timeline_json: ctx.effect_timeline_json,
+        cut_timeline_json: ctx.cut_timeline_json,
+    })
+}
+
+#[tauri::command]
+fn import_recording(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<LibraryEntrySummary, String> {
+    let mut library = state.library.lock().map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
+    let entry = library.import(Path::new(&path)).map_err(|e| e.to_string())?;
+    Ok(entry)
+}
+
+#[tauri::command]
+fn delete_recording(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let mut library = state.library.lock().map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
+    library.delete(&id, true).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn cancel_export(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let guard = state
         .export_cancel_token
@@ -1270,8 +1328,20 @@ pub fn run() -> tauri::Result<()> {
             cancel_export,
             license_status,
             activation_status,
-            activate_license
+            activate_license,
+            list_recordings,
+            get_recording_context,
+            import_recording,
+            delete_recording
         ])
+        .setup(|app| {
+            // Initialize recording library with proper app data dir.
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                let state = app.state::<AppState>();
+                state.init_library(&data_dir);
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())?;
 
     Ok(())
