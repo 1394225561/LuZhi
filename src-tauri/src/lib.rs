@@ -317,34 +317,35 @@ async fn stop_recording(
     // Auto-register to library on successful stop. Only video_path is
     // strictly required; cursor_metadata_path and other sidecar paths
     // are optional (they may not exist yet or cursor tracking may have
-    // been disabled).
+    // been disabled). Registration proceeds even when `failed` is true
+    // because a valid video file should always appear in the library;
+    // the `failed` flag only controls whether the frontend shows error
+    // diagnostics.
     if let Ok(ref resp) = response {
-        if !resp.failed {
-            if let Some(ref video_path) = resp.result.output_path {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+        if let Some(ref video_path) = resp.result.output_path {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
 
-                let cursor_path = resp.result.cursor_metadata_path.as_deref();
-                let effect_path = resp.result.effect_timeline_path.as_deref();
-                let trim_path = resp.result.trim_metadata_path.as_deref();
-                let cut_path = resp.result.cut_timeline_path.as_deref();
+            let cursor_path = resp.result.cursor_metadata_path.as_deref();
+            let effect_path = resp.result.effect_timeline_path.as_deref();
+            let trim_path = resp.result.trim_metadata_path.as_deref();
+            let cut_path = resp.result.cut_timeline_path.as_deref();
 
-                let mut library = state.library.lock().map_err(|_| "录制库锁已损坏".to_string())?;
-                let register_result = library.register(
-                    &format!("rec-{now_ms}-{}", resp.result.frame_count),
-                    now_ms,
-                    resp.result.duration_secs as f64,
-                    video_path,
-                    cursor_path,
-                    effect_path,
-                    trim_path,
-                    cut_path,
-                );
-                if let Err(e) = register_result {
-                    log::warn!("自动注册录制到历史库失败：{e}");
-                }
+            let mut library = state.library.lock().map_err(|_| "录制库锁已损坏".to_string())?;
+            let register_result = library.register(
+                &format!("rec-{now_ms}-{}", resp.result.frame_count),
+                now_ms,
+                resp.result.duration_secs as f64,
+                video_path,
+                cursor_path,
+                effect_path,
+                trim_path,
+                cut_path,
+            );
+            if let Err(e) = register_result {
+                log::warn!("自动注册录制到历史库失败：{e}");
             }
         }
     }
@@ -814,8 +815,8 @@ fn get_recording_context(
     let ctx = library.get_recording(&id).map_err(|e| e.to_string())?;
     Ok(RecordingContextPayload {
         video_path: ctx.entry.video_path.to_string_lossy().to_string(),
-        cursor_metadata_path: ctx.entry.cursor_metadata_path.to_string_lossy().to_string(),
-        effect_timeline_path: ctx.entry.effect_timeline_path.to_string_lossy().to_string(),
+        cursor_metadata_path: ctx.entry.cursor_metadata_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        effect_timeline_path: ctx.entry.effect_timeline_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
         trim_metadata_path: ctx.entry.trim_metadata_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
         cut_timeline_path: ctx.entry.cut_timeline_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
         metadata_json: ctx.metadata_json,

@@ -2,28 +2,42 @@
 
 记录已知 bug。**重要**：每条 bug 修复后，都要总结对应的**预防规则**。
 
+## 未解决
+
+（暂无）
+
+---
+
 ## 已解决
 
-### BUG-0015: 历史录制列表为空 ✅ 已修复
+### BUG-0015: 历史录制列表为空 ✅ 已解决-人工验证通过
 
 **现象**：录制结束，从预览美化界面点击返回，历史录制列表为空，并没有加载出历史数据。
 
-**期望**：返回、启动应用，能够正常加载出历史数据。
+**期望**：返回或者启动应用，能够正常加载出历史数据。
 
-**根因**：
-1. `stop_recording` 自动注册守卫要求 `cursor_metadata_path` 为 `Some`，若光标追踪未启动或写入失败则整个注册被静默跳过
-2. `register()` 函数要求全部 4 个配套文件路径为 `Some` 且存在磁盘，但 `cut_timeline_path` 在用户未启用自动裁剪时为 `None`，导致注册失败
-3. `repair_on_startup` 检查全部 4 个文件是否存在，缺少任何文件都会删除条目（包括尚未生成的裁剪时间线）
+**根因**：双层问题叠加导致录制结果无法入库。
 
-**修复**：
-- `stop_recording` 守卫仅要求 `output_path` 为 `Some`，`cursor_metadata_path` 改为可选传递
-- `register()` 中 `trim_metadata_path` 和 `cut_timeline_path` 改为 `Option<PathBuf>`，若文件不存在则存为 `None`
-- `repair_on_startup` 仅检查必需文件（video、cursor_metadata、effect_timeline）
-- `get_recording` 处理可选的 `cut_timeline_path`（不存在时返回空字符串）
+1. **`stop_recording` 中存在 `if !resp.failed` 守卫**：`RecordingFinalizeGuard` 收集的任何非关键错误（光标元数据写入失败、裁剪元数据写入失败、麦克风停止失败等）都会设置 `failed = true`，导致注册逻辑被完全跳过。视频文件正常生成且可播放，但从未被加入录制库索引。
+2. **`register()` 要求 `cursor_metadata_path` 和 `effect_timeline_path` 必须为 `Some` 且文件存在**：但 `effect_timeline_path` 仅在美化流程中设置，录制停止时始终为 `None`；`cursor_metadata_path` 在光标追踪未启动或写入失败时也为 `None`。这导致即使绕过了第一层守卫，注册仍然失败。
+
+**修复**（提交 `2b094f2`）：
+
+1. 移除 `stop_recording` 中的 `if !resp.failed` 守卫，只要 `output_path` 存在就执行注册
+2. 将 `LibraryEntry` 中的 `cursor_metadata_path` 和 `effect_timeline_path` 改为 `Option<PathBuf>`，与 `trim_metadata_path`/`cut_timeline_path` 保持一致
+3. 更新 `register()` —— 所有伴生文件可选，仅视频文件为必选，不存在的文件存为 `None`
+4. 更新 `get_recording()` —— 缺失的伴生文件返回空 JSON
+5. 更新 `delete()` —— 仅删除 `Some` 的伴生文件
+6. 更新 `repair_on_startup()` —— 仅检查 `video_path` 是否存在
+7. 更新 `get_recording_context()` —— 可选路径用 `unwrap_or_default()` 处理
 
 **预防规则**：
-1. 自动注册流程不得因可选元数据缺失而整体跳过，仅核心文件缺失才应跳过
-2. `repair_on_startup` 不得因尚未生成的可选文件而删除条目
+
+1. **禁止用 `failed` 守卫跳过关键业务逻辑**：录制入库是关键路径，不应被非关键错误（伴生文件写入失败）阻断。关键路径注册应与错误上报解耦。
+2. **伴生文件一律设计为可选**：录制产物的伴生文件（cursor_metadata、effect_timeline、trim_metadata、cut_timeline）均应为 `Option`，仅视频文件为必选。注册、查询、删除、修复全链路必须统一处理 `None` 情况。
+3. **RAII 守卫的错误不应阻断业务流**：`RecordingFinalizeGuard` 收集的错误用于上报和诊断，不应阻止录制结果入库。业务层需区分"录制失败"与"录制成功但有非关键错误"。
+
+---
 
 ### BUG-0016: 导入失败 ✅ 已修复
 
@@ -42,17 +56,17 @@
 **根因**：`import()` 函数使用视频文件名的时间戳构造配套文件名（如 `cursor-metadata-1780726583259-0.json`），但实际配套文件使用录制开始时的时间戳（如 `cursor-metadata-1780726614720-0.json`），两者不同导致文件查找失败。
 
 **修复**：
+
 - 新增 `find_companion_file()` 辅助函数，按前缀和序列号在目录中搜索配套文件
 - 配套文件不再要求与视频文件时间戳完全匹配，而是通过 `cursor-metadata-*-{seq}.json` 模式匹配
 - `trim_metadata_path` 和 `cut_timeline_path` 改为可选（用户未启用自动裁剪时不存在）
 
 **预防规则**：
+
 1. 配套文件发现不得依赖视频文件名时间戳，应按前缀+序列号模式搜索
 2. 导入校验应区分必需文件和可选文件
 
 ---
-
-## 已解决
 
 ### BUG-0014: 美化界面拖拽触发范围太广，需要优化 ✅ 已解决
 
@@ -83,6 +97,8 @@
 4. 导出路径、错误信息、诊断信息等用户可能复制的文本，必须测试其祖先链不包含 Tauri 原生 drag-region。
 5. 自定义拖拽标记必须放在用户实际点击的内容容器上；如果只放在被子容器完全覆盖的根节点上，空白拖拽会失效。
 
+---
+
 ### BUG-0013: 结束录制报错 ✅ 已解决
 
 **现象**：录制前只开启系统音频，没有开启麦克风采集，但是录制过程中系统并没有音频输出，点击结束录制会报错。如果有系统音频输出，比如开启音乐播放，结束录制、导出功能都正常。
@@ -104,6 +120,8 @@
 2. 当仅请求系统音频时，必须允许静音音频通过验证，因为系统可能确实没有音频输出。
 3. 验证逻辑的假设必须与实际使用场景对齐，不能假设"请求了音频就一定有音频输出"。
 4. 新增 contract 字段时，必须同步更新所有调用方和导出验证逻辑。
+
+---
 
 ### BUG-0010: 导出的视频光标定位不对 ✅ 已解决-人工验证通过
 

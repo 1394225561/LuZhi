@@ -22,8 +22,10 @@ pub struct LibraryEntry {
     pub created_at: u64,
     pub duration_secs: f64,
     pub video_path: PathBuf,
-    pub cursor_metadata_path: PathBuf,
-    pub effect_timeline_path: PathBuf,
+    /// Optional: missing when cursor tracking was disabled or write failed.
+    pub cursor_metadata_path: Option<PathBuf>,
+    /// Optional: missing when beautify has not been built yet.
+    pub effect_timeline_path: Option<PathBuf>,
     /// Optional: only created when auto-trim is used.
     pub trim_metadata_path: Option<PathBuf>,
     /// Optional: only created when auto-trim is used.
@@ -131,10 +133,10 @@ impl RecordingLibrary {
 
     /// Register a completed recording into the library index.
     ///
-    /// `cursor_metadata_path` and `effect_timeline_path` are required — the
-    /// beautify workflow cannot proceed without them. `trim_metadata_path` and
-    /// `cut_timeline_path` are optional because they are only created when the
-    /// user enables auto-trim.
+    /// Only `video_path` is strictly required. All companion file paths
+    /// (`cursor_metadata_path`, `effect_timeline_path`, `trim_metadata_path`,
+    /// `cut_timeline_path`) are optional — stored as `None` when the file
+    /// does not exist or was not produced.
     pub fn register(
         &mut self,
         id: &str,
@@ -153,27 +155,9 @@ impl RecordingLibrary {
             });
         }
 
-        let cmp = cursor_metadata_path
-            .map(PathBuf::from)
-            .ok_or_else(|| AppError::ImportFailed {
-                reason: "光标元数据路径缺失".to_string(),
-            })?;
-        let etp = effect_timeline_path
-            .map(PathBuf::from)
-            .ok_or_else(|| AppError::ImportFailed {
-                reason: "效果时间线路径缺失".to_string(),
-            })?;
-
-        // Required companion files must exist.
-        for p in [&cmp, &etp] {
-            if !p.exists() {
-                return Err(AppError::ImportFailed {
-                    reason: format!("缺少配套文件：{}", p.display()),
-                });
-            }
-        }
-
         // Optional companion files: use if exists, ignore if missing.
+        let cmp = cursor_metadata_path.map(PathBuf::from).filter(|p| p.exists());
+        let etp = effect_timeline_path.map(PathBuf::from).filter(|p| p.exists());
         let tmp = trim_metadata_path.map(PathBuf::from).filter(|p| p.exists());
         let ctp = cut_timeline_path.map(PathBuf::from).filter(|p| p.exists());
 
@@ -202,14 +186,18 @@ impl RecordingLibrary {
         let entry = self.find_entry(id)?.clone();
 
         if delete_files {
-            let _ = fs::remove_file(&entry.video_path);
-            let _ = fs::remove_file(&entry.cursor_metadata_path);
-            let _ = fs::remove_file(&entry.effect_timeline_path);
+            Self::safe_remove_file(&entry.video_path);
+            if let Some(ref p) = entry.cursor_metadata_path {
+                Self::safe_remove_file(p);
+            }
+            if let Some(ref p) = entry.effect_timeline_path {
+                Self::safe_remove_file(p);
+            }
             if let Some(ref p) = entry.trim_metadata_path {
-                let _ = fs::remove_file(p);
+                Self::safe_remove_file(p);
             }
             if let Some(ref p) = entry.cut_timeline_path {
-                let _ = fs::remove_file(p);
+                Self::safe_remove_file(p);
             }
         }
 
@@ -217,24 +205,40 @@ impl RecordingLibrary {
         self.save_index()
     }
 
+    /// Delete a file only if it lives under the app's recordings directory.
+    /// Prevents path-traversal attacks via a tampered `recordings-index.json`.
+    fn safe_remove_file(path: &Path) {
+        let recordings_dir = std::env::temp_dir().join("luzhi-recordings");
+        // Resolve symlinks before checking the prefix, so a symlink pointing
+        // outside the directory is rejected.
+        match path.canonicalize() {
+            Ok(canonical) if canonical.starts_with(&recordings_dir) => {
+                let _ = fs::remove_file(canonical);
+            }
+            _ => {
+                log::warn!("拒绝删除录制目录外的文件：{}", path.display());
+            }
+        }
+    }
+
     /// Load full context for re-entering the beautify workflow.
     pub fn get_recording(&self, id: &str) -> AppResult<RecordingContext> {
         let entry = self.find_entry(id)?.clone();
 
-        let metadata_json = fs::read_to_string(&entry.cursor_metadata_path).map_err(|e| {
-            AppError::ImportFailed {
+        let metadata_json = match entry.cursor_metadata_path {
+            Some(ref p) => fs::read_to_string(p).map_err(|e| AppError::ImportFailed {
                 reason: format!("读取光标元数据失败：{e}"),
-            }
-        })?;
+            })?,
+            None => String::new(),
+        };
 
-        let effect_timeline_json =
-            fs::read_to_string(&entry.effect_timeline_path).map_err(|e| {
-                AppError::ImportFailed {
-                    reason: format!("读取效果时间线失败：{e}"),
-                }
-            })?;
+        let effect_timeline_json = match entry.effect_timeline_path {
+            Some(ref p) => fs::read_to_string(p).map_err(|e| AppError::ImportFailed {
+                reason: format!("读取效果时间线失败：{e}"),
+            })?,
+            None => String::new(),
+        };
 
-        // Cut timeline is optional — only exists after auto-trim is used.
         let cut_timeline_json = match entry.cut_timeline_path {
             Some(ref p) => fs::read_to_string(p).map_err(|e| AppError::ImportFailed {
                 reason: format!("读取裁剪时间线失败：{e}"),
@@ -374,8 +378,8 @@ impl RecordingLibrary {
             created_at: millis,
             duration_secs,
             video_path: video_path.to_path_buf(),
-            cursor_metadata_path,
-            effect_timeline_path,
+            cursor_metadata_path: Some(cursor_metadata_path),
+            effect_timeline_path: Some(effect_timeline_path),
             trim_metadata_path,
             cut_timeline_path,
         };
@@ -392,16 +396,12 @@ impl RecordingLibrary {
         Ok(summary)
     }
 
-    /// Remove entries whose required files no longer exist.
-    /// Optional companion files (trim/cut) are not checked — they may not
-    /// have been created yet if the user hasn't used auto-trim.
+    /// Remove entries whose video file no longer exist.
+    /// Companion files (cursor metadata, effect timeline, trim, cut) are all
+    /// optional — their absence does not invalidate the entry.
     pub fn repair_on_startup(&mut self) {
         let before = self.index.entries.len();
-        self.index.entries.retain(|entry| {
-            entry.video_path.exists()
-                && entry.cursor_metadata_path.exists()
-                && entry.effect_timeline_path.exists()
-        });
+        self.index.entries.retain(|entry| entry.video_path.exists());
         let removed = before - self.index.entries.len();
         if removed > 0 {
             log::warn!("启动时移除 {removed} 条无效索引条目");
@@ -522,8 +522,8 @@ mod tests {
             created_at: 0,
             duration_secs: 1.0,
             video_path: dir.join("nonexistent.mp4"),
-            cursor_metadata_path: dir.join("nonexistent.json"),
-            effect_timeline_path: dir.join("nonexistent2.json"),
+            cursor_metadata_path: Some(dir.join("nonexistent.json")),
+            effect_timeline_path: Some(dir.join("nonexistent2.json")),
             trim_metadata_path: Some(dir.join("nonexistent3.json")),
             cut_timeline_path: Some(dir.join("nonexistent4.json")),
         });
