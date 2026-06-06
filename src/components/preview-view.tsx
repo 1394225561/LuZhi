@@ -49,6 +49,7 @@ interface PreviewViewProps {
   onBack: () => void
   recordingResult?: RecordingResult | null
   licenseStatus?: LicenseStatusPayload | null
+  recordingId?: string | null
 }
 
 function messageForBeautifyError(error: unknown, fallback: string): string {
@@ -69,7 +70,7 @@ function messageForBeautifyError(error: unknown, fallback: string): string {
     : fallback
 }
 
-export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewViewProps) {
+export function PreviewView({ onBack, recordingResult, licenseStatus, recordingId }: PreviewViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const videoContainerRef = useRef<HTMLDivElement>(null)
   const isSeekingRef = useRef(false)
@@ -252,11 +253,11 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
       void enqueueConfigWrite(nextConfig)
         .then(() => {
           setBeautifyError(null)
-          return buildCursorEffectTimeline().then(() => {
+          return buildCursorEffectTimeline(recordingId ?? undefined).then(() => {
             // Load full timeline data for preview overlay (non-blocking)
             getCursorEffectTimeline().then(setEffectTimeline).catch(() => {})
             if (nextConfig.autoTrimSilences) {
-              return buildCutTimeline()
+              return buildCutTimeline(recordingId ?? undefined)
             }
           })
         })
@@ -281,7 +282,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
     setIsExporting(true)
     setExportProgress({ preset, progress: 0, cancellable: true, outputPath: null })
     void flushPendingConfig()
-      .then(() => exportVideo(preset))
+      .then(() => exportVideo(preset, recordingId ?? undefined))
       .then((summary) => {
         if (revision !== exportRevisionRef.current) return
         setBeautifyError(null)

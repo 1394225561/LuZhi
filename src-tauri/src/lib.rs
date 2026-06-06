@@ -600,9 +600,13 @@ fn build_effect_timeline_from_metadata(
 async fn build_cursor_effect_timeline(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
+    recording_id: Option<String>,
 ) -> Result<CursorEffectSummaryPayload, String> {
+    let is_history_export = recording_id.is_some();
+
     // Reject during active recording — timeline must be built post-recording.
-    {
+    // Skip this check for history export (no active recording session).
+    if !is_history_export {
         let service = state
             .service
             .lock()
@@ -618,7 +622,23 @@ async fn build_cursor_effect_timeline(
     // Capture session id, metadata path, and beautify revision atomically so we
     // can verify after the async build that no newer config or session has
     // started (which would make our result stale).
-    let (session_id, metadata_path, build_revision) = {
+    // For history export, resolve from the library and skip session tracking.
+    let (session_id, metadata_path, build_revision) = if is_history_export {
+        let lib = state
+            .library
+            .lock()
+            .map_err(|_| "录制库锁已损坏".to_string())?;
+        let ctx = lib
+            .get_recording(recording_id.as_ref().unwrap())
+            .map_err(|e| e.to_string())?;
+        let path = ctx
+            .entry
+            .cursor_metadata_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .ok_or_else(|| "历史录制缺少光标元数据路径".to_string())?;
+        (0u64, path, 0u64)
+    } else {
         let service = state
             .service
             .lock()
@@ -694,7 +714,8 @@ async fn build_cursor_effect_timeline(
     // Only write back the effect path if the session, metadata path, and
     // beautify revision have not changed. This prevents stale builds from
     // overwriting results belonging to a newer config or a different session.
-    {
+    // For history export, skip this validation entirely.
+    if !is_history_export {
         let mut service = state
             .service
             .lock()
@@ -862,6 +883,7 @@ async fn export_video(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     preset: String,
+    recording_id: Option<String>,
 ) -> Result<ExportSummaryPayload, String> {
     use media::export_presets::ExportPreset;
     let export_preset: ExportPreset = preset.parse()?;
@@ -903,7 +925,12 @@ async fn export_video(
         // the effect timeline is REQUIRED. A failed build must block export
         // to prevent silent "no cursor, no beautification" exports (BUG-005).
         let cursor_needs_overlay = config.cursor_magnification || config.cursor_smoothing;
-        let cursor = build_cursor_effect_timeline(app.clone(), state.clone()).await;
+        let cursor = build_cursor_effect_timeline(
+            app.clone(),
+            state.clone(),
+            recording_id.clone(),
+        )
+        .await;
 
         // Progress: cursor timeline preparation (0% → 5%).
         let _ = app.emit(
@@ -939,16 +966,35 @@ async fn export_video(
         );
 
         let cut = if config.auto_trim_silences {
-            Some(build_cut_timeline(app.clone(), state.clone()).await?)
+            Some(
+                build_cut_timeline(
+                    app.clone(),
+                    state.clone(),
+                    recording_id.clone(),
+                )
+                .await?,
+            )
         } else {
             None
         };
 
-        // Read trim metadata path and source artifact path from service.
-        // Effect timeline path comes from the current cursor build result,
-        // NOT from service.last_effect_timeline_path() which may be stale
-        // from a previous recording session.
-        let (trim_metadata_path, source_path) = {
+        // Read source artifact path. When `recording_id` is provided (history
+        // re-export), look up from the library; otherwise use the service's
+        // last recording path (fresh recording workflow).
+        let (trim_metadata_path, source_path) = if let Some(ref id) = recording_id {
+            let lib = state
+                .library
+                .lock()
+                .map_err(|_| "录制库锁已损坏".to_string())?;
+            let ctx = lib.get_recording(id).map_err(|e| e.to_string())?;
+            let source = Some(ctx.entry.video_path.to_string_lossy().to_string());
+            let trim = ctx
+                .entry
+                .trim_metadata_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
+            (trim, source)
+        } else {
             let service = state
                 .service
                 .lock()
@@ -1220,8 +1266,12 @@ fn cut_timeline_path() -> PathBuf {
 async fn build_cut_timeline(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
+    recording_id: Option<String>,
 ) -> Result<CutTimelineSummaryPayload, String> {
-    {
+    let is_history_export = recording_id.is_some();
+
+    // Skip active recording check for history export.
+    if !is_history_export {
         let service = state
             .service
             .lock()
@@ -1237,7 +1287,23 @@ async fn build_cut_timeline(
     // Capture session id, trim metadata path, and beautify revision atomically
     // so we can verify after the async build that no newer config or session has
     // started (which would make our result stale).
-    let (session_id, trim_metadata_path, build_revision) = {
+    // For history export, resolve from the library and skip session tracking.
+    let (session_id, trim_metadata_path, build_revision) = if is_history_export {
+        let lib = state
+            .library
+            .lock()
+            .map_err(|_| "录制库锁已损坏".to_string())?;
+        let ctx = lib
+            .get_recording(recording_id.as_ref().unwrap())
+            .map_err(|e| e.to_string())?;
+        let path = ctx
+            .entry
+            .trim_metadata_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .ok_or_else(|| "历史录制缺少裁剪元数据路径".to_string())?;
+        (0u64, path, 0u64)
+    } else {
         let service = state
             .service
             .lock()
@@ -1317,7 +1383,8 @@ async fn build_cut_timeline(
         }
     };
 
-    {
+    // For history export, skip session validation and service write-back.
+    if !is_history_export {
         let mut service = state
             .service
             .lock()

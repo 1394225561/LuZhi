@@ -1182,7 +1182,7 @@ describe('App', () => {
     })
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith('export_video', { preset: 'bilibili' })
+      expect(invokeMock).toHaveBeenCalledWith('export_video', { preset: 'bilibili', recordingId: null })
     })
   })
 
@@ -2016,7 +2016,7 @@ describe('App', () => {
     fireEvent.click(switches[2])
 
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith('build_cut_timeline', undefined)
+      expect(invokeMock).toHaveBeenCalledWith('build_cut_timeline', { recordingId: null })
     })
   })
 

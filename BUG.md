@@ -10,6 +10,38 @@
 
 ## 已解决
 
+### BUG-0017: 历史录制记录重新导出失败 ✅ 已解决-人工验证通过
+
+**现象**：
+
+1. 启动应用后，不进行录制，直接点击历史记录，跳转预览美化界面，此时点击导出会报错：`导出失败，请重试或检查录制素材。`
+2. 启动应用后，进行一次录制（记为 A 视频），此时，无论后续触发哪条历史记录的导出，实际导出的都是 A 视频。
+
+**期望**：正确美化导出历史记录对应的视频。
+
+**根因**：导出链路中有三个函数从 `service` 状态读取路径，历史记录导出时 service 没有活跃会话数据，全部失败：
+
+1. **`build_cursor_effect_timeline`** 读 `service.last_cursor_metadata_path()` → 报错"没有可用的光标元数据"
+2. **`build_cut_timeline`** 读 `service.last_trim_metadata_path()` → 报错"没有可用的裁剪元数据"
+3. **`export_video`** 读 `service.last_recording_output_path()` → 报错"没有可用的原始录制文件"或导出错误的视频
+
+第一轮修复只修了第 3 点（source_path），遗漏了前两个 builder 函数，导致修复不完整。
+
+**修复**：
+
+1. `build_cursor_effect_timeline`、`build_cut_timeline`、`export_video` 三个函数统一增加 `recording_id: Option<String>` 参数
+2. 当 `recording_id` 提供时（历史记录导出），从 `RecordingLibrary` 查询对应的元数据路径，跳过 session 验证和 service 回写
+3. 当 `recording_id` 为 `None` 时（新鲜录制导出），保持原有的 `service` 状态读取逻辑
+4. 前端 `buildCursorEffectTimeline()`、`buildCutTimeline()`、`exportVideo()` 统一增加可选 `recordingId` 参数
+5. `PreviewView` 接收 `recordingId` prop 并传递给所有 builder 和 export 调用
+6. `App.tsx` 在 `handleSelectRecording` 中保存 `selectedRecordingId`，在新鲜录制停止和返回 idle 时清除
+
+**预防规则**：
+
+23. 导出等关键操作的源数据路径必须由调用方显式传入，不能隐式依赖 service 内部状态。当 UI 允许从不同入口（新鲜录制 vs 历史记录）触发同一操作时，必须确保后端能区分数据来源。
+24. 前后端状态一致性：前端通过 `getRecordingContext` 获取的路径仅用于 UI 展示，如果后端操作（如导出）也需要这些路径，必须通过参数显式传递或同步更新后端状态，不能假设两端状态自动一致。
+25. 调用链路完整性审查：修复"路径来源不一致"类 bug 时，必须沿调用链向上追溯所有读取 service 状态的函数，不能只修最末端的 consumer。遗漏中间节点会导致部分修复（现象变为更隐蔽的报错）。
+
 ### BUG-0015: 历史录制列表为空 ✅ 已解决-人工验证通过
 
 **现象**：录制结束，从预览美化界面点击返回，历史录制列表为空，并没有加载出历史数据。

@@ -132,6 +132,7 @@ export default function App() {
   })
   const [errorMessage, setErrorMessage] = useState('')
   const [recordingResult, setRecordingResult] = useState<RecordingResult | null>(null)
+  const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null)
   const [resolution, setResolution] = useState(DEFAULT_RESOLUTION)
   const [fps, setFps] = useState(DEFAULT_FPS)
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusPayload | null>(null)
@@ -277,6 +278,7 @@ export default function App() {
     try {
       const response = await stopRecording()
       const result = response.result
+      setSelectedRecordingId(null)
       setRecordingResult({
         durationSecs: result.durationSecs,
         frameCount: result.frameCount,
@@ -321,6 +323,7 @@ export default function App() {
     setMicVolume(0)
     setErrorMessage('')
     setRecordingResult(null)
+    setSelectedRecordingId(null)
     // 重新检测权限（用户可能在系统设置中修改了权限）
     void fetchRecordingPermissions().then(setPermissions)
   }, [])
@@ -339,6 +342,7 @@ export default function App() {
         trimMetadataPath: ctx.trimMetadataPath,
         cutTimelinePath: ctx.cutTimelinePath,
       })
+      setSelectedRecordingId(id)
       setRecordingResult(result)
       setAppState('preview')
     } catch (e) {
@@ -492,5 +496,5 @@ export default function App() {
   }
 
   // Preview state
-  return <PreviewView onBack={handleBackToIdle} recordingResult={recordingResult} licenseStatus={licenseStatus} />
+  return <PreviewView onBack={handleBackToIdle} recordingResult={recordingResult} licenseStatus={licenseStatus} recordingId={selectedRecordingId} />
 }

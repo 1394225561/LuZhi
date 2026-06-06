@@ -265,20 +265,20 @@ export async function getBeautifyConfig(): Promise<BeautifyConfig> {
   return invoke<BeautifyConfig>('get_beautify_config')
 }
 
-export async function buildCursorEffectTimeline(): Promise<CursorEffectSummary> {
-  return invoke<CursorEffectSummary>('build_cursor_effect_timeline')
+export async function buildCursorEffectTimeline(recordingId?: string): Promise<CursorEffectSummary> {
+  return invoke<CursorEffectSummary>('build_cursor_effect_timeline', { recordingId: recordingId ?? null })
 }
 
 export async function getCursorEffectTimeline(): Promise<EffectTimeline> {
   return invoke<EffectTimeline>('get_cursor_effect_timeline')
 }
 
-export async function buildCutTimeline(): Promise<CutTimelineSummary> {
-  return invoke<CutTimelineSummary>('build_cut_timeline')
+export async function buildCutTimeline(recordingId?: string): Promise<CutTimelineSummary> {
+  return invoke<CutTimelineSummary>('build_cut_timeline', { recordingId: recordingId ?? null })
 }
 
-export async function exportVideo(preset: ExportPreset): Promise<ExportSummary> {
-  return invoke<ExportSummary>('export_video', { preset })
+export async function exportVideo(preset: ExportPreset, recordingId?: string): Promise<ExportSummary> {
+  return invoke<ExportSummary>('export_video', { preset, recordingId: recordingId ?? null })
 }
 
 export async function cancelExport(): Promise<void> {
