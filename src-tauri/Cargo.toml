@@ -39,6 +39,7 @@ block2 = "0.6"
 # SVG rasterization for cursor assets
 resvg = "0.44"
 toml = "0.8"
+log = "0.4"
 
 # Video/audio encoding (optional — requires FFmpeg development libraries)
 ffmpeg-next = { version = "7", optional = true }

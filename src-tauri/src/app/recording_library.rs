@@ -241,4 +241,111 @@ impl RecordingLibrary {
             cut_timeline_json,
         })
     }
+
+    /// Parse "recording-{millis}-{seq}" from a file stem.
+    fn parse_recording_filename(path: &Path) -> AppResult<(u64, u64)> {
+        let stem = path
+            .file_stem()
+            .and_then(|f| f.to_str())
+            .ok_or_else(|| AppError::ImportFailed {
+                reason: "无效的文件名".to_string(),
+            })?;
+
+        let parts: Vec<&str> = stem.split('-').collect();
+        if parts.len() < 3 || parts[0] != "recording" {
+            return Err(AppError::ImportFailed {
+                reason: "非本应用录制的文件".to_string(),
+            });
+        }
+
+        let millis = parts[1].parse::<u64>().map_err(|_| AppError::ImportFailed {
+            reason: "文件名格式错误".to_string(),
+        })?;
+        let seq = parts[2].parse::<u64>().map_err(|_| AppError::ImportFailed {
+            reason: "文件名格式错误".to_string(),
+        })?;
+
+        Ok((millis, seq))
+    }
+
+    /// Validate and import an external MP4 file produced by this app.
+    pub fn import(&mut self, video_path: &Path) -> AppResult<LibraryEntrySummary> {
+        let (millis, seq) = Self::parse_recording_filename(video_path)?;
+
+        let dir = video_path.parent().unwrap_or(Path::new("."));
+        let cursor_metadata_path = dir.join(format!("cursor-metadata-{millis}-{seq}.json"));
+        let effect_timeline_path = dir.join(format!("cursor-effects-{millis}-{seq}.json"));
+        let trim_metadata_path = dir.join(format!("trim-metadata-{millis}-{seq}.json"));
+        let cut_timeline_path = dir.join(format!("cut-timeline-{millis}-{seq}.json"));
+
+        let companion_paths = [
+            &cursor_metadata_path,
+            &effect_timeline_path,
+            &trim_metadata_path,
+            &cut_timeline_path,
+        ];
+        for p in &companion_paths {
+            if !p.exists() {
+                return Err(AppError::ImportFailed {
+                    reason: format!("缺少配套文件：{}", p.display()),
+                });
+            }
+        }
+
+        // Validate metadata is parseable.
+        let _meta = crate::media::recording_metadata::RecordingMetadataWriter::read_metadata(
+            &cursor_metadata_path,
+        )
+        .map_err(|e| AppError::ImportFailed {
+            reason: format!("元数据文件损坏：{e}"),
+        })?;
+
+        let id = format!("rec-{millis}-{seq}");
+
+        // Duplicate check.
+        if self.index.entries.iter().any(|e| e.id == id) {
+            return Err(AppError::ImportFailed {
+                reason: "该录制已在历史记录中".to_string(),
+            });
+        }
+
+        let duration_secs = _meta.duration_nanos as f64 / 1_000_000_000.0;
+
+        let entry = LibraryEntry {
+            id: id.clone(),
+            created_at: millis,
+            duration_secs,
+            video_path: video_path.to_path_buf(),
+            cursor_metadata_path,
+            effect_timeline_path,
+            trim_metadata_path,
+            cut_timeline_path,
+        };
+
+        self.index.entries.push(entry.clone());
+        self.save_index()?;
+
+        Ok(LibraryEntrySummary {
+            id: entry.id,
+            created_at: entry.created_at,
+            duration_secs: entry.duration_secs,
+        })
+    }
+
+    /// Remove entries whose files no longer exist.
+    pub fn repair_on_startup(&mut self) {
+        let before = self.index.entries.len();
+        self.index.entries.retain(|entry| {
+            entry.video_path.exists()
+                && entry.cursor_metadata_path.exists()
+                && entry.effect_timeline_path.exists()
+                && entry.trim_metadata_path.exists()
+                && entry.cut_timeline_path.exists()
+        });
+        let removed = before - self.index.entries.len();
+        if removed > 0 {
+            log::warn!("启动时移除 {removed} 条无效索引条目");
+            let _ = self.save_index();
+        }
+    }
 }
