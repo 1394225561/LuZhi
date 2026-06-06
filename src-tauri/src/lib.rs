@@ -314,6 +314,39 @@ async fn stop_recording(
 
     emit_state_changed(&app, new_state);
 
+    // Auto-register to library on successful stop.
+    if let Ok(ref resp) = response {
+        if !resp.failed {
+            if let (Some(ref video_path), Some(ref cursor_path)) =
+                (&resp.result.output_path, &resp.result.cursor_metadata_path)
+            {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+
+                let effect_path = resp.result.effect_timeline_path.as_deref();
+                let trim_path = resp.result.trim_metadata_path.as_deref();
+                let cut_path = resp.result.cut_timeline_path.as_deref();
+
+                let mut library = state.library.lock().map_err(|_| "录制库锁已损坏".to_string())?;
+                let register_result = library.register(
+                    &format!("rec-{now_ms}-{}", resp.result.frame_count),
+                    now_ms,
+                    resp.result.duration_secs as f64,
+                    video_path,
+                    Some(cursor_path),
+                    effect_path,
+                    trim_path,
+                    cut_path,
+                );
+                if let Err(e) = register_result {
+                    log::warn!("自动注册录制到历史库失败：{e}");
+                }
+            }
+        }
+    }
+
     response.map_err(|e| e.to_string())
 }
 
