@@ -40,14 +40,17 @@ export function RecordingSidebar({
   const [isLoading, setIsLoading] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const loadRecordings = useCallback(async () => {
     setIsLoading(true)
+    setLoadError(null)
     try {
       const list = await listRecordings()
       setRecordings(list.sort((a, b) => b.createdAt - a.createdAt))
     } catch (e) {
       console.error('加载历史录制失败:', e)
+      setLoadError(String(e))
     } finally {
       setIsLoading(false)
     }
@@ -139,6 +142,10 @@ export function RecordingSidebar({
             <div className="flex items-center justify-center py-12">
               <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
             </div>
+          ) : loadError ? (
+            <div className="flex flex-col items-center justify-center py-12 text-destructive">
+              <p className="text-xs">{loadError}</p>
+            </div>
           ) : recordings.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
               <Film className="w-8 h-8 mb-2 opacity-40" />
@@ -155,7 +162,7 @@ export function RecordingSidebar({
                   <div>
                     <p className="text-sm font-medium">{formatDate(rec.createdAt)}</p>
                     <p className="text-xs text-muted-foreground">
-                      时长: {formatDuration(rec.durationSecs)}
+                      时长：{formatDuration(rec.durationSecs)}
                     </p>
                   </div>
                   <ChevronRight className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />

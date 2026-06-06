@@ -77,11 +77,17 @@ impl RecordingLibrary {
 
     fn load_index(path: &Path) -> Option<RecordingIndex> {
         let content = fs::read_to_string(path).ok()?;
-        let idx: RecordingIndex = serde_json::from_str(&content).ok()?;
-        if idx.version != INDEX_VERSION {
-            return None;
+        match serde_json::from_str::<RecordingIndex>(&content) {
+            Ok(idx) if idx.version == INDEX_VERSION => Some(idx),
+            Ok(_) => {
+                log::warn!("索引版本不匹配，将重建索引");
+                None
+            }
+            Err(e) => {
+                log::warn!("索引文件解析失败：{e}，将重建索引");
+                None
+            }
         }
-        Some(idx)
     }
 
     fn save_index(&self) -> AppResult<()> {
@@ -252,7 +258,7 @@ impl RecordingLibrary {
             })?;
 
         let parts: Vec<&str> = stem.split('-').collect();
-        if parts.len() < 3 || parts[0] != "recording" {
+        if parts.len() != 3 || parts[0] != "recording" {
             return Err(AppError::ImportFailed {
                 reason: "非本应用录制的文件".to_string(),
             });
@@ -270,6 +276,12 @@ impl RecordingLibrary {
 
     /// Validate and import an external MP4 file produced by this app.
     pub fn import(&mut self, video_path: &Path) -> AppResult<LibraryEntrySummary> {
+        if video_path.extension().and_then(|e| e.to_str()) != Some("mp4") {
+            return Err(AppError::ImportFailed {
+                reason: "仅支持导入 .mp4 文件".to_string(),
+            });
+        }
+
         let (millis, seq) = Self::parse_recording_filename(video_path)?;
 
         let dir = video_path.parent().unwrap_or(Path::new("."));
@@ -322,14 +334,16 @@ impl RecordingLibrary {
             cut_timeline_path,
         };
 
-        self.index.entries.push(entry.clone());
-        self.save_index()?;
-
-        Ok(LibraryEntrySummary {
-            id: entry.id,
+        let summary = LibraryEntrySummary {
+            id: entry.id.clone(),
             created_at: entry.created_at,
             duration_secs: entry.duration_secs,
-        })
+        };
+
+        self.index.entries.push(entry);
+        self.save_index()?;
+
+        Ok(summary)
     }
 
     /// Remove entries whose files no longer exist.
@@ -345,7 +359,12 @@ impl RecordingLibrary {
         let removed = before - self.index.entries.len();
         if removed > 0 {
             log::warn!("启动时移除 {removed} 条无效索引条目");
-            let _ = self.save_index();
+            if self.save_index().is_err() {
+                // Rollback: reload from disk to restore consistency.
+                if let Some(idx) = Self::load_index(&self.index_path) {
+                    self.index = idx;
+                }
+            }
         }
     }
 }

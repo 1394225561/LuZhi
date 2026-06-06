@@ -53,6 +53,68 @@ const NON_DRAG_TARGET_SELECTOR = [
 ].join(', ')
 const TEXT_DRAG_TARGET_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, span, code, pre, kbd, label, small, strong, em'
 
+/**
+ * Creates a RecordingResult with zeroed diagnostics for re-opening a past recording.
+ * If RecordingResult/WriterDiagnostics/RecordingDiagnostics gain new fields,
+ * the TypeScript compiler will flag missing fields here.
+ */
+function createEmptyRecordingResult(overrides: Partial<RecordingResult> = {}): RecordingResult {
+  return {
+    durationSecs: 0,
+    frameCount: 0,
+    mixedAudioChunkCount: 0,
+    outputPath: null,
+    cursorMetadataPath: null,
+    effectTimelinePath: null,
+    trimMetadataPath: null,
+    cutTimelinePath: null,
+    writerDiagnostics: {
+      audioChunksReceived: 0,
+      audioChunksAppended: 0,
+      audioChunksDiscardedFullOverlap: 0,
+      audioChunksTrimmedPartialOverlap: 0,
+      audioRealFramesAppended: 0,
+      audioSilenceFramesPadded: 0,
+      audioRealRmsMaxBeforeEncode: 0,
+      aacFramesEncoded: 0,
+      silentAacFramesEncoded: 0,
+      generatedSilentTrack: false,
+      videoQueueFullCount: 0,
+      audioQueueFullCount: 0,
+      systemChunksReceivedByWriter: 0,
+      micChunksReceivedByWriter: 0,
+    },
+    diagnostics: {
+      requestedSystemAudio: false,
+      requestedMicrophone: false,
+      microphoneDevice: null,
+      systemChunksReceived: 0,
+      micChunksReceived: 0,
+      systemChunksDropped: 0,
+      micChunksDropped: 0,
+      mixedChunksQueued: 0,
+      writerPushAudioFailures: 0,
+      systemRmsMax: 0,
+      micRmsMax: 0,
+      mixedRmsMax: 0,
+      generatedSilentTrack: false,
+      pairedWindowCount: 0,
+      systemOnlyWindowCount: 0,
+      micOnlyWindowCount: 0,
+      sourceTimeoutWindowCount: 0,
+      systemRmsMaxBeforeWriter: 0,
+      micRmsMaxBeforeWriter: 0,
+      systemWindowsBeforeWriter: 0,
+      micWindowsBeforeWriter: 0,
+      systemFramesBeforeWriter: 0,
+      micFramesBeforeWriter: 0,
+      micStopDiagnostics: null,
+    },
+    finalizationErrors: [],
+    ...overrides,
+  }
+}
+
 export default function App() {
   const [appState, setAppState] = useState<AppState>('idle')
   const [recordingMode, setRecordingMode] = useState<'fullscreen' | 'window' | 'area'>('fullscreen')
@@ -270,59 +332,13 @@ export default function App() {
   const handleSelectRecording = useCallback(async (id: string) => {
     try {
       const ctx = await getRecordingContext(id)
-      const result = {
-        durationSecs: 0,
-        frameCount: 0,
-        mixedAudioChunkCount: 0,
+      const result = createEmptyRecordingResult({
         outputPath: ctx.videoPath,
         cursorMetadataPath: ctx.cursorMetadataPath,
         effectTimelinePath: ctx.effectTimelinePath,
         trimMetadataPath: ctx.trimMetadataPath,
         cutTimelinePath: ctx.cutTimelinePath,
-        writerDiagnostics: {
-          audioChunksReceived: 0,
-          audioChunksAppended: 0,
-          audioChunksDiscardedFullOverlap: 0,
-          audioChunksTrimmedPartialOverlap: 0,
-          audioRealFramesAppended: 0,
-          audioSilenceFramesPadded: 0,
-          audioRealRmsMaxBeforeEncode: 0,
-          aacFramesEncoded: 0,
-          silentAacFramesEncoded: 0,
-          generatedSilentTrack: false,
-          videoQueueFullCount: 0,
-          audioQueueFullCount: 0,
-          systemChunksReceivedByWriter: 0,
-          micChunksReceivedByWriter: 0,
-        },
-        diagnostics: {
-          requestedSystemAudio: false,
-          requestedMicrophone: false,
-          microphoneDevice: null,
-          systemChunksReceived: 0,
-          micChunksReceived: 0,
-          systemChunksDropped: 0,
-          micChunksDropped: 0,
-          mixedChunksQueued: 0,
-          writerPushAudioFailures: 0,
-          systemRmsMax: 0,
-          micRmsMax: 0,
-          mixedRmsMax: 0,
-          generatedSilentTrack: false,
-          pairedWindowCount: 0,
-          systemOnlyWindowCount: 0,
-          micOnlyWindowCount: 0,
-          sourceTimeoutWindowCount: 0,
-          systemRmsMaxBeforeWriter: 0,
-          micRmsMaxBeforeWriter: 0,
-          systemWindowsBeforeWriter: 0,
-          micWindowsBeforeWriter: 0,
-          systemFramesBeforeWriter: 0,
-          micFramesBeforeWriter: 0,
-          micStopDiagnostics: null,
-        },
-        finalizationErrors: [],
-      } as RecordingResult
+      })
       setRecordingResult(result)
       setAppState('preview')
     } catch (e) {
