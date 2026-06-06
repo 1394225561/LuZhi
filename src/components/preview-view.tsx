@@ -31,9 +31,11 @@ import {
   cancelExport,
   exportVideo,
   getBeautifyConfig,
+  getCursorEffectTimeline,
   onExportProgress,
   setBeautifyConfig,
   type BeautifyConfig,
+  type EffectTimeline,
   type ExportPreset,
   type ExportProgressPayload,
   type ExportSummary,
@@ -41,6 +43,7 @@ import {
   type RecordingResult,
 } from '@/lib/tauri'
 import { LicenseStatus } from '@/components/license-status'
+import { CursorOverlay } from '@/components/cursor-overlay'
 
 interface PreviewViewProps {
   onBack: () => void
@@ -85,6 +88,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
   const [exportSummary, setExportSummary] = useState<ExportSummary | null>(null)
   const [exportProgress, setExportProgress] = useState<ExportProgressPayload | null>(null)
   const [isExporting, setIsExporting] = useState(false)
+  const [effectTimeline, setEffectTimeline] = useState<EffectTimeline | null>(null)
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -139,6 +143,15 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
       })
       .catch((err) => {
         console.error('读取美化配置失败，使用默认值', err)
+      })
+    // Load existing cursor effect timeline (if previously built)
+    getCursorEffectTimeline()
+      .then((timeline) => {
+        if (cancelled) return
+        setEffectTimeline(timeline)
+      })
+      .catch(() => {
+        // Timeline not yet built — this is expected on first load
       })
     return () => {
       cancelled = true
@@ -240,6 +253,8 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
         .then(() => {
           setBeautifyError(null)
           return buildCursorEffectTimeline().then(() => {
+            // Load full timeline data for preview overlay (non-blocking)
+            getCursorEffectTimeline().then(setEffectTimeline).catch(() => {})
             if (nextConfig.autoTrimSilences) {
               return buildCutTimeline()
             }
@@ -407,12 +422,11 @@ export function PreviewView({ onBack, recordingResult, licenseStatus }: PreviewV
                 </p>
               </div>
             )}
-            {cursorMagnification && (
-              <motion.div
-                initial={{ scale: 1 }}
-                animate={{ scale: 1.1 }}
-                transition={{ duration: 0.5, repeat: Infinity, repeatType: 'reverse' }}
-                className="absolute bottom-1/3 right-1/3 w-6 h-6 rounded-full border-2 border-muted-foreground/50 bg-muted-foreground/10"
+            {cursorMagnification && effectTimeline && (
+              <CursorOverlay
+                videoRef={videoRef}
+                containerRef={videoContainerRef}
+                effectTimeline={effectTimeline}
               />
             )}
           </div>

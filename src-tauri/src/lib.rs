@@ -314,17 +314,19 @@ async fn stop_recording(
 
     emit_state_changed(&app, new_state);
 
-    // Auto-register to library on successful stop.
+    // Auto-register to library on successful stop. Only video_path is
+    // strictly required; cursor_metadata_path and other sidecar paths
+    // are optional (they may not exist yet or cursor tracking may have
+    // been disabled).
     if let Ok(ref resp) = response {
         if !resp.failed {
-            if let (Some(ref video_path), Some(ref cursor_path)) =
-                (&resp.result.output_path, &resp.result.cursor_metadata_path)
-            {
+            if let Some(ref video_path) = resp.result.output_path {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
 
+                let cursor_path = resp.result.cursor_metadata_path.as_deref();
                 let effect_path = resp.result.effect_timeline_path.as_deref();
                 let trim_path = resp.result.trim_metadata_path.as_deref();
                 let cut_path = resp.result.cut_timeline_path.as_deref();
@@ -335,7 +337,7 @@ async fn stop_recording(
                     now_ms,
                     resp.result.duration_secs as f64,
                     video_path,
-                    Some(cursor_path),
+                    cursor_path,
                     effect_path,
                     trim_path,
                     cut_path,
@@ -739,6 +741,29 @@ async fn build_cursor_effect_timeline(
     })
 }
 
+/// Load the full cursor effect timeline from disk so the frontend can render
+/// a preview overlay. Returns the complete `EffectTimeline` including per-frame
+/// cursor positions, scales, and click effects.
+#[tauri::command]
+async fn get_cursor_effect_timeline(
+    state: tauri::State<'_, AppState>,
+) -> Result<EffectTimeline, String> {
+    let path = {
+        let service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        service
+            .last_effect_timeline_path()
+            .ok_or_else(|| "没有可用的光标效果时间线，请先构建光标效果".to_string())?
+    };
+
+    let json = std::fs::read_to_string(&path)
+        .map_err(|e| format!("读取光标效果时间线失败: {e}"))?;
+    serde_json::from_str(&json)
+        .map_err(|e| format!("解析光标效果时间线失败: {e}"))
+}
+
 fn license_state_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -791,8 +816,8 @@ fn get_recording_context(
         video_path: ctx.entry.video_path.to_string_lossy().to_string(),
         cursor_metadata_path: ctx.entry.cursor_metadata_path.to_string_lossy().to_string(),
         effect_timeline_path: ctx.entry.effect_timeline_path.to_string_lossy().to_string(),
-        trim_metadata_path: ctx.entry.trim_metadata_path.to_string_lossy().to_string(),
-        cut_timeline_path: ctx.entry.cut_timeline_path.to_string_lossy().to_string(),
+        trim_metadata_path: ctx.entry.trim_metadata_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        cut_timeline_path: ctx.entry.cut_timeline_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
         metadata_json: ctx.metadata_json,
         effect_timeline_json: ctx.effect_timeline_json,
         cut_timeline_json: ctx.cut_timeline_json,
@@ -1357,6 +1382,7 @@ pub fn run() -> tauri::Result<()> {
             set_beautify_config,
             get_beautify_config,
             build_cursor_effect_timeline,
+            get_cursor_effect_timeline,
             build_cut_timeline,
             export_video,
             cancel_export,

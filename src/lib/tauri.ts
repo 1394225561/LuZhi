@@ -62,6 +62,36 @@ export type CursorEffectSummary = {
   effectTimelinePath: string | null
 }
 
+export type CursorKind = 'arrow' | 'hand' | 'iBeam'
+
+export type CursorFrame = {
+  timestamp: { nanos: number }
+  x: number
+  y: number
+  scale: number
+  opacity: number
+  kind: CursorKind
+}
+
+export type CursorClickEffect = {
+  start: { nanos: number }
+  end: { nanos: number }
+  x: number
+  y: number
+  maxScale: number
+  peakOpacity: number
+}
+
+export type EffectTimeline = {
+  fps: number
+  durationNanos: number
+  frames: CursorFrame[]
+  clickEffects: CursorClickEffect[]
+  rawSystemCursorVisible: boolean
+  renderCursorOverlay: boolean
+  sourcePtsOriginNanos: number
+}
+
 export type CutTimelineSummary = {
   cutCount: number
   totalCutNanos: number
@@ -237,6 +267,10 @@ export async function getBeautifyConfig(): Promise<BeautifyConfig> {
 
 export async function buildCursorEffectTimeline(): Promise<CursorEffectSummary> {
   return invoke<CursorEffectSummary>('build_cursor_effect_timeline')
+}
+
+export async function getCursorEffectTimeline(): Promise<EffectTimeline> {
+  return invoke<EffectTimeline>('get_cursor_effect_timeline')
 }
 
 export async function buildCutTimeline(): Promise<CutTimelineSummary> {

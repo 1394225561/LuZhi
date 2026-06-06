@@ -24,8 +24,10 @@ pub struct LibraryEntry {
     pub video_path: PathBuf,
     pub cursor_metadata_path: PathBuf,
     pub effect_timeline_path: PathBuf,
-    pub trim_metadata_path: PathBuf,
-    pub cut_timeline_path: PathBuf,
+    /// Optional: only created when auto-trim is used.
+    pub trim_metadata_path: Option<PathBuf>,
+    /// Optional: only created when auto-trim is used.
+    pub cut_timeline_path: Option<PathBuf>,
 }
 
 /// Lightweight summary sent to the frontend (no file paths).
@@ -128,6 +130,11 @@ impl RecordingLibrary {
     }
 
     /// Register a completed recording into the library index.
+    ///
+    /// `cursor_metadata_path` and `effect_timeline_path` are required — the
+    /// beautify workflow cannot proceed without them. `trim_metadata_path` and
+    /// `cut_timeline_path` are optional because they are only created when the
+    /// user enables auto-trim.
     pub fn register(
         &mut self,
         id: &str,
@@ -156,24 +163,19 @@ impl RecordingLibrary {
             .ok_or_else(|| AppError::ImportFailed {
                 reason: "效果时间线路径缺失".to_string(),
             })?;
-        let tmp = trim_metadata_path
-            .map(PathBuf::from)
-            .ok_or_else(|| AppError::ImportFailed {
-                reason: "裁剪元数据路径缺失".to_string(),
-            })?;
-        let ctp = cut_timeline_path
-            .map(PathBuf::from)
-            .ok_or_else(|| AppError::ImportFailed {
-                reason: "裁剪时间线路径缺失".to_string(),
-            })?;
 
-        for p in [&cmp, &etp, &tmp, &ctp] {
+        // Required companion files must exist.
+        for p in [&cmp, &etp] {
             if !p.exists() {
                 return Err(AppError::ImportFailed {
                     reason: format!("缺少配套文件：{}", p.display()),
                 });
             }
         }
+
+        // Optional companion files: use if exists, ignore if missing.
+        let tmp = trim_metadata_path.map(PathBuf::from).filter(|p| p.exists());
+        let ctp = cut_timeline_path.map(PathBuf::from).filter(|p| p.exists());
 
         // Duplicate check.
         if self.index.entries.iter().any(|e| e.id == id) {
@@ -200,15 +202,14 @@ impl RecordingLibrary {
         let entry = self.find_entry(id)?.clone();
 
         if delete_files {
-            let files = [
-                &entry.video_path,
-                &entry.cursor_metadata_path,
-                &entry.effect_timeline_path,
-                &entry.trim_metadata_path,
-                &entry.cut_timeline_path,
-            ];
-            for file in &files {
-                let _ = fs::remove_file(file);
+            let _ = fs::remove_file(&entry.video_path);
+            let _ = fs::remove_file(&entry.cursor_metadata_path);
+            let _ = fs::remove_file(&entry.effect_timeline_path);
+            if let Some(ref p) = entry.trim_metadata_path {
+                let _ = fs::remove_file(p);
+            }
+            if let Some(ref p) = entry.cut_timeline_path {
+                let _ = fs::remove_file(p);
             }
         }
 
@@ -233,12 +234,13 @@ impl RecordingLibrary {
                 }
             })?;
 
-        let cut_timeline_json =
-            fs::read_to_string(&entry.cut_timeline_path).map_err(|e| {
-                AppError::ImportFailed {
-                    reason: format!("读取裁剪时间线失败：{e}"),
-                }
-            })?;
+        // Cut timeline is optional — only exists after auto-trim is used.
+        let cut_timeline_json = match entry.cut_timeline_path {
+            Some(ref p) => fs::read_to_string(p).map_err(|e| AppError::ImportFailed {
+                reason: format!("读取裁剪时间线失败：{e}"),
+            })?,
+            None => String::new(),
+        };
 
         Ok(RecordingContext {
             entry,
@@ -274,6 +276,47 @@ impl RecordingLibrary {
         Ok((millis, seq))
     }
 
+    /// Search the directory for a companion file matching the given prefix and
+    /// sequence number. Companion files are named:
+    ///   `{prefix}-{millis}-{seq}.json`
+    /// where `millis` may differ from the video file's timestamp because
+    /// metadata files are created at recording *start* while the video file
+    /// is created at recording *stop*.
+    ///
+    /// If multiple files match (e.g., from different sessions with the same
+    /// seq after an app restart), returns the most recent one.
+    fn find_companion_file(
+        dir: &Path,
+        prefix: &str,
+        seq: u64,
+        extension: &str,
+    ) -> Option<PathBuf> {
+        let entries = fs::read_dir(dir).ok()?;
+        let mut candidates: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().and_then(|ext| ext.to_str()) == Some(extension)
+                    && p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|stem| {
+                            stem.starts_with(prefix)
+                                && stem.ends_with(&format!("-{seq}"))
+                                && stem.len() > prefix.len() + format!("-{seq}").len()
+                        })
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Sort by filename descending → most recent (highest millis) first.
+        candidates.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        candidates.into_iter().next()
+    }
+
     /// Validate and import an external MP4 file produced by this app.
     pub fn import(&mut self, video_path: &Path) -> AppResult<LibraryEntrySummary> {
         if video_path.extension().and_then(|e| e.to_str()) != Some("mp4") {
@@ -283,28 +326,31 @@ impl RecordingLibrary {
         }
 
         let (millis, seq) = Self::parse_recording_filename(video_path)?;
-
         let dir = video_path.parent().unwrap_or(Path::new("."));
-        let cursor_metadata_path = dir.join(format!("cursor-metadata-{millis}-{seq}.json"));
-        let effect_timeline_path = dir.join(format!("cursor-effects-{millis}-{seq}.json"));
-        let trim_metadata_path = dir.join(format!("trim-metadata-{millis}-{seq}.json"));
-        let cut_timeline_path = dir.join(format!("cut-timeline-{millis}-{seq}.json"));
 
-        let companion_paths = [
-            &cursor_metadata_path,
-            &effect_timeline_path,
-            &trim_metadata_path,
-            &cut_timeline_path,
-        ];
-        for p in &companion_paths {
-            if !p.exists() {
-                return Err(AppError::ImportFailed {
-                    reason: format!("缺少配套文件：{}", p.display()),
-                });
-            }
-        }
+        // Find companion files by prefix pattern. Metadata files have different
+        // timestamps than the video file (created at recording start vs stop).
+        let cursor_metadata_path =
+            Self::find_companion_file(dir, "cursor-metadata", seq, "json").ok_or_else(|| {
+                AppError::ImportFailed {
+                    reason: "缺少配套文件：cursor-metadata".to_string(),
+                }
+            })?;
 
-        // Validate metadata is parseable.
+        let effect_timeline_path =
+            Self::find_companion_file(dir, "cursor-effects", seq, "json").ok_or_else(|| {
+                AppError::ImportFailed {
+                    reason: "缺少配套文件：cursor-effects".to_string(),
+                }
+            })?;
+
+        // Optional companion files — only exist after auto-trim is used.
+        let trim_metadata_path =
+            Self::find_companion_file(dir, "trim-metadata", seq, "json");
+        let cut_timeline_path =
+            Self::find_companion_file(dir, "cut-timeline", seq, "json");
+
+        // Validate required metadata is parseable.
         let _meta = crate::media::recording_metadata::RecordingMetadataWriter::read_metadata(
             &cursor_metadata_path,
         )
@@ -346,15 +392,15 @@ impl RecordingLibrary {
         Ok(summary)
     }
 
-    /// Remove entries whose files no longer exist.
+    /// Remove entries whose required files no longer exist.
+    /// Optional companion files (trim/cut) are not checked — they may not
+    /// have been created yet if the user hasn't used auto-trim.
     pub fn repair_on_startup(&mut self) {
         let before = self.index.entries.len();
         self.index.entries.retain(|entry| {
             entry.video_path.exists()
                 && entry.cursor_metadata_path.exists()
                 && entry.effect_timeline_path.exists()
-                && entry.trim_metadata_path.exists()
-                && entry.cut_timeline_path.exists()
         });
         let removed = before - self.index.entries.len();
         if removed > 0 {
@@ -478,8 +524,8 @@ mod tests {
             video_path: dir.join("nonexistent.mp4"),
             cursor_metadata_path: dir.join("nonexistent.json"),
             effect_timeline_path: dir.join("nonexistent2.json"),
-            trim_metadata_path: dir.join("nonexistent3.json"),
-            cut_timeline_path: dir.join("nonexistent4.json"),
+            trim_metadata_path: Some(dir.join("nonexistent3.json")),
+            cut_timeline_path: Some(dir.join("nonexistent4.json")),
         });
         lib.save_index().unwrap();
 

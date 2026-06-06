@@ -2,7 +2,53 @@
 
 记录已知 bug。**重要**：每条 bug 修复后，都要总结对应的**预防规则**。
 
-## 未解决
+## 已解决
+
+### BUG-0015: 历史录制列表为空 ✅ 已修复
+
+**现象**：录制结束，从预览美化界面点击返回，历史录制列表为空，并没有加载出历史数据。
+
+**期望**：返回、启动应用，能够正常加载出历史数据。
+
+**根因**：
+1. `stop_recording` 自动注册守卫要求 `cursor_metadata_path` 为 `Some`，若光标追踪未启动或写入失败则整个注册被静默跳过
+2. `register()` 函数要求全部 4 个配套文件路径为 `Some` 且存在磁盘，但 `cut_timeline_path` 在用户未启用自动裁剪时为 `None`，导致注册失败
+3. `repair_on_startup` 检查全部 4 个文件是否存在，缺少任何文件都会删除条目（包括尚未生成的裁剪时间线）
+
+**修复**：
+- `stop_recording` 守卫仅要求 `output_path` 为 `Some`，`cursor_metadata_path` 改为可选传递
+- `register()` 中 `trim_metadata_path` 和 `cut_timeline_path` 改为 `Option<PathBuf>`，若文件不存在则存为 `None`
+- `repair_on_startup` 仅检查必需文件（video、cursor_metadata、effect_timeline）
+- `get_recording` 处理可选的 `cut_timeline_path`（不存在时返回空字符串）
+
+**预防规则**：
+1. 自动注册流程不得因可选元数据缺失而整体跳过，仅核心文件缺失才应跳过
+2. `repair_on_startup` 不得因尚未生成的可选文件而删除条目
+
+### BUG-0016: 导入失败 ✅ 已修复
+
+**现象**：导入落盘的原始录制视频，报错：非本应用录制的视频。实际上，确实是本应用录制的视频。
+
+- 视频路径：`/Users/root-mac/Downloads/luzhirecord/recording-1780726583259-0.mp4`
+- 其他相关文件：
+  - `/Users/root-mac/Downloads/luzhirecord/recording-1780726583259-0-bilibili-export-1.mp4`
+  - `/Users/root-mac/Downloads/luzhirecord/cursor-effects-1780726618826-0.json`
+  - `/Users/root-mac/Downloads/luzhirecord/cursor-metadata-1780726614720-0.json`
+  - `/Users/root-mac/Downloads/luzhirecord/trim-metadata-1780726614724-0.json`
+- 只有这 5 个文件，并没有落盘更多文件。
+
+**期望**：能够导入成功。
+
+**根因**：`import()` 函数使用视频文件名的时间戳构造配套文件名（如 `cursor-metadata-1780726583259-0.json`），但实际配套文件使用录制开始时的时间戳（如 `cursor-metadata-1780726614720-0.json`），两者不同导致文件查找失败。
+
+**修复**：
+- 新增 `find_companion_file()` 辅助函数，按前缀和序列号在目录中搜索配套文件
+- 配套文件不再要求与视频文件时间戳完全匹配，而是通过 `cursor-metadata-*-{seq}.json` 模式匹配
+- `trim_metadata_path` 和 `cut_timeline_path` 改为可选（用户未启用自动裁剪时不存在）
+
+**预防规则**：
+1. 配套文件发现不得依赖视频文件名时间戳，应按前缀+序列号模式搜索
+2. 导入校验应区分必需文件和可选文件
 
 ---
 
