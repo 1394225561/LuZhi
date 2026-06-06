@@ -93,6 +93,25 @@ export type LicenseStatus = {
   activated: boolean
 }
 
+/** Lightweight summary of a recording in the library. */
+export type LibraryEntrySummary = {
+  id: string
+  createdAt: number
+  durationSecs: number
+}
+
+/** Full context for re-entering the beautify workflow. */
+export type RecordingContextPayload = {
+  videoPath: string
+  cursorMetadataPath: string
+  effectTimelinePath: string
+  trimMetadataPath: string
+  cutTimelinePath: string
+  metadataJson: string
+  effectTimelineJson: string
+  cutTimelineJson: string
+}
+
 export type RecordingResult = {
   durationSecs: number
   frameCount: number
@@ -242,6 +261,22 @@ export async function fetchActivationStatus(): Promise<LicenseStatus> {
 
 export async function activateLicense(code: string): Promise<void> {
   return invoke('activate_license', { code })
+}
+
+export async function listRecordings(): Promise<LibraryEntrySummary[]> {
+  return invoke<LibraryEntrySummary[]>('list_recordings')
+}
+
+export async function getRecordingContext(id: string): Promise<RecordingContextPayload> {
+  return invoke<RecordingContextPayload>('get_recording_context', { id })
+}
+
+export async function importRecording(path: string): Promise<LibraryEntrySummary> {
+  return invoke<LibraryEntrySummary>('import_recording', { path })
+}
+
+export async function deleteRecording(id: string): Promise<void> {
+  return invoke('delete_recording', { id })
 }
 
 // ─── Tauri Events ───
