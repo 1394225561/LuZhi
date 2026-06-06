@@ -349,3 +349,124 @@ impl RecordingLibrary {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_dir() -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("luzhi-lib-test-{}-{}", std::process::id(), nanos));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn cleanup(dir: &Path) {
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn new_library_creates_empty_index() {
+        let dir = temp_dir();
+        let lib = RecordingLibrary::new(&dir);
+        assert!(lib.list().is_empty());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn list_returns_empty_for_fresh_library() {
+        let dir = temp_dir();
+        let lib = RecordingLibrary::new(&dir);
+        assert_eq!(lib.list().len(), 0);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn parse_recording_filename_valid() {
+        let path = Path::new("/tmp/luzhi-recordings/recording-1717000000000-0.mp4");
+        let (millis, seq) = RecordingLibrary::parse_recording_filename(path).unwrap();
+        assert_eq!(millis, 1717000000000);
+        assert_eq!(seq, 0);
+    }
+
+    #[test]
+    fn parse_recording_filename_invalid_prefix() {
+        let path = Path::new("/tmp/video-123-0.mp4");
+        assert!(RecordingLibrary::parse_recording_filename(path).is_err());
+    }
+
+    #[test]
+    fn parse_recording_filename_invalid_number() {
+        let path = Path::new("/tmp/recording-abc-0.mp4");
+        assert!(RecordingLibrary::parse_recording_filename(path).is_err());
+    }
+
+    #[test]
+    fn delete_removes_entry_from_index() {
+        let dir = temp_dir();
+        // Create dummy files.
+        let video = dir.join("recording-1000-0.mp4");
+        let cm = dir.join("cursor-metadata-1000-0.json");
+        let et = dir.join("cursor-effects-1000-0.json");
+        let tm = dir.join("trim-metadata-1000-0.json");
+        let ct = dir.join("cut-timeline-1000-0.json");
+        for f in [&video, &cm, &et, &tm, &ct] {
+            fs::write(f, "{}").unwrap();
+        }
+
+        let mut lib = RecordingLibrary::new(&dir);
+        lib.register("rec-1000-0", 1000, 10.0,
+            video.to_str().unwrap(),
+            Some(cm.to_str().unwrap()),
+            Some(et.to_str().unwrap()),
+            Some(tm.to_str().unwrap()),
+            Some(ct.to_str().unwrap()),
+        ).unwrap();
+
+        assert_eq!(lib.list().len(), 1);
+
+        lib.delete("rec-1000-0", false).unwrap();
+        assert!(lib.list().is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn get_recording_not_found_returns_error() {
+        let dir = temp_dir();
+        let lib = RecordingLibrary::new(&dir);
+        let result = lib.get_recording("nonexistent");
+        assert!(matches!(result, Err(AppError::RecordingNotFound(_))));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn repair_on_startup_removes_missing_files() {
+        let dir = temp_dir();
+        let mut lib = RecordingLibrary::new(&dir);
+
+        // Manually insert an entry with non-existent files.
+        lib.index.entries.push(LibraryEntry {
+            id: "rec-ghost-0".to_string(),
+            created_at: 0,
+            duration_secs: 1.0,
+            video_path: dir.join("nonexistent.mp4"),
+            cursor_metadata_path: dir.join("nonexistent.json"),
+            effect_timeline_path: dir.join("nonexistent2.json"),
+            trim_metadata_path: dir.join("nonexistent3.json"),
+            cut_timeline_path: dir.join("nonexistent4.json"),
+        });
+        lib.save_index().unwrap();
+
+        lib.repair_on_startup();
+        assert!(lib.list().is_empty());
+
+        cleanup(&dir);
+    }
+}
