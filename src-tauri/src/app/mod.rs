@@ -5,6 +5,7 @@ pub mod export_service;
 pub mod license_service;
 pub mod mic_level_runtime;
 pub mod permission_service;
+pub mod recording_library;
 pub mod recording_runtime;
 pub mod recording_service;
 pub mod state_machine;
