@@ -411,6 +411,7 @@ fn set_capture_mode(
         height: payload.height.unwrap_or(1080),
         fps: payload.fps.unwrap_or(30),
         show_system_cursor,
+        window_id: None,
     };
     Ok(())
 }

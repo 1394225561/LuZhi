@@ -2,7 +2,7 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureMode {
     FullScreen,
-    /// 窗口录制（开发中，暂不可用）
+    /// 窗口录制
     Window,
     /// 区域录制（开发中，暂不可用）
     Area,
@@ -27,6 +27,8 @@ pub struct CaptureConfig {
     pub height: u32,
     pub fps: u32,
     pub show_system_cursor: bool,
+    /// 目标窗口 ID（仅 Window 模式有效）
+    pub window_id: Option<u32>,
 }
 
 impl CaptureConfig {
@@ -38,6 +40,7 @@ impl CaptureConfig {
             height: 1080,
             fps: 30,
             show_system_cursor: true,
+            window_id: None,
         }
     }
 }

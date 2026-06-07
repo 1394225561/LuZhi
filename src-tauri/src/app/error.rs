@@ -57,6 +57,18 @@ pub enum AppError {
     IndexCorrupted {
         reason: String,
     },
+    /// 窗口未找到
+    WindowNotFound {
+        window_id: u32,
+    },
+    /// 窗口已最小化，无法启动录制
+    WindowMinimized {
+        window_id: u32,
+    },
+    /// 窗口已关闭
+    WindowClosed {
+        window_id: u32,
+    },
 }
 
 impl Display for AppError {
@@ -110,6 +122,15 @@ impl Display for AppError {
             Self::ImportFailed { reason } => write!(formatter, "导入失败：{reason}"),
             Self::RecordingNotFound(id) => write!(formatter, "录制未找到：{id}"),
             Self::IndexCorrupted { reason } => write!(formatter, "索引损坏：{reason}"),
+            Self::WindowNotFound { window_id } => {
+                write!(formatter, "窗口未找到：{window_id}")
+            }
+            Self::WindowMinimized { window_id } => {
+                write!(formatter, "窗口已最小化，请恢复窗口后重试：{window_id}")
+            }
+            Self::WindowClosed { window_id } => {
+                write!(formatter, "窗口已关闭：{window_id}")
+            }
         }
     }
 }
@@ -171,5 +192,26 @@ mod tests {
             reason: "JSON 解析失败".to_string(),
         };
         assert_eq!(err.to_string(), "索引损坏：JSON 解析失败");
+    }
+
+    #[test]
+    fn window_not_found_chinese_message() {
+        let err = AppError::WindowNotFound { window_id: 42 };
+        assert_eq!(err.to_string(), "窗口未找到：42");
+    }
+
+    #[test]
+    fn window_minimized_chinese_message() {
+        let err = AppError::WindowMinimized { window_id: 42 };
+        assert_eq!(
+            err.to_string(),
+            "窗口已最小化，请恢复窗口后重试：42"
+        );
+    }
+
+    #[test]
+    fn window_closed_chinese_message() {
+        let err = AppError::WindowClosed { window_id: 42 };
+        assert_eq!(err.to_string(), "窗口已关闭：42");
     }
 }
