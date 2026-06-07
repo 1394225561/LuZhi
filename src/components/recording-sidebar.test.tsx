@@ -118,11 +118,15 @@ describe('RecordingSidebar', () => {
   })
 
   it.each([
-    { isOpen: false, expectedRightClass: 'right-2' },
-    { isOpen: true, expectedRightClass: 'right-[calc(360px+0.5rem)]' },
+    { isOpen: false, expectedRightClass: 'right-2', expectedDelayClass: 'delay-0' },
+    {
+      isOpen: true,
+      expectedRightClass: 'right-[calc(360px+0.5rem)]',
+      expectedDelayClass: 'delay-200',
+    },
   ])(
     'anchors the borderless toggle with the correct right offset when open is $isOpen',
-    ({ isOpen, expectedRightClass }) => {
+    ({ isOpen, expectedRightClass, expectedDelayClass }) => {
       render(
         <RecordingSidebar
           isOpen={isOpen}
@@ -136,10 +140,13 @@ describe('RecordingSidebar', () => {
       expect(toggle).toHaveClass('absolute')
       expect(toggle).toHaveClass('-top-8')
       expect(toggle).toHaveClass(expectedRightClass)
+      expect(toggle).toHaveClass(expectedDelayClass)
+      expect(toggle).toHaveClass('transition-[right]')
       expect(toggle).not.toHaveClass('fixed')
       expect(toggle).not.toHaveClass('right-0')
       expect(toggle).not.toHaveClass('right-[360px]')
       expect(toggle).not.toHaveClass('right-[max(12px,calc(50%_-_208px))]')
+      expect(toggle).not.toHaveClass('transition-all')
       expect(toggle).not.toHaveClass('border')
       expect(toggle).not.toHaveClass('shadow-lg')
     },
