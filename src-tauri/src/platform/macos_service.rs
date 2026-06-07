@@ -291,6 +291,137 @@ impl MacRecordingService {
 
         Ok(())
     }
+
+    /// Starts window capture via SCStream, and optionally microphone.
+    pub fn start_window(
+        &mut self,
+        window_id: u32,
+        audio_config: AudioConfig,
+        beautify_snapshot: BeautifyConfigSnapshot,
+        cursor_main_thread_dispatcher: Box<dyn CursorMainThreadDispatcher>,
+    ) -> AppResult<()> {
+        self.state_machine.start()?;
+
+        // Clear stale session state from any previous recording.
+        self.last_cursor_metadata_path = None;
+        self.last_effect_timeline_path = None;
+        self.last_trim_metadata_path = None;
+        self.last_cut_timeline_path = None;
+        self.last_recording_output_path = None;
+        self.session_id = self.session_id.wrapping_add(1);
+
+        // Reset mic level from any previous session.
+        if let Ok(mut guard) = self.mic_level.lock() {
+            *guard = 0.0;
+        }
+
+        // Create a shared session clock before any capture starts.
+        let session_clock = Arc::new(crate::core::clock::SessionClock::new());
+
+        // Create bounded channels for video and system audio.
+        const VIDEO_QUEUE_CAPACITY: usize = 90;
+        const AUDIO_QUEUE_CAPACITY: usize = 256;
+        let (video_sender, video_receiver) = bounded_media_channel(VIDEO_QUEUE_CAPACITY, "video");
+        let (audio_sender, audio_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY, "system");
+
+        // Start window capture stream.
+        if let Err(error) = self.screen_capture.start_window_stream(
+            window_id,
+            audio_config.capture_system_audio,
+            video_sender,
+            audio_sender,
+            session_clock.clone(),
+        ) {
+            self.state_machine.fail();
+            return Err(error);
+        }
+        self.video_receiver = Some(video_receiver);
+        self.system_audio_receiver = Some(audio_receiver);
+        self.last_requested_system_audio = audio_config.capture_system_audio;
+
+        // Start microphone capture if requested.
+        if audio_config.capture_microphone {
+            let (mic_sender, mic_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY, "mic");
+            self.mic_capture.set_session_clock(session_clock.clone());
+            if let Err(error) = self.mic_capture.start(audio_config.clone(), mic_sender) {
+                // Rollback: stop screen capture.
+                let _ = self.screen_capture.stop_window_stream();
+                self.video_receiver = None;
+                self.system_audio_receiver = None;
+                self.state_machine.fail();
+                return Err(error);
+            }
+            self.mic_receiver = Some(mic_receiver);
+        }
+        self.last_requested_microphone = audio_config.capture_microphone;
+
+        // Extract trim sensitivity before moving beautify_snapshot into cursor runtime.
+        let trim_sensitivity = beautify_snapshot.trim_sensitivity.clone();
+
+        // Read capture geometry from screen capture for cursor coordinate normalization.
+        let capture_geometry = self.screen_capture.last_capture_geometry();
+
+        // Start cursor metadata runtime for cursor effects.
+        self.cursor_runtime = Some(CursorMetadataRuntime::spawn(
+            MacCursorSource::new(session_clock.clone(), cursor_main_thread_dispatcher),
+            30, // Default 30fps for window capture
+            session_clock.clone(),
+            beautify_snapshot,
+            capture_geometry,
+        ));
+
+        // Spawn frame consumer thread (drain mode).
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        self.stop_flag = Some(stop_flag.clone());
+
+        let video_rx = self.video_receiver.take().unwrap();
+        let system_audio_rx = self.system_audio_receiver.take().unwrap();
+        let mic_rx = self.mic_receiver.take();
+        let frame_count = self.frame_count.clone();
+        let mic_level = self.mic_level.clone();
+        frame_count.store(0, Ordering::Relaxed);
+
+        // Use FFmpeg writer when the feature is enabled to produce a playable
+        // original recording artifact. Falls back to counting writer otherwise.
+        #[cfg(feature = "ffmpeg")]
+        let writer: Box<dyn RecordingWriter> = {
+            let output_path = crate::media::export_paths::original_recording_path();
+            Box::new(crate::media::ffmpeg_writer::FfmpegRecordingWriter::new(
+                output_path,
+            )?)
+        };
+        #[cfg(not(feature = "ffmpeg"))]
+        let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
+
+        let requested_system_audio = audio_config.capture_system_audio;
+        let requested_microphone = audio_config.capture_microphone;
+        let microphone_device = audio_config.microphone_device.clone();
+        let denoise_mode = audio_config.denoise_mode;
+
+        let (consumer_result_tx, consumer_result_rx) =
+            std::sync::mpsc::channel::<RecordingConsumerOutput>();
+        self.consumer_result_rx = Some(consumer_result_rx);
+
+        self.consumer_handle = Some(thread::spawn(move || {
+            let output = Self::consume_frames(
+                stop_flag,
+                video_rx,
+                system_audio_rx,
+                mic_rx,
+                frame_count,
+                writer,
+                mic_level,
+                &trim_sensitivity,
+                requested_system_audio,
+                requested_microphone,
+                microphone_device,
+                denoise_mode,
+            );
+            let _ = consumer_result_tx.send(output);
+        }));
+
+        Ok(())
+    }
 }
 
 /// Timeout for the consumer thread to return its result after stop.

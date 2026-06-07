@@ -1151,6 +1151,55 @@ impl MacScreenCapture {
             session_clock,
         )
     }
+
+    /// Stops window capture stream.
+    pub fn stop_window_stream(&mut self) -> AppResult<()> {
+        if !self.running {
+            return Ok(());
+        }
+
+        // Clear sinks first to prevent any more frames/chunks from being sent.
+        if let Some(delegate) = &self.delegate {
+            delegate.clear_sinks();
+        }
+
+        // Stop the stream asynchronously and wait for completion.
+        if let Some(SendSCStream(stream)) = &self.stream {
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            unsafe {
+                stream.stopCaptureWithCompletionHandler(Some(&block2::RcBlock::new(
+                    move |_error: *mut NSError| {
+                        let _ = tx.send(());
+                    },
+                )));
+            }
+
+            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(()) => {
+                    // Normal stop: clean up all handles.
+                    self.stream = None;
+                    self.delegate = None;
+                    self.running = false;
+                    self.needs_reset = false;
+                }
+                Err(_) => {
+                    // Timeout: keep native handles alive but mark running=false.
+                    self.running = false;
+                    self.needs_reset = true;
+                    return Err(AppError::CaptureStopTimeout {
+                        reason: "ScreenCaptureKit stopCaptureWithCompletionHandler 未在 5 秒内回调"
+                            .to_string(),
+                    });
+                }
+            }
+        } else {
+            self.running = false;
+            self.needs_reset = false;
+        }
+
+        Ok(())
+    }
 }
 
 // --- AudioCapture Trait ---
