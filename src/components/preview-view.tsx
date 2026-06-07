@@ -33,6 +33,7 @@ import {
   getBeautifyConfig,
   getCursorEffectTimeline,
   onExportProgress,
+  openExportedFileLocation,
   setBeautifyConfig,
   type BeautifyConfig,
   type EffectTimeline,
@@ -304,6 +305,32 @@ export function PreviewView({ onBack, recordingResult, licenseStatus, recordingI
       console.error('取消导出失败', error)
     })
   }
+
+  const handleOpenExportedFileLocation = (path: string) => {
+    void openExportedFileLocation(path).catch((error) => {
+      console.error('打开导出文件位置失败', error)
+      setBeautifyError('无法打开导出文件所在目录，请检查文件是否仍在原位置。')
+    })
+  }
+
+  const handleExportPathKeyDown = (event: React.KeyboardEvent<HTMLElement>, path: string) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    handleOpenExportedFileLocation(path)
+  }
+
+  const renderExportPath = (path: string) => (
+    <p
+      role="button"
+      tabIndex={0}
+      onClick={() => handleOpenExportedFileLocation(path)}
+      onKeyDown={(event) => handleExportPathKeyDown(event, path)}
+      className="max-w-full cursor-pointer select-text break-all font-mono text-[10px] opacity-60 transition-colors hover:text-foreground hover:opacity-90"
+      title="打开文件所在目录"
+    >
+      {path}
+    </p>
+  )
 
   const handleBack = () => {
     void flushPendingConfig()
@@ -668,9 +695,7 @@ export function PreviewView({ onBack, recordingResult, licenseStatus, recordingI
               {exportSummary.outputPath ? (
                 <div>
                   <p className="opacity-80 mb-1">✅ 已生成可播放导出文件</p>
-                  <p className="opacity-60 break-all font-mono text-[10px]">
-                    {exportSummary.outputPath}
-                  </p>
+                  {renderExportPath(exportSummary.outputPath)}
                 </div>
               ) : (
                 <p className="opacity-60">FFmpeg 编码器接入后将生成可播放文件</p>

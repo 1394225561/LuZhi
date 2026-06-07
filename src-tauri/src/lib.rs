@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use app::error::AppResult;
@@ -1134,6 +1135,74 @@ fn cancel_export(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExportedFileLocationPlatform {
+    Macos,
+    Windows,
+    Unsupported,
+}
+
+impl ExportedFileLocationPlatform {
+    fn current() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::Macos
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Self::Unsupported
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExportedFileLocationCommand {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+fn build_exported_file_location_command(
+    path: &Path,
+    platform: ExportedFileLocationPlatform,
+) -> Result<ExportedFileLocationCommand, String> {
+    let file_path = path.to_string_lossy().to_string();
+    if file_path.trim().is_empty() {
+        return Err("导出文件路径为空，无法打开所在目录".to_string());
+    }
+
+    match platform {
+        ExportedFileLocationPlatform::Macos => Ok(ExportedFileLocationCommand {
+            program: "open",
+            args: vec!["-R".to_string(), file_path],
+        }),
+        ExportedFileLocationPlatform::Windows => Ok(ExportedFileLocationCommand {
+            program: "explorer.exe",
+            args: vec![format!("/select,{file_path}")],
+        }),
+        ExportedFileLocationPlatform::Unsupported => {
+            Err("当前平台暂不支持打开导出文件所在目录".to_string())
+        }
+    }
+}
+
+#[tauri::command]
+fn open_exported_file_location(path: String) -> Result<(), String> {
+    let command = build_exported_file_location_command(
+        Path::new(&path),
+        ExportedFileLocationPlatform::current(),
+    )?;
+
+    Command::new(command.program)
+        .args(command.args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("打开导出文件所在目录失败: {error}"))
+}
+
 #[tauri::command]
 async fn export_video(
     app: AppHandle,
@@ -1707,7 +1776,8 @@ pub fn run() -> tauri::Result<()> {
             import_recording,
             delete_recording,
             list_windows,
-            set_window_id
+            set_window_id,
+            open_exported_file_location
         ])
         .setup(|app| {
             // Initialize recording library with proper app data dir.
@@ -1776,6 +1846,33 @@ mod tests {
         assert_eq!(
             action_for_window_state(WindowRecordingState::Closed),
             WindowStateAction::Stop
+        );
+    }
+
+    #[test]
+    fn macos_export_location_command_reveals_file_in_finder() {
+        let command = build_exported_file_location_command(
+            Path::new("/tmp/luzhi/exported video.mp4"),
+            ExportedFileLocationPlatform::Macos,
+        )
+        .unwrap();
+
+        assert_eq!(command.program, "open");
+        assert_eq!(command.args, vec!["-R", "/tmp/luzhi/exported video.mp4"]);
+    }
+
+    #[test]
+    fn windows_export_location_command_selects_file_in_explorer() {
+        let command = build_exported_file_location_command(
+            Path::new(r"C:\Users\demo\Videos\exported video.mp4"),
+            ExportedFileLocationPlatform::Windows,
+        )
+        .unwrap();
+
+        assert_eq!(command.program, "explorer.exe");
+        assert_eq!(
+            command.args,
+            vec![r"/select,C:\Users\demo\Videos\exported video.mp4"]
         );
     }
 

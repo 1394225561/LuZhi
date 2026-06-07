@@ -300,6 +300,10 @@ export async function exportVideo(preset: ExportPreset, recordingId?: string): P
   return invoke<ExportSummary>('export_video', { preset, recordingId: recordingId ?? null })
 }
 
+export async function openExportedFileLocation(path: string): Promise<void> {
+  return invoke('open_exported_file_location', { path })
+}
+
 export async function cancelExport(): Promise<void> {
   return invoke('cancel_export')
 }

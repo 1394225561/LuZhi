@@ -757,6 +757,54 @@ describe('App', () => {
     expect(screen.getByText(/已捕获 30 帧/)).toBeInTheDocument()
   })
 
+  it('opens exported file location when clicking export path text', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'completed', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
+      if (command === 'get_beautify_config') {
+        return Promise.resolve({
+          cursorMagnification: false,
+          magnificationFactor: 2,
+          cursorSmoothing: false,
+          autoTrimSilences: false,
+          trimSensitivity: 'medium',
+        })
+      }
+      if (command === 'get_cursor_effect_timeline') return Promise.reject(new Error('no timeline'))
+      if (command === 'set_beautify_config') return Promise.resolve(1)
+      if (command === 'build_cursor_effect_timeline') {
+        return Promise.resolve({ frameCount: 0, clickEffectCount: 0, effectTimelinePath: null })
+      }
+      if (command === 'export_video') {
+        return Promise.resolve({
+          frameCount: 0,
+          clickEffectCount: 0,
+          effectTimelinePath: null,
+          cutCount: 0,
+          totalCutNanos: 0,
+          cutTimelinePath: null,
+          outputPath: '/tmp/luzhi/exported-video.mp4',
+        })
+      }
+      if (command === 'open_exported_file_location') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    await screen.findByText('预览与美化')
+    fireEvent.click(screen.getAllByRole('button', { name: '导出' })[0])
+
+    const exportPath = await screen.findByText('/tmp/luzhi/exported-video.mp4')
+    fireEvent.click(exportPath)
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('open_exported_file_location', {
+        path: '/tmp/luzhi/exported-video.mp4',
+      })
+    })
+  })
+
   it('enters recording state via status fallback when event is not emitted', async () => {
     const { listen } = await import('@tauri-apps/api/event')
     vi.mocked(listen).mockImplementation(() => Promise.resolve(() => {}))

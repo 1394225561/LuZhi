@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>录智项目学习指南 - Tauri/Rust/音视频开发</title>
+    <style>
+        :root {
+            --primary-color: #3b82f6;
+            --secondary-color: #10b981;
+            --warning-color: #f59e0b;
+            --danger-color: #ef4444;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-main: #1e293b;
+            --text-secondary: #64748b;
+            --border-color: #e2e8f0;
+            --code-bg: #f1f5f9;
+            --shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-main);
+            background: var(--bg-color);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--primary-color), #8b5cf6);
+            color: white;
+            padding: 40px 20px;
+            text-align: center;
+            border-radius: 12px;
+            margin-bottom: 30px;
+            box-shadow: var(--shadow);
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .nav {
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 15px 20px;
+            margin-bottom: 30px;
+            box-shadow: var(--shadow);
+            position: sticky;
+            top: 20px;
+            z-index: 100;
+        }
+
+        .nav ul {
+            list-style: none;
+            display: flex;
+            gap: 20px;
+            overflow-x: auto;
+            padding-bottom: 5px;
+        }
+
+        .nav li {
+            white-space: nowrap;
+        }
+
+        .nav a {
+            text-decoration: none;
+            color: var(--primary-color);
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav a:hover {
+            color: var(--secondary-color);
+        }
+
+        .section {
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: var(--shadow);
+        }
+
+        .section h2 {
+            color: var(--primary-color);
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        .section h3 {
+            color: var(--text-main);
+            margin: 20px 0 15px 0;
+        }
+
+        .section h4 {
+            color: var(--text-secondary);
+            margin: 15px 0 10px 0;
+        }
+
+        .card {
+            background: var(--bg-color);
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 4px solid var(--primary-color);
+        }
+
+        .card.warning {
+            border-left-color: var(--warning-color);
+        }
+
+        .card.danger {
+            border-left-color: var(--danger-color);
+        }
+
+        .card.success {
+            border-left-color: var(--secondary-color);
+        }
+
+        .card h5 {
+            margin-bottom: 10px;
+            color: var(--text-main);
+        }
+
+        .card p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-right: 8px;
+        }
+
+        .badge-primary {
+            background: rgba(59, 130, 246, 0.1);
+            color: var(--primary-color);
+        }
+
+        .badge-success {
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--secondary-color);
+        }
+
+        .badge-warning {
+            background: rgba(245, 158, 11, 0.1);
+            color: var(--warning-color);
+        }
+
+        .badge-danger {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--danger-color);
+        }
+
+        code {
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            font-size: 0.9em;
+        }
+
+        pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+
+        pre code {
+            background: transparent;
+            padding: 0;
+            color: inherit;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .feature-card {
+            background: var(--bg-color);
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            transition: transform 0.2s;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .feature-card h4 {
+            color: var(--primary-color);
+            margin-bottom: 10px;
+        }
+
+        .feature-card p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .tree {
+            font-family: monospace;
+            line-height: 1.5;
+            padding: 10px;
+            background: var(--code-bg);
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+
+        .tree-item {
+            margin-left: 20px;
+            position: relative;
+        }
+
+        .tree-item::before {
+            content: "";
+            position: absolute;
+            left: -15px;
+            top: 0;
+            height: 100%;
+            border-left: 1px dashed var(--text-secondary);
+        }
+
+        .tree-item::after {
+            content: "";
+            position: absolute;
+            left: -15px;
+            top: 12px;
+            width: 10px;
+            border-top: 1px dashed var(--text-secondary);
+        }
+
+        .highlight {
+            background: rgba(245, 158, 11, 0.1);
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+
+        .comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 15px 0;
+        }
+
+        .comparison-item {
+            padding: 15px;
+            border-radius: 6px;
+        }
+
+        .comparison-bad {
+            background: rgba(239, 68, 68, 0.05);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        .comparison-good {
+            background: rgba(16, 185, 129, 0.05);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        .comparison-item h5 {
+            margin-bottom: 10px;
+        }
+
+        .comparison-bad h5 {
+            color: var(--danger-color);
+        }
+
+        .comparison-good h5 {
+            color: var(--secondary-color);
+        }
+
+        footer {
+            text-align: center;
+            padding: 30px 0;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
+            }
+
+            header h1 {
+                font-size: 1.8rem;
+            }
+
+            .nav ul {
+                gap: 10px;
+            }
+
+            .comparison {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>录智项目学习指南</h1>
+            <p>Tauri 2.0 + Rust + 音视频开发系统学习方案</p>
+        </header>
+
+        <nav class="nav">
+            <ul>
+                <li><a href="#architecture">项目架构总览</a></li>
+                <li><a href="#rust">Rust 核心知识点</a></li>
+                <li><a href="#tauri">Tauri 框架机制</a></li>
+                <li><a href="#media">音视频处理</a></li>
+                <li><a href="#learning-path">学习路径</a></li>
+            </ul>
+        </nav>
+
+        <section id="architecture" class="section">
+            <h2>一、项目架构总览</h2>
+
+            <h3>1.1 项目概述</h3>
+            <p>录智是一款中国版 Screen Studio，核心功能是<strong>录屏 + AI 美化</strong>。项目采用 Tauri 2.0 + React + Rust 技术栈，实现跨平台（macOS/Windows）的屏幕录制、音频采集、光标美化、空白段裁剪和视频导出功能。</p>
+
+            <h3>1.2 分层架构</h3>
+            <div class="card">
+                <h5>三层架构设计</h5>
+                <pre><code>┌─────────────────────────────────────┐
+│         React UI Layer (前端)        │
+│  - 录制控制面板                       │
+│  - 状态展示、进度、错误提示            │
+│  - 录制参数输入                       │
+└─────────────────┬───────────────────┘
+                  │ Tauri invoke / event
+┌─────────────────▼───────────────────┐
+│       Rust App Logic Layer (核心)    │
+│  - RecordingStateMachine             │
+│  - RecordingService                  │
+│  - ExportService                     │
+│  - LicenseService                    │
+│  - PermissionService                 │
+└─────────────────┬───────────────────┘
+                  │ Rust Trait
+┌─────────────────▼───────────────────┐
+│    Native Modules Layer (底层)       │
+│  - macOS: ScreenCaptureKit           │
+│  - Windows: DXGI + WASAPI            │
+│  - cpal 麦克风采集                    │
+│  - FFmpeg binding / C API            │
+└─────────────────────────────────────┘</code></pre>
+            </div>
+
+            <h3>1.3 数据流红线</h3>
+            <div class="card warning">
+                <h5>⚠️ 关键约束</h5>
+                <p><strong>视频帧流和音频流严禁经过前端 JS 层</strong>。前端只接收状态、时长、进度、错误、缩略图路径等轻量数据。所有媒体处理必须在 Rust 侧完成闭环。</p>
+            </div>
+
+            <h3>1.4 核心目录结构</h3>
+            <div class="tree">
+                <div>LuZhi/</div>
+                <div class="tree-item">├── src/ (React 前端)</div>
+                <div class="tree-item">│   ├── App.tsx (主应用组件)</div>
+                <div class="tree-item">│   ├── components/ (UI 组件)</div>
+                <div class="tree-item">│   │   ├── recording-panel.tsx (录制控制面板)</div>
+                <div class="tree-item">│   │   ├── recording-status-bar.tsx (状态栏)</div>
+                <div class="tree-item">│   │   └── preview-view.tsx (预览视图)</div>
+                <div class="tree-item">│   └── lib/</div>
+                <div class="tree-item">│       └── tauri.ts (Tauri 通信封装)</div>
+                <div class="tree-item">├── src-tauri/ (Rust 后端)</div>
+                <div class="tree-item">│   ├── src/</div>
+                <div class="tree-item">│   │   ├── lib.rs (主入口，Tauri 命令注册)</div>
+                <div class="tree-item">│   │   ├── app/ (应用逻辑层)</div>
+                <div class="tree-item">│   │   │   ├── state_machine.rs (录制状态机)</div>
+                <div class="tree-item">│   │   │   ├── recording_service.rs (录制服务)</div>
+                <div class="tree-item">│   │   │   ├── export_service.rs (导出服务)</div>
+                <div class="tree-item">│   │   │   └── license_service.rs (授权服务)</div>
+                <div class="tree-item">│   │   ├── core/ (核心抽象层)</div>
+                <div class="tree-item">│   │   │   ├── capture.rs (捕获 Trait 定义)</div>
+                <div class="tree-item">│   │   │   ├── frame.rs (媒体帧数据结构)</div>
+                <div class="tree-item">│   │   │   └── media_channel.rs (有界通道)</div>
+                <div class="tree-item">│   │   ├── media/ (媒体处理层)</div>
+                <div class="tree-item">│   │   │   ├── cursor_engine.rs (光标引擎)</div>
+                <div class="tree-item">│   │   │   ├── silence_detector.rs (空白检测)</div>
+                <div class="tree-item">│   │   │   ├── ffmpeg_writer.rs (FFmpeg 封装)</div>
+                <div class="tree-item">│   │   │   └── audio_mixer.rs (音频混音)</div>
+                <div class="tree-item">│   │   └── platform/ (平台适配层)</div>
+                <div class="tree-item">│   │       ├── macos/ (macOS 实现)</div>
+                <div class="tree-item">│   │       │   ├── screen_capture_kit.rs</div>
+                <div class="tree-item">│   │       │   └── permissions.rs</div>
+                <div class="tree-item">│   │       └── windows/ (Windows 实现)</div>
+                <div class="tree-item">│   │           ├── dxgi_capture.rs</div>
+                <div class="tree-item">│   │           └── wasapi_loopback.rs</div>
+                <div class="tree-item">│   └── Cargo.toml (Rust 依赖)</div>
+                <div class="tree-item">├── docs/ (项目文档)</div>
+                <div class="tree-item">└── tests/ (测试清单)</div>
+            </div>
+
+            <h3>1.5 技术栈选型</h3>
+            <div class="grid">
+                <div class="feature-card">
+                    <h4>桌面框架</h4>
+                    <p><strong>Tauri 2.0</strong><br>充分利用 2.x 的多窗口和权限系统，禁止降级至 1.x</p>
+                </div>
+                <div class="feature-card">
+                    <h4>前端 UI</h4>
+                    <p><strong>React + TypeScript + Tailwind</strong><br>组件库统一使用 shadcn/ui，禁止引入重型库</p>
+                </div>
+                <div class="feature-card">
+                    <h4>录制引擎</h4>
+                    <p><strong>macOS: ScreenCaptureKit</strong><br><strong>Windows: DXGI + WASAPI</strong><br>封装为统一 Rust Trait</p>
+                </div>
+                <div class="feature-card">
+                    <h4>视频处理</h4>
+                    <p><strong>FFmpeg (ffmpeg-next)</strong><br>禁止直接调用 CLI，必须使用 C API binding</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="rust" class="section">
+            <h2>二、Rust 语言进阶与工程实践</h2>
+
+            <h3>2.1 并发与同步机制</h3>
+
+            <div class="card">
+                <h5>知识点：Arc&lt;Mutex&lt;T&gt;&gt; 共享状态</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/lib.rs:82-94</code></p>
+                <pre><code>#[derive(Clone)]
+struct AppState {
+    service: Arc&lt;Mutex&lt;MacRecordingService&gt;&gt;,
+    capture_config: Arc&lt;Mutex&lt;CaptureConfig&gt;&gt;,
+    audio_config: Arc&lt;Mutex&lt;AudioConfig&gt;&gt;,
+    tick_runtime: Arc&lt;Mutex&lt;Option&lt;TickRuntime&gt;&gt;&gt;,
+    beautify_config: Arc&lt;Mutex&lt;BeautifyConfigPayload&gt;&gt;,
+    beautify_revision: Arc&lt;AtomicU64&gt;,
+    export_cancel_token: Arc&lt;Mutex&lt;Option&lt;Arc&lt;AtomicBool&gt;&gt;&gt;&gt;,
+    library: Arc&lt;Mutex&lt;RecordingLibrary&gt;&gt;,
+}</code></pre>
+                <p><strong>源码意图</strong>：Tauri 状态管理要求 <code>Send + Sync + 'static</code>，使用 <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> 实现跨线程共享。</p>
+
+                <div class="comparison">
+                    <div class="comparison-item comparison-bad">
+                        <h5>⚠️ 源码中的潜在风险</h5>
+                        <ul>
+                            <li>多层嵌套的 <code>Arc&lt;Mutex&lt;...&gt;&gt;</code> 增加死锁风险</li>
+                            <li>锁的获取顺序不一致可能导致死锁</li>
+                            <li><code>.lock().map_err(|_| "锁已损坏")</code> 错误处理过于简单</li>
+                        </ul>
+                    </div>
+                    <div class="comparison-item comparison-good">
+                        <h5>✅ 最佳实践建议</h5>
+                        <ul>
+                            <li>考虑使用 <code>tokio::sync::RwLock</code> 替代 <code>Mutex</code> 提升并发性能</li>
+                            <li>明确锁的获取顺序，文档化锁的层级关系</li>
+                            <li>使用 <code>parking_lot::Mutex</code> 获得更好的性能和更简洁的 API</li>
+                            <li>对于简单计数器，<code>AtomicU64</code> 是正确选择（源码已使用）</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h5>知识点：AtomicU64 原子操作</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/lib.rs:91</code></p>
+                <pre><code>beautify_revision: Arc&lt;AtomicU64&gt;,
+export_sequence: Arc&lt;AtomicU64&gt;,
+
+// 使用方式
+let rev = state.beautify_revision.fetch_add(1, Ordering::SeqCst) + 1;</code></pre>
+                <p><strong>源码意图</strong>：使用原子操作实现无锁的版本号递增，用于检测配置变更。</p>
+
+                <div class="comparison">
+                    <div class="comparison-item comparison-bad">
+                        <h5>⚠️ 源码中的潜在风险</h5>
+                        <ul>
+                            <li><code>Ordering::SeqCst</code> 是最强内存序，可能影响性能</li>
+                            <li>某些场景可能不需要如此强的保证</li>
+                        </ul>
+                    </div>
+                    <div class="comparison-item comparison-good">
+                        <h5>✅ 最佳实践建议</h5>
+                        <ul>
+                            <li>对于版本号递增，<code>Ordering::Relaxed</code> 通常足够</li>
+                            <li>对于需要可见性保证的场景，使用 <code>Ordering::Acquire/Release</code></li>
+                            <li>参考：<a href="https://doc.rust-lang.org/std/sync/atomic/enum.Ordering.html">Rust 官方文档</a></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <h3>2.2 错误处理模式</h3>
+
+            <div class="card">
+                <h5>知识点：统一错误枚举</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/app/error.rs</code></p>
+                <pre><code>pub enum AppError {
+    InvalidState { current: &'static str, action: &'static str },
+    CaptureFailed { reason: String },
+    AudioCaptureFailed { reason: String },
+    ExportFailed { reason: String },
+    // ...
+}
+
+pub type AppResult&lt;T&gt; = Result&lt;T, AppError&gt;;</code></pre>
+                <p><strong>源码意图</strong>：定义应用级统一错误枚举，使用 <code>Result&lt;T, E&gt;</code> 传递错误，禁止随意 <code>unwrap()</code>。</p>
+
+                <div class="comparison">
+                    <div class="comparison-item comparison-bad">
+                        <h5>⚠️ 源码中的潜在风险</h5>
+                        <ul>
+                            <li>Tauri 命令中大量使用 <code>.map_err(|e| e.to_string())</code> 丢失错误类型信息</li>
+                            <li>错误信息硬编码中文字符串，不利于国际化</li>
+                        </ul>
+                    </div>
+                    <div class="comparison-item comparison-good">
+                        <h5>✅ 最佳实践建议</h5>
+                        <ul>
+                            <li>实现 <code>serde::Serialize</code> 让 Tauri 直接传递结构化错误</li>
+                            <li>使用 <code>thiserror</code> crate 简化错误枚举定义</li>
+                            <li>错误信息使用枚举变体而非硬编码字符串</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <h3>2.3 Trait 设计模式</h3>
+
+            <div class="card">
+                <h5>知识点：平台抽象 Trait</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/core/capture.rs:50-66</code></p>
+                <pre><code>pub trait ScreenCapture: Send {
+    fn start(&mut self, config: CaptureConfig, sink: VideoFrameSink) -> AppResult&lt;()&gt;;
+    fn stop(&mut self) -> AppResult&lt;()&gt;;
+    fn capabilities(&self) -> CaptureCapabilities;
+}
+
+pub trait AudioCapture: Send {
+    fn start(&mut self, config: AudioConfig, sink: AudioChunkSink) -> AppResult&lt;()&gt;;
+    fn stop(&mut self) -> AppResult&lt;()&gt;;
+    fn device_list(&self) -> AppResult&lt;Vec&lt;AudioDevice&gt;&gt;;
+    fn capabilities(&self) -> AudioCapabilities;
+}</code></pre>
+                <p><strong>源码意图</strong>：通过 Trait 抽象隔离平台差异，App Logic 只依赖 Trait，不直接依赖 ScreenCaptureKit、DXGI 或 WASAPI 类型。</p>
+
+                <div class="card success">
+                    <h5>✅ 设计亮点</h5>
+                    <ul>
+                        <li><code>Send</code> 约束确保 Trait 对象可跨线程传递</li>
+                        <li><code>capabilities()</code> 方法暴露平台特有能力</li>
+                        <li>测试时可使用 Mock 实现，不调用真实系统 API</li>
+                        <li>符合依赖倒置原则（DIP）</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>2.4 有界通道与背压控制</h3>
+
+            <div class="card">
+                <h5>知识点：媒体数据通道</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/core/media_channel.rs</code></p>
+                <pre><code>pub fn bounded_media_channel&lt;T&gt;(
+    capacity: usize,
+    source: &amp;'static str,
+) -&gt; (MediaSender&lt;T&gt;, MediaReceiver&lt;T&gt;) {
+    let (inner_sender, inner_receiver) = sync_channel(capacity);
+    // ...
+}
+
+impl&lt;T&gt; MediaSender&lt;T&gt; {
+    pub fn try_send_drop_newest(&amp;self, item: T) -&gt; bool {
+        match self.inner.try_send(item) {
+            Ok(()) =&gt; true,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) =&gt; {
+                let count = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                // 丢弃最新帧，记录丢弃计数
+                false
+            }
+        }
+    }
+}</code></pre>
+                <p><strong>源码意图</strong>：使用 <code>std::sync::mpsc::sync_channel</code> 实现有界通道，当队列满时丢弃最新帧（Drop Newest 策略）。</p>
+
+                <div class="comparison">
+                    <div class="comparison-item comparison-bad">
+                        <h5>⚠️ 源码中的潜在风险</h5>
+                        <ul>
+                            <li>使用标准库 <code>sync_channel</code>，性能不如 <code>crossbeam</code> 或 <code>flume</code></li>
+                            <li>丢弃策略可能丢失关键帧</li>
+                        </ul>
+                    </div>
+                    <div class="comparison-item comparison-good">
+                        <h5>✅ 最佳实践建议</h5>
+                        <ul>
+                            <li>考虑使用 <code>crossbeam::channel</code> 获得更好的性能</li>
+                            <li>视频通道容量 90 帧（3秒@30fps）是合理选择</li>
+                            <li>音频通道容量 256 帧，适合音频处理特性</li>
+                            <li>丢弃计数日志每 100 次输出一次，避免日志洪泛（源码已实现）</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <h3>2.5 状态机设计</h3>
+
+            <div class="card">
+                <h5>知识点：有限状态机（FSM）</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/app/state_machine.rs</code></p>
+                <pre><code>pub enum RecordingState {
+    Idle,
+    Recording,
+    Paused,
+    Processing,
+    Completed,
+    Failed,
+}
+
+pub struct RecordingStateMachine {
+    state: RecordingState,
+}
+
+impl RecordingStateMachine {
+    pub fn start(&mut self) -> AppResult&lt;()&gt; {
+        match self.state {
+            RecordingState::Idle | RecordingState::Completed | RecordingState::Failed =&gt; {
+                self.state = RecordingState::Recording;
+                Ok(())
+            }
+            _ =&gt; Err(AppError::InvalidState { current: self.state.as_str(), action: "start" }),
+        }
+    }
+    // ...
+}</code></pre>
+                <p><strong>源码意图</strong>：使用枚举 + match 实现严格的状态转换，非法转换返回错误。</p>
+
+                <div class="card success">
+                    <h5>✅ 设计亮点</h5>
+                    <ul>
+                        <li>状态转换逻辑清晰，每个转换都有明确的前置条件</li>
+                        <li>非法状态转换返回结构化错误，不会 panic</li>
+                        <li>单元测试覆盖所有状态转换路径（7 个测试用例）</li>
+                        <li>支持从 Failed 状态重新开始，提升用户体验</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>2.6 内存管理与零拷贝</h3>
+
+            <div class="card">
+                <h5>知识点：Arc 引用计数</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/core/frame.rs:41</code></p>
+                <pre><code>pub type VideoFrameRef = Arc&lt;VideoFrame&gt;;
+
+// 使用方式
+let frame: VideoFrameRef = Arc::new(VideoFrame { ... });
+let cloned = frame.clone(); // 仅增加引用计数，不复制数据</code></pre>
+                <p><strong>源码意图</strong>：使用 <code>Arc&lt;VideoFrame&gt;</code> 实现帧数据的共享所有权，避免在捕获线程和处理线程之间复制像素数据。</p>
+
+                <div class="card success">
+                    <h5>✅ 设计亮点</h5>
+                    <ul>
+                        <li>帧数据使用 <code>Arc&lt;[u8]&gt;</code> 存储，clone 只增加引用计数</li>
+                        <li>音频样本同样使用 <code>Arc&lt;[f32]&gt;</code>，测试验证了 <code>Arc::ptr_eq</code></li>
+                        <li>符合"少拷贝、可度量、可演进"的架构原则</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <section id="tauri" class="section">
+            <h2>三、Tauri 框架核心机制</h2>
+
+            <h3>3.1 Tauri 命令系统</h3>
+
+            <div class="card">
+                <h5>知识点：#[tauri::command] 注解</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/lib.rs:244-251</code></p>
+                <pre><code>#[tauri::command]
+fn recording_status(state: tauri::State&lt;'_, AppState&gt;) -> Result&lt;RecordingStatusPayload, String&gt; {
+    let service = state.service.lock()
+        .map_err(|_| "录制服务锁已损坏".to_string())?;
+    Ok(RecordingStatusPayload::from(service.state()))
+}
+
+// 注册命令
+.invoke_handler(tauri::generate_handler![
+    recording_status,
+    recording_permissions,
+    start_recording,
+    stop_recording,
+    // ...
+])</code></pre>
+                <p><strong>源码意图</strong>：使用 <code>#[tauri::command]</code> 定义前端可调用的 Rust 函数，通过 <code>tauri::State</code> 注入共享状态。</p>
+
+                <div class="comparison">
+                    <div class="comparison-item comparison-bad">
+                        <h5>⚠️ 源码中的潜在风险</h5>
+                        <ul>
+                            <li>返回 <code>Result&lt;T, String&gt;</code> 丢失错误类型信息</li>
+                            <li>错误信息硬编码中文，不利于测试和国际化</li>
+                            <li>锁的获取和错误处理重复代码较多</li>
+                        </ul>
+                    </div>
+                    <div class="comparison-item comparison-good">
+                        <h5>✅ 最佳实践建议</h5>
+                        <ul>
+                            <li>实现自定义错误类型并实现 <code>serde::Serialize</code></li>
+                            <li>使用 <code>thiserror</code> 简化错误定义</li>
+                            <li>考虑使用宏或辅助函数减少锁操作的样板代码</li>
+                            <li>参考 Tauri 官方的 <a href="https://tauri.app/v2/guides/commands/">命令文档</a></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <h3>3.2 Tauri 状态管理</h3>
+
+            <div class="card">
+                <h5>知识点：tauri::State 注入</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/lib.rs:1684</code></p>
+                <pre><code>// 注册状态
+.manage(AppState::default())
+
+// 在命令中使用
+fn recording_status(state: tauri::State&lt;'_, AppState&gt;) -> Result&lt;...&gt; {
+    let service = state.service.lock()?;
+    // ...
+}
+
+// 异步命令中克隆状态
+async fn start_recording(app: AppHandle, state: tauri::State&lt;'_, AppState&gt;) -> Result&lt;(), String&gt; {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut service = service.lock()?;
+        // ...
+    })
+}</code></pre>
+                <p><strong>源码意图</strong>：使用 Tauri 的依赖注入系统管理全局状态，支持同步和异步命令。</p>
+
+                <div class="card warning">
+                    <h5>⚠️ 关键注意点</h5>
+                    <ul>
+                        <li><code>tauri::State</code> 在异步命令中不能直接跨 <code>await</code>，需要先 <code>clone</code></li>
+                        <li>使用 <code>spawn_blocking</code> 执行阻塞操作，避免阻塞 Tauri 异步运行时</li>
+                        <li>状态必须实现 <code>Send + Sync + 'static</code></li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>3.3 Tauri 事件系统</h3>
+
+            <div class="card">
+                <h5>知识点：事件发射与监听</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/lib.rs:130-148</code></p>
+                <pre><code>// Rust 侧发射事件
+fn emit_state_changed(app: &amp;AppHandle, state: RecordingState) {
+    let payload = RecordingStatusPayload::from(state);
+    let _ = app.emit("recording-state-changed", payload);
+}
+
+// 前端监听事件（TypeScript）
+import { listen } from '@tauri-apps/api/event';
+
+const unlisten = await listen('recording-state-changed', (event) => {
+    console.log('状态变更:', event.payload);
+});</code></pre>
+                <p><strong>源码意图</strong>：使用 Tauri 事件系统实现前后端解耦通信，前端订阅事件获取状态更新。</p>
+
+                <div class="card success">
+                    <h5>✅ 设计亮点</h5>
+                    <ul>
+                        <li>事件驱动架构，前端无需轮询状态</li>
+                        <li>使用 <code>serde_json::json!</code> 宏构建复杂事件载荷</li>
+                        <li>事件名称使用 kebab-case 命名（如 <code>recording-state-changed</code>）</li>
+                        <li>前端使用 <code>listen</code> 返回的 <code>unlisten</code> 函数清理订阅</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>3.4 Tauri 异步运行时</h3>
+
+            <div class="card">
+                <h5>知识点：async_runtime 与 spawn_blocking</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/lib.rs:318-347</code></p>
+                <pre><code>#[tauri::command]
+async fn start_recording(app: AppHandle, state: tauri::State&lt;'_, AppState&gt;) -> Result&lt;(), String&gt; {
+    let service = state.service.clone();
+
+    let new_state = tauri::async_runtime::spawn_blocking(move || {
+        let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
+        service.start(config, audio_config, beautify_snapshot, cursor_main_thread_dispatcher)
+            .map_err(|e| e.to_string())?;
+        Ok::&lt;_, String&gt;(service.state())
+    })
+    .await
+    .map_err(|e| format!("启动录制任务失败: {e}"))??;
+
+    emit_state_changed(&amp;app, new_state);
+    Ok(())
+}</code></pre>
+                <p><strong>源码意图</strong>：将阻塞操作（如锁获取、录制启动）放到 <code>spawn_blocking</code> 线程池，避免阻塞 Tauri 异步运行时。</p>
+
+                <div class="comparison">
+                    <div class="comparison-item comparison-bad">
+                        <h5>⚠️ 常见错误</h5>
+                        <ul>
+                            <li>在异步命令中直接调用阻塞操作（如 <code>lock()</code>）</li>
+                            <li>在 <code>spawn_blocking</code> 中使用 <code>tauri::State</code></li>
+                            <li>忘记处理 <code>JoinError</code></li>
+                        </ul>
+                    </div>
+                    <div class="comparison-item comparison-good">
+                        <h5>✅ 最佳实践</h5>
+                        <ul>
+                            <li>先 <code>clone</code> 状态，再 <code>spawn_blocking</code></li>
+                            <li>使用 <code>??</code> 处理双重 Result（JoinError + 业务错误）</li>
+                            <li>CPU 密集型任务使用 <code>spawn_blocking</code></li>
+                            <li>IO 密集型任务使用 <code>tokio::spawn</code></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <h3>3.5 Tauri 权限与安全</h3>
+
+            <div class="card">
+                <h5>知识点：Capabilities 配置</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/capabilities/default.json</code></p>
+                <pre><code>{
+    "identifier": "default",
+    "windows": ["main"],
+    "permissions": [
+        "core:default",
+        "dialog:default",
+        "opener:default"
+    ]
+}</code></pre>
+                <p><strong>源码意图</strong>：Tauri 2.0 的权限系统，按最小权限原则配置 API Allowlist。</p>
+
+                <div class="card warning">
+                    <h5>⚠️ 安全约束</h5>
+                    <ul>
+                        <li>禁止开启 <code>allow-all</code> 权限</li>
+                        <li>敏感信息不得硬编码，使用环境变量或 Keychain</li>
+                        <li>FFmpeg 命令行参数严禁直接拼接用户输入</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <section id="media" class="section">
+            <h2>四、音视频核心理论与实战</h2>
+
+            <h3>4.1 时间戳与同步机制</h3>
+
+            <div class="card">
+                <h5>知识点：MediaTimestamp 统一时间基</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/core/frame.rs:5-15</code></p>
+                <pre><code>#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct MediaTimestamp {
+    pub nanos: u64,
+}
+
+impl MediaTimestamp {
+    pub fn from_nanos(nanos: u64) -> Self {
+        Self { nanos }
+    }
+}</code></pre>
+                <p><strong>源码意图</strong>：定义统一的时间戳类型，视频帧、音频块和 UI 事件共享同一单调时钟基准。</p>
+
+                <div class="card danger">
+                    <h5>🔴 关键约束</h5>
+                    <p><strong>禁止用"第 N 帧对应第 N 段音频"的方式硬对齐！</strong>必须基于 <code>MediaTimestamp</code> 时间戳对齐，处理不同采样率、声道数和设备延迟。</p>
+                </div>
+            </div>
+
+            <h3>4.2 视频帧处理</h3>
+
+            <div class="card">
+                <h5>知识点：VideoFrame 数据结构</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/core/frame.rs:29-38</code></p>
+                <pre><code>#[derive(Clone, Debug)]
+pub struct VideoFrame {
+    pub timestamp: MediaTimestamp,
+    pub width: u32,
+    pub height: u32,
+    pub stride_bytes: usize,
+    pub pixel_format: PixelFormat,
+    pub buffer: FrameBuffer,
+}
+
+#[derive(Clone, Debug)]
+pub enum FrameBuffer {
+    Owned(Arc&lt;[u8]&gt;),
+}</code></pre>
+                <p><strong>源码意图</strong>：封装视频帧的元数据和像素数据，使用 <code>Arc&lt;[u8]&gt;</code> 实现零拷贝传递。</p>
+
+                <div class="card success">
+                    <h5>✅ 设计亮点</h5>
+                    <ul>
+                        <li><code>stride_bytes</code> 字段处理内存对齐（不同平台可能不同）</li>
+                        <li><code>PixelFormat</code> 枚举支持多种像素格式（当前仅 Bgra8）</li>
+                        <li><code>FrameBuffer</code> 枚举预留了 GPU 纹理扩展点</li>
+                        <li>所有字段实现 <code>Clone</code>，但 <code>Arc</code> 确保数据不复制</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>4.3 音频混音</h3>
+
+            <div class="card">
+                <h5>知识点：系统音频 + 麦克风混音</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/media/audio_mixer.rs</code></p>
+                <pre><code>pub trait AudioMixer: Send {
+    fn mix(
+        &amp;self,
+        system_audio: Option&lt;&amp;AudioChunk&gt;,
+        microphone: Option&lt;&amp;AudioChunk&gt;,
+    ) -> Result&lt;MixedAudioChunk, AppError&gt;;
+}</code></pre>
+                <p><strong>源码意图</strong>：将系统音频和麦克风音频混音为单一输出流。</p>
+
+                <div class="card warning">
+                    <h5>⚠️ 音频处理要点</h5>
+                    <ul>
+                        <li>系统音频和麦克风可能有不同采样率（如 44.1kHz vs 48kHz）</li>
+                        <li>需要重采样到统一采样率（项目使用 48kHz）</li>
+                        <li>根据 <code>MediaTimestamp</code> 对齐，处理设备延迟差异</li>
+                        <li>对短缺区间填充静音，对重叠区间混音</li>
+                        <li>混音后需要 clipping protection（限幅保护）</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>4.4 光标美化引擎</h3>
+
+            <div class="card">
+                <h5>知识点：贝塞尔曲线插值</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/media/cursor_engine.rs</code></p>
+                <pre><code>pub struct CursorEffectEngine {
+    smoothing_enabled: bool,
+    click_config: ClickAnimationConfig,
+}
+
+impl CursorEffectEngine {
+    pub fn build_timeline(
+        &amp;self,
+        samples: &amp;[CursorSample],
+        clicks: &amp;[CursorClick],
+        fps: u32,
+        duration_nanos: u64,
+    ) -> Result&lt;EffectTimeline, AppError&gt; {
+        // 1. 移动平均滤波（按帧率自适应窗口）
+        // 2. 贝塞尔曲线插值
+        // 3. 点击放大状态机
+        // 4. 生成效果时间线
+    }
+}</code></pre>
+                <p><strong>源码意图</strong>：实现光标轨迹平滑和点击放大效果，录后处理为主。</p>
+
+                <div class="card">
+                    <h5>算法要点</h5>
+                    <ul>
+                        <li><strong>移动平均窗口</strong>：30fps 用 5 帧，60fps 用 7-9 帧</li>
+                        <li><strong>边界条件</strong>：0 帧返回空轨迹，单点保持原位，坐标突变保留跳变</li>
+                        <li><strong>贝塞尔插值</strong>：控制点由相邻轨迹方向和速度估算</li>
+                        <li><strong>点击状态机</strong>：Idle → PressedExpand → Hold → ReleaseShrink → Idle</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>4.5 空白段检测</h3>
+
+            <div class="card">
+                <h5>知识点：双信号确认算法</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/media/silence_detector.rs</code></p>
+                <pre><code>pub struct SilenceDetectorEngine {
+    config: TrimConfig,
+}
+
+impl SilenceDetectorEngine {
+    pub fn analyze(
+        &amp;self,
+        audio_activity: &amp;[AudioActivitySample],
+        visual_activity: &amp;[VisualActivitySample],
+        duration_nanos: u64,
+    ) -> Result&lt;CutTimeline, AppError&gt; {
+        // 音频 RMS 静音 + 画面帧差分低变化 + 持续时间超过阈值 = 候选空白段
+    }
+}</code></pre>
+                <p><strong>源码意图</strong>：结合音频和视频信号检测空白段，避免误剪。</p>
+
+                <div class="card warning">
+                    <h5>⚠️ 检测策略</h5>
+                    <ul>
+                        <li><strong>音频 RMS</strong>：500-1000ms 滑动窗口，保守阈值</li>
+                        <li><strong>帧差分</strong>：低分辨率灰度图，计算相邻帧变化率</li>
+                        <li><strong>时间窗口</strong>：小于 2 秒不裁剪，5-8 秒才进入候选</li>
+                        <li><strong>缓冲保护</strong>：候选段前后保留 300-500ms</li>
+                        <li><strong>保守策略</strong>：默认只生成建议时间线，保留原始素材</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>4.6 FFmpeg 封装</h3>
+
+            <div class="card">
+                <h5>知识点：FFmpeg C API Binding</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/media/ffmpeg_writer.rs</code></p>
+                <pre><code>// Cargo.toml
+[dependencies]
+ffmpeg-next = { version = "7", optional = true }
+
+[features]
+ffmpeg = ["dep:ffmpeg-next"]</code></pre>
+                <p><strong>源码意图</strong>：使用 <code>ffmpeg-next</code> crate 封装 FFmpeg C API，禁止直接调用 CLI。</p>
+
+                <div class="card danger">
+                    <h5>🔴 安全约束</h5>
+                    <ul>
+                        <li>FFmpeg 命令行参数严禁直接拼接用户输入，防止命令注入</li>
+                        <li>必须使用结构化参数传递</li>
+                        <li>编码任务运行在独立线程，进度通过事件上报</li>
+                        <li>导出失败返回结构化错误</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>4.7 屏幕捕获（macOS）</h3>
+
+            <div class="card">
+                <h5>知识点：ScreenCaptureKit FFI</h5>
+                <p><span class="badge badge-primary">源码定位</span> <code>src-tauri/src/platform/macos/screen_capture_kit.rs</code></p>
+                <pre><code>// Cargo.toml
+[dependencies]
+objc2 = "0.6"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-screen-capture-kit = "0.3"
+objc2-foundation = "0.3"</code></pre>
+                <p><strong>源码意图</strong>：使用 <code>objc2</code> 系列 crate 调用 macOS ScreenCaptureKit API。</p>
+
+                <div class="card danger">
+                    <h5>🔴 FFI 安全审查要点</h5>
+                    <ul>
+                        <li>ObjC 对象的生命周期管理（retain/release）</li>
+                        <li>回调函数的线程安全性</li>
+                        <li>内存泄漏检测</li>
+                        <li>异常处理（ObjC exception → Rust panic）</li>
+                        <li>⚠️ 人工审查点：objc2 系列 crate 版本兼容性</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <section id="learning-path" class="section">
+            <h2>五、推荐学习路径</h2>
+
+            <h3>5.1 学习路线图</h3>
+            <div class="card">
+                <h5>由浅入深的学习顺序</h5>
+                <ol>
+                    <li><strong>第一阶段：Rust 基础与项目结构</strong>
+                        <ul>
+                            <li>阅读 <code>Cargo.toml</code> 了解依赖关系</li>
+                            <li>阅读 <code>src-tauri/src/lib.rs</code> 理解模块组织</li>
+                            <li>阅读 <code>src-tauri/src/app/state_machine.rs</code> 学习状态机设计</li>
+                        </ul>
+                    </li>
+                    <li><strong>第二阶段：Tauri 通信机制</strong>
+                        <ul>
+                            <li>阅读 <code>src/lib/tauri.ts</code> 理解前端封装</li>
+                            <li>阅读 <code>src/components/recording-panel.tsx</code> 学习事件监听</li>
+                            <li>对比 Rust 的 <code>#[tauri::command]</code> 和前端的 <code>invoke</code></li>
+                        </ul>
+                    </li>
+                    <li><strong>第三阶段：核心抽象层</strong>
+                        <ul>
+                            <li>阅读 <code>src-tauri/src/core/capture.rs</code> 学习 Trait 设计</li>
+                            <li>阅读 <code>src-tauri/src/core/frame.rs</code> 理解数据结构</li>
+                            <li>阅读 <code>src-tauri/src/core/media_channel.rs</code> 学习并发控制</li>
+                        </ul>
+                    </li>
+                    <li><strong>第四阶段：媒体处理管线</strong>
+                        <ul>
+                            <li>阅读 <code>src-tauri/src/media/audio_mixer.rs</code> 学习音频混音</li>
+                            <li>阅读 <code>src-tauri/src/media/cursor_engine.rs</code> 学习算法设计</li>
+                            <li>阅读 <code>src-tauri/src/media/silence_detector.rs</code> 学习信号处理</li>
+                        </ul>
+                    </li>
+                    <li><strong>第五阶段：平台适配层</strong>
+                        <ul>
+                            <li>阅读 <code>src-tauri/src/platform/macos/screen_capture_kit.rs</code> 学习 FFI</li>
+                            <li>阅读 <code>src-tauri/src/platform/macos/permissions.rs</code> 学习权限管理</li>
+                            <li>对比 Windows 的 <code>dxgi_capture.rs</code> 和 <code>wasapi_loopback.rs</code></li>
+                        </ul>
+                    </li>
+                    <li><strong>第六阶段：导出与授权</strong>
+                        <ul>
+                            <li>阅读 <code>src-tauri/src/media/ffmpeg_writer.rs</code> 学习 FFmpeg 封装</li>
+                            <li>阅读 <code>src-tauri/src/app/export_service.rs</code> 学习导出流程</li>
+                            <li>阅读 <code>src-tauri/src/app/license_service.rs</code> 学习授权设计</li>
+                        </ul>
+                    </li>
+                </ol>
+            </div>
+
+            <h3>5.2 关键文件阅读清单</h3>
+            <div class="grid">
+                <div class="feature-card">
+                    <h4>Rust 核心</h4>
+                    <p>
+                        <code>lib.rs</code> - 主入口<br>
+                        <code>state_machine.rs</code> - 状态机<br>
+                        <code>recording_service.rs</code> - 录制服务<br>
+                        <code>capture.rs</code> - Trait 定义<br>
+                        <code>frame.rs</code> - 数据结构
+                    </p>
+                </div>
+                <div class="feature-card">
+                    <h4>Tauri 通信</h4>
+                    <p>
+                        <code>lib.rs</code> 中的 <code>#[tauri::command]</code><br>
+                        <code>src/lib/tauri.ts</code> - 前端封装<br>
+                        <code>src/components/*.tsx</code> - UI 组件
+                    </p>
+                </div>
+                <div class="feature-card">
+                    <h4>音视频处理</h4>
+                    <p>
+                        <code>audio_mixer.rs</code> - 混音<br>
+                        <code>cursor_engine.rs</code> - 光标引擎<br>
+                        <code>silence_detector.rs</code> - 空白检测<br>
+                        <code>ffmpeg_writer.rs</code> - FFmpeg
+                    </p>
+                </div>
+                <div class="feature-card">
+                    <h4>平台适配</h4>
+                    <p>
+                        <code>screen_capture_kit.rs</code> - macOS<br>
+                        <code>dxgi_capture.rs</code> - Windows<br>
+                        <code>permissions.rs</code> - 权限管理
+                    </p>
+                </div>
+            </div>
+
+            <h3>5.3 学习建议</h3>
+            <div class="card success">
+                <h5>✅ 高效学习方法</h5>
+                <ul>
+                    <li><strong>先跑通再深入</strong>：先用 <code>cargo tauri dev</code> 启动项目，体验完整流程</li>
+                    <li><strong>从测试入手</strong>：阅读 <code>#[cfg(test)] mod tests</code> 理解预期行为</li>
+                    <li><strong>关注 TODO/FIXME</strong>：搜索代码中的 TODO 和 FIXME，了解待解决问题</li>
+                    <li><strong>对比架构文档</strong>：将源码实现与 <code>docs/architecture/</code> 中的设计文档对比</li>
+                    <li><strong>动手修改</strong>：尝试修改参数（如帧率、通道容量），观察行为变化</li>
+                </ul>
+            </div>
+
+            <div class="card warning">
+                <h5>⚠️ 常见陷阱</h5>
+                <ul>
+                    <li><strong>不要盲目复制代码</strong>：源码中可能存在非最佳实践，需要批判性吸收</li>
+                    <li><strong>注意平台差异</strong>：macOS 和 Windows 的实现差异很大</li>
+                    <li><strong>理解生命周期</strong>：FFI 代码中的对象生命周期管理是难点</li>
+                    <li><strong>性能敏感</strong>：音视频处理对性能要求极高，注意避免不必要的拷贝</li>
+                </ul>
+            </div>
+        </section>
+
+        <footer>
+            <p>录智项目学习指南 | 基于 Tauri 2.0 + Rust + React 技术栈</p>
+            <p>最后更新：2026-06-07</p>
+        </footer>
+    </div>
+
+    <script>
+        // 平滑滚动
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                document.querySelector(this.getAttribute('href')).scrollIntoView({
+                    behavior: 'smooth'
+                });
+            });
+        });
+
+        // 导航高亮
+        const sections = document.querySelectorAll('.section');
+        const navLinks = document.querySelectorAll('.nav a');
+
+        window.addEventListener('scroll', () => {
+            let current = '';
+            sections.forEach(section => {
+                const sectionTop = section.offsetTop;
+                if (pageYOffset >= sectionTop - 100) {
+                    current = section.getAttribute('id');
+                }
+            });
+
+            navLinks.forEach(link => {
+                link.style.color = '';
+                if (link.getAttribute('href') === `#${current}`) {
+                    link.style.color = '#3b82f6';
+                }
+            });
+        });
+    </script>
+</body>
+</html>
