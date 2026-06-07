@@ -4,3 +4,4 @@ pub mod cursor_source;
 pub mod permissions;
 pub mod screen_capture_kit;
 pub mod window_list;
+pub mod window_monitor;
