@@ -69,6 +69,10 @@ pub enum AppError {
     WindowClosed {
         window_id: u32,
     },
+    /// 窗口访问被拒绝（如 DRM 保护内容）
+    WindowAccessDenied {
+        window_id: u32,
+    },
 }
 
 impl Display for AppError {
@@ -130,6 +134,9 @@ impl Display for AppError {
             }
             Self::WindowClosed { window_id } => {
                 write!(formatter, "窗口已关闭：{window_id}")
+            }
+            Self::WindowAccessDenied { window_id } => {
+                write!(formatter, "窗口访问被拒绝（可能受 DRM 保护）：{window_id}")
             }
         }
     }
@@ -213,5 +220,11 @@ mod tests {
     fn window_closed_chinese_message() {
         let err = AppError::WindowClosed { window_id: 42 };
         assert_eq!(err.to_string(), "窗口已关闭：42");
+    }
+
+    #[test]
+    fn window_access_denied_chinese_message() {
+        let err = AppError::WindowAccessDenied { window_id: 42 };
+        assert_eq!(err.to_string(), "窗口访问被拒绝（可能受 DRM 保护）：42");
     }
 }
