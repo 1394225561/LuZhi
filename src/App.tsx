@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence } from 'framer-motion'
+import { Toaster, toast } from 'sonner'
 import { RecordingPanel } from '@/components/recording-panel'
 import { RecordingStatusBar } from '@/components/recording-status-bar'
 import { PreviewView } from '@/components/preview-view'
@@ -21,6 +22,7 @@ import {
   onRecordingTick,
   onRecordingStateChanged,
   onMicLevel,
+  listen,
   type LicenseStatus as LicenseStatusPayload,
   type RecordingPermissions,
   type RecordingResult,
@@ -212,6 +214,31 @@ export default function App() {
     return () => { cancelled = true; unlisten?.() }
   }, [appState])
 
+  // 监听窗口状态变化事件
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void listen<{ state: 'minimized' | 'closed'; windowTitle: string }>(
+      'window-state-changed',
+      (event) => {
+        const { state, windowTitle } = event.payload
+
+        switch (state) {
+          case 'minimized':
+            toast.warning('录制暂停', {
+              description: `窗口"${windowTitle}"已最小化，恢复窗口后继续录制`,
+            })
+            break
+          case 'closed':
+            toast.error('录制停止', {
+              description: `窗口"${windowTitle}"已关闭`,
+            })
+            break
+        }
+      }
+    ).then((fn) => { unlisten = fn })
+    return () => { unlisten?.() }
+  }, [])
+
   // 麦克风关闭时清空残留电平
   useEffect(() => {
     if (!micEnabled) setMicVolume(0)
@@ -219,11 +246,6 @@ export default function App() {
 
   const handleStartRecording = useCallback(async () => {
     if (appState !== 'idle' || isStartingRef.current) return
-
-    if (recordingMode !== 'fullscreen') {
-      setErrorMessage('窗口/区域录制模式正在开发中，当前仅支持全屏录制')
-      return
-    }
 
     isStartingRef.current = true
     setElapsedTime(0)
@@ -392,6 +414,7 @@ export default function App() {
   if (appState === 'idle') {
     return (
       <div className="min-h-screen flex" data-luzhi-drag-region="surface">
+        <Toaster position="top-right" />
         {/* Main content area */}
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="relative">
@@ -453,6 +476,7 @@ export default function App() {
   if (appState === 'recording') {
     return (
       <div className="min-h-screen flex flex-col items-center justify-between p-8" data-luzhi-drag-region="surface">
+        <Toaster position="top-right" />
         <div className="pt-4">
           <AnimatePresence>
             <RecordingStatusBar

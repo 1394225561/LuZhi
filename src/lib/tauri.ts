@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
+export { listen, type UnlistenFn }
+
 // ─── 类型定义 ───
 
 export type RecordingState = 'idle' | 'recording' | 'paused' | 'processing' | 'completed' | 'failed'
