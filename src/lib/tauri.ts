@@ -218,6 +218,21 @@ export type CpalMicrophoneStopDiagnostics = {
   stopWaitMs: number
 }
 
+/** 窗口元数据，用于前端展示和选择 */
+export type WindowInfo = {
+  windowId: number
+  title: string
+  appName: string
+  bundleId: string | null
+  isOnScreen: boolean
+  width: number
+  height: number
+  thumbnail: string | null
+}
+
+/** 窗口录制状态 */
+export type WindowRecordingState = 'recording' | 'minimized' | 'closed'
+
 
 // ─── Tauri Commands ───
 
@@ -311,6 +326,16 @@ export async function importRecording(path: string): Promise<LibraryEntrySummary
 
 export async function deleteRecording(id: string): Promise<void> {
   return invoke('delete_recording', { id })
+}
+
+/** 获取当前可见窗口列表 */
+export async function listWindows(): Promise<WindowInfo[]> {
+  return invoke<WindowInfo[]>('list_windows')
+}
+
+/** 设置录制目标窗口 ID */
+export async function setWindowId(windowId: number): Promise<void> {
+  return invoke('set_window_id', { windowId })
 }
 
 // ─── Tauri Events ───
