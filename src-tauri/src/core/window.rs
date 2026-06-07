@@ -22,7 +22,7 @@ pub struct WindowInfo {
 }
 
 /// 窗口录制状态
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum WindowRecordingState {
     /// 正常录制中
     Recording,
