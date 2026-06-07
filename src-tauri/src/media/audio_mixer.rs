@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use crate::app::error::{AppError, AppResult};
 use crate::core::capture::DenoiseMode;
 use crate::core::frame::{AudioChunk, MediaTimestamp, MixedAudioChunk};
-use crate::media::audio_denoise::HighpassFilter;
+use crate::media::audio_denoise::MicrophoneDenoiseChain;
 
 /// Unified output sample rate for mixed audio (48 kHz).
 const MIXED_SAMPLE_RATE: u32 = 48_000;
@@ -27,10 +27,10 @@ pub trait AudioMixer: Send {
 /// 2. Channel layout normalization to stereo
 /// 3. Timestamp-based alignment with silence padding for missing segments
 /// 4. Weighted sum mixing with hard clipping protection
-/// 5. Optional highpass filter for microphone noise reduction
+/// 5. Optional microphone denoise chain
 pub struct SimpleAudioMixer {
-    /// 高通滤波器状态（每个通道一个），使用 Mutex 提供内部可变性
-    highpass_filters: Mutex<Option<Vec<HighpassFilter>>>,
+    /// 麦克风降噪链路状态（每个通道一个），使用 Mutex 提供内部可变性
+    denoise_chains: Mutex<Option<Vec<MicrophoneDenoiseChain>>>,
     /// 降噪模式
     denoise_mode: DenoiseMode,
 }
@@ -38,7 +38,7 @@ pub struct SimpleAudioMixer {
 impl SimpleAudioMixer {
     pub fn new(denoise_mode: DenoiseMode) -> Self {
         Self {
-            highpass_filters: Mutex::new(None),
+            denoise_chains: Mutex::new(None),
             denoise_mode,
         }
     }
@@ -51,19 +51,24 @@ impl SimpleAudioMixer {
             return samples.to_vec();
         }
 
-        let mut filters_guard = self.highpass_filters.lock().unwrap();
+        let mut chains_guard = self.denoise_chains.lock().unwrap();
 
-        // 懒初始化滤波器
-        if filters_guard.is_none() {
-            *filters_guard = Some(
-                (0..channels as usize)
-                    .map(|_| HighpassFilter::new(80.0, MIXED_SAMPLE_RATE as f64))
+        let channel_count = channels as usize;
+
+        // 懒初始化滤波器链路；若设备通道数变化，重建链路避免状态下标越界。
+        if chains_guard
+            .as_ref()
+            .map_or(true, |chains| chains.len() != channel_count)
+        {
+            *chains_guard = Some(
+                (0..channel_count)
+                    .map(|_| MicrophoneDenoiseChain::new(MIXED_SAMPLE_RATE as f64))
                     .collect(),
             );
         }
 
-        if let Some(ref mut filters) = *filters_guard {
-            apply_highpass(samples, channels, filters)
+        if let Some(ref mut chains) = *chains_guard {
+            apply_microphone_denoise(samples, channels, chains)
         } else {
             samples.to_vec()
         }
@@ -84,8 +89,8 @@ impl AudioMixer for SimpleAudioMixer {
     ) -> AppResult<MixedAudioChunk> {
         match (system, mic) {
             (Some(sys), Some(mic)) => mix_two(sys, mic, self),
-            (Some(sys), None) => passthrough(sys, self),
-            (None, Some(mic)) => passthrough(mic, self),
+            (Some(sys), None) => passthrough(sys, self, false),
+            (None, Some(mic)) => passthrough(mic, self, true),
             (None, None) => Err(AppError::AudioMixFailed {
                 reason: "系统音频和麦克风均无数据".to_string(),
             }),
@@ -93,16 +98,20 @@ impl AudioMixer for SimpleAudioMixer {
     }
 }
 
-/// 对音频样本应用高通滤波器。
+/// 对音频样本应用麦克风降噪链路。
 ///
 /// 滤波器按通道独立处理（每个通道有独立的状态）。
-fn apply_highpass(samples: &[f32], channels: u16, filters: &mut [HighpassFilter]) -> Vec<f32> {
+fn apply_microphone_denoise(
+    samples: &[f32],
+    channels: u16,
+    chains: &mut [MicrophoneDenoiseChain],
+) -> Vec<f32> {
     let channels = channels as usize;
     let mut output = Vec::with_capacity(samples.len());
 
     for (i, &sample) in samples.iter().enumerate() {
         let ch = i % channels;
-        output.push(filters[ch].process(sample));
+        output.push(chains[ch].process(sample));
     }
 
     output
@@ -136,12 +145,19 @@ fn validate_audio_chunk(chunk: &AudioChunk) -> AppResult<()> {
 }
 
 /// Single-source passthrough: resample + convert to stereo if needed.
-fn passthrough(chunk: &AudioChunk, mixer: &SimpleAudioMixer) -> AppResult<MixedAudioChunk> {
+fn passthrough(
+    chunk: &AudioChunk,
+    mixer: &SimpleAudioMixer,
+    apply_denoise: bool,
+) -> AppResult<MixedAudioChunk> {
     validate_audio_chunk(chunk)?;
     let resampled = resample(chunk, MIXED_SAMPLE_RATE);
 
-    // 仅对麦克风通道应用降噪
-    let filtered = mixer.apply_denoise_if_enabled(&resampled, chunk.channels);
+    let filtered = if apply_denoise {
+        mixer.apply_denoise_if_enabled(&resampled, chunk.channels)
+    } else {
+        resampled
+    };
 
     let stereo = to_stereo(&filtered, chunk.channels);
     let clamped = clamp_samples(&stereo);
@@ -579,5 +595,58 @@ mod tests {
             "System audio DC should be preserved, mic DC should be removed, got avg {}",
             avg
         );
+    }
+
+    #[test]
+    fn mixer_highpass_does_not_filter_system_only_audio() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::Highpass);
+
+        let sys = make_chunk(0, 48000, 1, vec![0.5; 4800]);
+        let result = mixer.mix(Some(&sys), None).unwrap();
+
+        let avg: f32 = result.samples.iter().sum::<f32>() / result.samples.len() as f32;
+        assert!(
+            avg > 0.3,
+            "System-only audio should not be denoised, got avg {}",
+            avg
+        );
+    }
+
+    #[test]
+    fn mixer_highpass_handles_mic_channel_count_increase_without_panic() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::Highpass);
+
+        let mono_mic = make_chunk(0, 48000, 1, vec![0.5; 480]);
+        mixer.mix(None, Some(&mono_mic)).unwrap();
+
+        let stereo_mic = make_chunk(10_000_000, 48000, 2, vec![0.5; 960]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mixer.mix(None, Some(&stereo_mic))
+        }));
+
+        assert!(
+            result.is_ok(),
+            "mic channel count increase should not panic"
+        );
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn mixer_highpass_handles_mic_channel_count_decrease_without_panic() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::Highpass);
+
+        let stereo_mic = make_chunk(0, 48000, 2, vec![0.5; 960]);
+        mixer.mix(None, Some(&stereo_mic)).unwrap();
+
+        let mono_mic = make_chunk(10_000_000, 48000, 1, vec![0.5; 480]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mixer.mix(None, Some(&mono_mic))
+        }));
+
+        assert!(
+            result.is_ok(),
+            "mic channel count decrease should not panic"
+        );
+        assert!(result.unwrap().is_ok());
     }
 }

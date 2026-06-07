@@ -10,6 +10,86 @@
 
 ## 已解决
 
+### BUG-0023: 60fps 录制素材导出时报“导出失败” ✅ 已修复-待人工验证
+
+**现象**：60fps 录制结束后已能进入预览，但在导出阶段 UI 报错：
+
+`导出失败，请重试或检查录制素材。`
+
+终端日志中导出阶段出现：
+
+`[libx264] non-strictly-monotonic PTS`
+
+以及：
+
+`Application provided invalid, non monotonically increasing dts to muxer in stream 0: 1024 >= 1024`
+
+**根因**：录制源素材是 60fps，但 MVP 导出 preset 固定为 30fps。`FfmpegTrimExporter` 把源视频帧 PTS 重采样到导出 encoder time base `1/30` 时，两个相邻的 60fps 源帧会落到同一个 30fps 输出 PTS tick。旧代码用 `out_pts.max(last_video_out_pts)` 只保证非递减，仍允许重复 PTS 进入 x264，最终 MP4 muxer 因 DTS/PTS 非严格递增拒绝写入视频包。
+
+**修复**：
+
+1. 导出器视频输出 PTS 追踪从 `0` 改为 `-1`，允许首帧 PTS 为 0 正常写入。
+2. 当源帧映射后的 `out_pts <= last_video_out_pts` 时跳过该帧，避免 60fps 源降到 30fps preset 时重复 PTS。
+3. 新增 60fps 源素材导出到 Bilibili 30fps preset 的回归测试，覆盖导出不再出现 duplicate PTS / muxer 写包失败。
+
+**预防规则**：
+
+57. 导出链路做 fps 转换时必须保证视频 PTS 严格递增；“非递减”不足以满足 x264/MP4 muxer。
+58. 当源 fps 高于导出 preset fps 时，重复输出 PTS tick 的源帧必须被丢弃或显式重采样，不能直接送入编码器。
+59. 60fps 录制修复不能只覆盖源 writer；还必须覆盖导出器从 60fps 源素材到 30fps preset 的端到端回归。
+
+### BUG-0022: 60fps 录制结束时报视频/音频时长偏差过大 ✅ 已修复-待人工验证
+
+**现象**：选择 60fps 录制，同时录制系统音频和麦克风，点击结束录制后 finalize 失败：
+
+`录制视频/音频时长偏差过大：视频 53800ms，音频 28288ms，偏差 25512ms`
+
+日志中 x264 输出 `frame I:7`、`frame P:1608`，合计 1615 帧。
+
+**根因**：全屏 ScreenCaptureKit 采集已使用 UI 传入的 `config.fps=60`，但 `FfmpegRecordingWriter` 内部 H.264 encoder time base、视频 PTS 计算、packet timestamp rescale 和尾部 audio padding 仍硬编码 30fps。1615 帧按 30fps 正好约为 53.8 秒，按 60fps 约为 26.9 秒，和实际音频 28.3 秒接近，因此 artifact 校验把视频时长误判为音频的近两倍。
+
+**修复**：
+
+1. `FfmpegRecordingWriter::new()` 保持默认 30fps，新增 `FfmpegRecordingWriter::with_fps(output_path, video_fps)` 显式传入视频 fps。
+2. FFmpeg worker 的视频 encoder time base、video stream time base、PTS 计算、packet rescale、尾部 padding frame duration 统一使用传入的 `video_fps`。
+3. macOS 全屏录制创建 FFmpeg writer 时传入 `config.fps`，让 UI 选择的 60fps 进入最终写入器。
+4. 新增 60fps 回归测试，生成 3 秒 60fps 视频 + 3 秒音频，断言最终 artifact 视频/音频时长漂移小于 500ms。
+5. Code Review 后补强：Tauri `set_capture_mode` payload 边界只接受 30/60fps，拒绝 120fps 等非支持值，避免任意 fps 进入 writer。
+6. Code Review 后补强：新增 fullscreen writer settings 生产链路测试，证明 `CaptureConfig.fps` 会进入 FFmpeg writer 创建参数。
+
+**预防规则**：
+
+52. 捕获 fps 不能只配置在 ScreenCaptureKit；凡是写入器、metadata、cursor runtime、artifact 校验依赖视频时间基准，都必须显式传递并测试非 30fps 场景。
+53. 录制 writer 中禁止新增裸 `30` 作为视频 PTS/time base/padding 依据；默认 30fps 可以保留在兼容构造器，但真实录制路径必须传入 capture config fps。
+54. 修复 A/V 时长偏差时必须用帧数反推 fps/time base，区分“真实音频丢失”和“视频时间基准错误”，避免错误地放宽 artifact 校验。
+55. 捕获配置 payload 的 fps 必须在后端命令边界做 allowlist 校验；前端控件限制不能作为唯一防线。
+56. 配置参数进入生产 writer 的链路必须有测试覆盖，不能只测试 writer 的直接 API。
+
+### BUG-0021: 有线耳机麦克风开启降噪后仍有轻微电流声 ✅ 已修复-待人工验证
+
+**现象**：开启麦克风录制，并使用有线耳机麦克风时，录制结果仍有轻微电流声。此前已开启“降噪（去除电流声）”，但残留噪声明显还没有完全压下去。
+
+**根因**：现有降噪链路只有 80Hz 二阶高通滤波器。它能去除 DC、低频轰鸣和部分 50/60Hz 工频基频，但对 100/120Hz、150/180Hz 等低阶谐波与稳定窄带尖峰抑制不足，因此有线耳机麦克风的残余电流声仍可能被录入。
+
+**修复**：
+
+1. 新增二阶窄带 `NotchFilter`，用于压制稳定工频尖峰。
+2. 新增 `MicrophoneDenoiseChain`，串联 80Hz 高通与 50/60/100/120/150/180Hz 窄带陷波器。
+3. `SimpleAudioMixer` 的 `DenoiseMode::Highpass` 保持外部配置不变，但内部从单一高通升级为每通道麦克风降噪链路。
+4. 降噪链路仍只作用于麦克风输入，系统音频保持原样。
+5. 新增合成音频测试覆盖：工频谐波相比单一高通继续衰减，多个非 notch 人声代表频段保留。
+6. Code Review 后补强测试：工频谐波改为同时叠加的 composite 信号，并逐个目标频点验证衰减。
+7. Code Review 后修复 `SimpleAudioMixer` 麦克风通道数变化时的降噪链路重建，避免 mono/stereo 切换导致越界 panic。
+
+**预防规则**：
+
+46. “去除电流声”不能只验证 DC 或单个低频点；必须覆盖 50/60Hz 基频及低阶谐波的合成测试。
+47. 麦克风降噪链路必须有保真人声频段的测试，避免为了压噪把 1kHz 等主要清晰度频段明显削弱。
+48. 降噪开关的处理范围必须保持 source-aware：只处理麦克风，不能改变系统音频。
+49. 音频 DSP 优化优先使用本地轻量滤波器和现有配置入口；不得为窄场景擅自新增核心依赖或复杂 UI 模式。
+50. 工频谐波测试必须使用同时叠加的 composite 信号，并逐个目标频点断言衰减，避免 aggregate RMS 掩盖单个 notch 失效。
+51. 持有跨 chunk DSP 状态的 mixer 必须覆盖输入通道数变化，合法音频 chunk 不得因状态数量过期而 panic。
+
 ### BUG-0020: 退出/Cmd+Q 停止双音频窗口录制时报近乎静音 ✅ 已修复-待人工验证
 
 **现象**：窗口录制同时开启系统音频和麦克风后，通过“退出”或 `Command + Q` 结束软件进程，录制收尾报错：

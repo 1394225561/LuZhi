@@ -57,6 +57,11 @@ pub struct FfmpegRecordingWriter {
 
 impl FfmpegRecordingWriter {
     pub fn new(output_path: PathBuf) -> AppResult<Self> {
+        Self::with_fps(output_path, 30)
+    }
+
+    pub fn with_fps(output_path: PathBuf, video_fps: u32) -> AppResult<Self> {
+        let video_fps = video_fps.max(1);
         // Ensure parent directory exists.
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AppError::RecordingWriteFailed {
@@ -69,7 +74,7 @@ impl FfmpegRecordingWriter {
         let worker_path = output_path.clone();
 
         let worker = thread::spawn(move || {
-            let result = encoder_worker(worker_path, rx);
+            let result = encoder_worker(worker_path, rx, video_fps);
             let _ = result_tx.send(result);
         });
 
@@ -535,6 +540,7 @@ fn compute_chunk_rms(samples: &[f32]) -> f32 {
 fn encoder_worker(
     output_path: PathBuf,
     rx: mpsc::Receiver<EncoderMessage>,
+    video_fps: u32,
 ) -> AppResult<RecordingResult> {
     use ff::codec;
     use ff::codec::encoder;
@@ -554,7 +560,6 @@ fn encoder_worker(
     })?;
 
     // --- Video encoder (H.264) ---
-    let video_fps = 30u32;
     let video_codec = encoder::find(ff::codec::Id::H264).ok_or(AppError::RecordingWriteFailed {
         reason: "未找到 H.264 编码器".to_string(),
     })?;
@@ -680,7 +685,8 @@ fn encoder_worker(
                 video_duration_nanos = timestamp_nanos;
 
                 // PTS from real timestamp in encoder time_base (1/fps).
-                let pts_in_enc_tb = (timestamp_nanos as i128 * 30 / 1_000_000_000i128) as i64;
+                let pts_in_enc_tb =
+                    (timestamp_nanos as i128 * video_fps as i128 / 1_000_000_000i128) as i64;
                 let pts = pts_in_enc_tb.max(last_video_pts + 1);
                 last_video_pts = pts;
 
@@ -727,7 +733,7 @@ fn encoder_worker(
                 let mut packet = ff::Packet::empty();
                 while video_encoder.receive_packet(&mut packet).is_ok() {
                     packet.set_stream(video_stream_index);
-                    packet.rescale_ts(Rational(1, 30), video_tb);
+                    packet.rescale_ts(Rational(1, video_fps as i32), video_tb);
                     packet.write_interleaved(&mut output).map_err(|e| {
                         AppError::RecordingWriteFailed {
                             reason: format!("写入视频数据包失败: {e}"),
@@ -793,7 +799,7 @@ fn encoder_worker(
         let mut packet = ff::Packet::empty();
         while video_encoder.receive_packet(&mut packet).is_ok() {
             packet.set_stream(video_stream_index);
-            packet.rescale_ts(Rational(1, 30), video_tb);
+            packet.rescale_ts(Rational(1, video_fps as i32), video_tb);
             packet.write_interleaved(&mut output).ok();
         }
         audio_encoder.send_eof().ok();
@@ -823,7 +829,7 @@ fn encoder_worker(
     // Use "last video frame timestamp + one frame duration" for the video end
     // to avoid A/V drift from the last frame's timestamp being slightly early.
     if mixed_audio_chunk_count > 0 && video_duration_nanos > 0 {
-        let one_frame_nanos = 1_000_000_000u64 / 30; // ~33ms at 30fps
+        let one_frame_nanos = 1_000_000_000u64 / video_fps as u64;
         let video_end_nanos = video_duration_nanos + one_frame_nanos;
         let video_end_sample = (video_end_nanos as i128 * 48000 / 1_000_000_000i128) as i64;
         if audio_timeline_cursor < video_end_sample {
@@ -939,7 +945,7 @@ fn encoder_worker(
     let mut packet = ff::Packet::empty();
     while video_encoder.receive_packet(&mut packet).is_ok() {
         packet.set_stream(video_stream_index);
-        packet.rescale_ts(Rational(1, 30), video_tb);
+        packet.rescale_ts(Rational(1, video_fps as i32), video_tb);
         packet
             .write_interleaved(&mut output)
             .map_err(|e| AppError::RecordingWriteFailed {
@@ -1542,6 +1548,53 @@ mod tests {
             audio_secs < 15.0,
             "audio duration inflated: {:.1}s (expected ~10s from tail padding)",
             audio_secs
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ffmpeg_writer_preserves_av_duration_at_60fps() {
+        let path = crate::test_support::ffmpeg_helpers::unique_media_path("writer-60fps", "mp4");
+        let mut writer = FfmpegRecordingWriter::with_fps(path.clone(), 60).unwrap();
+
+        let fps = 60u64;
+        let frame_duration = 1_000_000_000 / fps;
+        for i in 0..(3 * fps) {
+            writer
+                .push_video(test_video_frame_at(i * frame_duration))
+                .unwrap();
+            if i % 5 == 0 && i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+
+        let chunk_duration = 20_000_000u64;
+        let chunks_count = 3_000_000_000u64 / chunk_duration;
+        for i in 0..chunks_count {
+            writer
+                .push_audio(test_audio_chunk_at(i * chunk_duration))
+                .unwrap();
+            if i % 10 == 0 && i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        let result = writer.finish().unwrap();
+        assert!(result.output_path.is_some());
+
+        let inspection =
+            crate::test_support::ffmpeg_helpers::inspect_media_artifact(&path).unwrap();
+        assert!(inspection.has_video_stream);
+        assert!(inspection.has_audio_stream);
+
+        let drift =
+            (inspection.video_duration_nanos as i64 - inspection.audio_duration_nanos as i64).abs();
+        assert!(
+            drift < 500_000_000,
+            "60fps A/V drift too large: {}ms (video={}ms, audio={}ms)",
+            drift / 1_000_000,
+            inspection.video_duration_nanos / 1_000_000,
+            inspection.audio_duration_nanos / 1_000_000
         );
         let _ = std::fs::remove_file(&path);
     }

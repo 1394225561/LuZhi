@@ -273,10 +273,14 @@ impl MacRecordingService {
         // original recording artifact. Falls back to counting writer otherwise.
         #[cfg(feature = "ffmpeg")]
         let writer: Box<dyn RecordingWriter> = {
+            let writer_settings = recording_writer_settings_for_capture(config);
             let output_path = crate::media::export_paths::original_recording_path();
-            Box::new(crate::media::ffmpeg_writer::FfmpegRecordingWriter::new(
-                output_path,
-            )?)
+            Box::new(
+                crate::media::ffmpeg_writer::FfmpegRecordingWriter::with_fps(
+                    output_path,
+                    writer_settings.video_fps,
+                )?,
+            )
         };
         #[cfg(not(feature = "ffmpeg"))]
         let writer: Box<dyn RecordingWriter> = Box::new(CountingRecordingWriter::new(None));
@@ -451,6 +455,19 @@ impl MacRecordingService {
         }));
 
         Ok(())
+    }
+}
+
+#[cfg(any(feature = "ffmpeg", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RecordingWriterSettings {
+    video_fps: u32,
+}
+
+#[cfg(any(feature = "ffmpeg", test))]
+fn recording_writer_settings_for_capture(config: CaptureConfig) -> RecordingWriterSettings {
+    RecordingWriterSettings {
+        video_fps: config.fps,
     }
 }
 
@@ -2620,6 +2637,22 @@ mod tests {
         assert!(empty.errors.is_empty());
         assert!(!empty.diagnostics.requested_system_audio);
         assert!(empty.diagnostics.mic_stop_diagnostics.is_none());
+    }
+
+    #[test]
+    fn fullscreen_writer_settings_uses_capture_fps() {
+        let config = CaptureConfig {
+            mode: crate::core::config::CaptureMode::FullScreen,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            show_system_cursor: true,
+            window_id: None,
+        };
+
+        let settings = recording_writer_settings_for_capture(config);
+
+        assert_eq!(settings.video_fps, 60);
     }
 
     /// Verifies that recv_timeout on a never-send channel returns Timeout

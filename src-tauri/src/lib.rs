@@ -541,14 +541,14 @@ fn build_capture_config_update(
     mode: CaptureMode,
     width: Option<u32>,
     height: Option<u32>,
-    fps: Option<u32>,
+    fps: u32,
     show_system_cursor: bool,
 ) -> CaptureConfig {
     CaptureConfig {
         mode,
         width: width.unwrap_or(1920),
         height: height.unwrap_or(1080),
-        fps: fps.unwrap_or(30),
+        fps,
         show_system_cursor,
         window_id: if mode == CaptureMode::Window {
             previous.window_id
@@ -558,18 +558,27 @@ fn build_capture_config_update(
     }
 }
 
+fn validated_capture_fps(fps: Option<u32>) -> Result<u32, String> {
+    let fps = fps.unwrap_or(30);
+    match fps {
+        30 | 60 => Ok(fps),
+        other => Err(format!("不支持的 fps: {other}，仅支持 30 或 60")),
+    }
+}
+
 fn apply_capture_config_payload(
     previous: CaptureConfig,
     payload: SetCaptureModePayload,
     show_system_cursor: bool,
 ) -> Result<CaptureConfig, String> {
     let mode = CaptureMode::mode_from_str(&payload.mode)?;
+    let fps = validated_capture_fps(payload.fps)?;
     let mut config = build_capture_config_update(
         previous,
         mode,
         payload.width,
         payload.height,
-        payload.fps,
+        fps,
         show_system_cursor,
     );
     if mode == CaptureMode::Window && payload.window_id.is_some() {
@@ -1824,11 +1833,28 @@ mod tests {
             CaptureMode::Window,
             Some(1280),
             Some(720),
-            Some(60),
+            60,
             false,
         );
 
         assert_eq!(next.window_id, Some(42));
+    }
+
+    #[test]
+    fn capture_mode_update_rejects_unsupported_fps() {
+        let previous = CaptureConfig::full_screen_1080p_30fps();
+        let payload = SetCaptureModePayload {
+            mode: "fullscreen".to_string(),
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(120),
+            window_id: None,
+        };
+
+        let result = apply_capture_config_payload(previous, payload, true);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("fps"));
     }
 
     #[test]

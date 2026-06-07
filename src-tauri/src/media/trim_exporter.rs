@@ -502,7 +502,7 @@ impl TrimExporter for FfmpegTrimExporter {
         let mut cumulative_cut_nanos: i64 = 0;
         let mut prev_seg_end_nanos: i64 = 0;
         // Track output PTS in encoder time_base units for monotonic continuity.
-        let mut last_video_out_pts: i64 = 0;
+        let mut last_video_out_pts: i64 = -1;
         // Audio output PTS advances by sample count — never derived from
         // resampled frame PTS, which may be stale after resampler flush.
         let mut next_audio_out_pts: i64 = 0;
@@ -715,8 +715,15 @@ impl TrimExporter for FfmpegTrimExporter {
                                         as i64
                                 };
 
-                                // Ensure monotonic PTS.
-                                let out_pts = out_pts.max(last_video_out_pts);
+                                // Export presets currently target 30fps. A 60fps
+                                // source can map two decoded frames to the same
+                                // output PTS tick; encoding both would make x264
+                                // produce duplicate DTS/PTS and the MP4 muxer
+                                // rejects the packet. Drop duplicate-tick frames
+                                // so the output follows the preset fps.
+                                if out_pts <= last_video_out_pts {
+                                    continue;
+                                }
                                 last_video_out_pts = out_pts;
 
                                 // Apply scale policy (CenterCrop or FitWithBars).
@@ -1415,6 +1422,46 @@ mod tests {
             path
         }
 
+        fn create_60fps_source(prefix: &str, duration_nanos: u64) -> PathBuf {
+            use crate::media::recording_writer::RecordingWriter;
+            use crate::test_support::ffmpeg_helpers::{test_audio_chunk_at, test_video_frame_at};
+
+            let path = ffmpeg_helpers::unique_media_path(prefix, "mp4");
+            let mut writer =
+                crate::media::ffmpeg_writer::FfmpegRecordingWriter::with_fps(path.clone(), 60)
+                    .unwrap();
+
+            let fps = 60u64;
+            let frame_duration = 1_000_000_000 / fps;
+            let frame_count = (duration_nanos / frame_duration).max(1);
+            for i in 0..frame_count {
+                writer
+                    .push_video(test_video_frame_at(i * frame_duration))
+                    .unwrap();
+                if i % 5 == 0 && i > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+
+            let audio_interval = 20_000_000u64;
+            let audio_count = (duration_nanos / audio_interval).max(1);
+            for i in 0..audio_count {
+                writer
+                    .push_audio(test_audio_chunk_at(i * audio_interval))
+                    .unwrap();
+                if i % 10 == 0 && i > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+
+            let result = writer.finish().unwrap();
+            assert_eq!(
+                result.output_path.as_deref(),
+                Some(path.to_string_lossy().as_ref())
+            );
+            path
+        }
+
         #[test]
         fn ffmpeg_exporter_reproduces_source_when_no_cuts() {
             let source = create_source("export-no-cut", 500_000_000);
@@ -1442,6 +1489,40 @@ mod tests {
             let inspection = ffmpeg_helpers::inspect_media_artifact(&output).unwrap();
             assert!(inspection.has_video_stream);
             assert!(inspection.has_audio_stream);
+
+            let _ = std::fs::remove_file(&source);
+            let _ = std::fs::remove_file(&output);
+        }
+
+        #[test]
+        fn ffmpeg_exporter_exports_60fps_source_to_30fps_preset_without_duplicate_pts() {
+            let duration_nanos = 1_000_000_000;
+            let source = create_60fps_source("export-60fps-source", duration_nanos);
+            let output = ffmpeg_helpers::unique_media_path("export-60fps-source-out", "mp4");
+
+            let mut exporter = FfmpegTrimExporter;
+            let result = exporter
+                .export(TrimExportRequest {
+                    input_path: source.clone(),
+                    output_path: output.clone(),
+                    preset: ExportPreset::Bilibili,
+                    cut_timeline: CutTimeline::empty(duration_nanos),
+                    effect_timeline_path: None,
+                    cursor_assets_dir: None,
+                    cancel_token: Arc::new(AtomicBool::new(false)),
+                    progress: None,
+                })
+                .unwrap();
+
+            assert_eq!(result.output_path, output);
+            let inspection = ffmpeg_helpers::inspect_media_artifact(&output).unwrap();
+            assert!(inspection.has_video_stream);
+            assert!(inspection.has_audio_stream);
+            assert!(
+                inspection.video_duration_nanos <= 1_500_000_000,
+                "60fps source exported to 30fps preset should not inflate duration, got {}ms",
+                inspection.video_duration_nanos / 1_000_000
+            );
 
             let _ = std::fs::remove_file(&source);
             let _ = std::fs::remove_file(&output);

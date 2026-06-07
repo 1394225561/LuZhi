@@ -77,9 +77,187 @@ impl HighpassFilter {
     }
 }
 
+/// 二阶窄带陷波滤波器（notch biquad）。
+///
+/// 用于压制麦克风中稳定的工频尖峰及低阶谐波。`q` 越高，压制频带越窄，
+/// 对相邻人声频段影响越小。
+#[derive(Clone)]
+pub struct NotchFilter {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    z1: f64,
+    z2: f64,
+}
+
+impl NotchFilter {
+    /// 创建陷波滤波器。
+    ///
+    /// # 参数
+    /// - `frequency_hz`: 需要压制的中心频率（Hz）。
+    /// - `sample_rate`: 采样率（Hz）。
+    /// - `q`: 品质因数，建议 30-40 之间以保持窄带处理。
+    pub fn new(frequency_hz: f64, sample_rate: f64, q: f64) -> Self {
+        assert!(frequency_hz > 0.0, "中心频率必须大于 0");
+        assert!(sample_rate > 0.0, "采样率必须大于 0");
+        assert!(q > 0.0, "Q 值必须大于 0");
+        assert!(
+            frequency_hz < sample_rate / 2.0,
+            "中心频率必须小于奈奎斯特频率"
+        );
+
+        let omega = 2.0 * PI * frequency_hz / sample_rate;
+        let alpha = omega.sin() / (2.0 * q);
+        let cos_omega = omega.cos();
+
+        let b0 = 1.0;
+        let b1 = -2.0 * cos_omega;
+        let b2 = 1.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    /// 处理单个样本。
+    pub fn process(&mut self, input: f32) -> f32 {
+        let x = input as f64;
+        let y = self.b0 * x + self.z1;
+        self.z1 = self.b1 * x - self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        y as f32
+    }
+
+    /// 重置滤波器状态。
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+    }
+}
+
+/// 麦克风降噪链路。
+///
+/// 先用高通去除 DC/低频轰鸣，再用窄带陷波器压制 50/60Hz 及低阶谐波。
+/// 该链路只用于麦克风输入，系统音频保持原样。
+#[derive(Clone)]
+pub struct MicrophoneDenoiseChain {
+    highpass: HighpassFilter,
+    notches: Vec<NotchFilter>,
+}
+
+impl MicrophoneDenoiseChain {
+    /// 创建麦克风降噪链路。
+    ///
+    /// # 参数
+    /// - `sample_rate`: 采样率（Hz），项目混音输出通常为 48000。
+    pub fn new(sample_rate: f64) -> Self {
+        const NOTCH_Q: f64 = 35.0;
+        const NOTCH_FREQUENCIES_HZ: [f64; 6] = [50.0, 60.0, 100.0, 120.0, 150.0, 180.0];
+
+        Self {
+            highpass: HighpassFilter::new(80.0, sample_rate),
+            notches: NOTCH_FREQUENCIES_HZ
+                .into_iter()
+                .filter(|freq| *freq < sample_rate / 2.0)
+                .map(|freq| NotchFilter::new(freq, sample_rate, NOTCH_Q))
+                .collect(),
+        }
+    }
+
+    /// 处理单个麦克风样本。
+    pub fn process(&mut self, input: f32) -> f32 {
+        let mut output = self.highpass.process(input);
+        for notch in &mut self.notches {
+            output = notch.process(output);
+        }
+        output
+    }
+
+    /// 重置滤波器状态。
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.highpass.reset();
+        for notch in &mut self.notches {
+            notch.reset();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SAMPLE_RATE: f64 = 48_000.0;
+
+    fn rms(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum_squares: f32 = samples.iter().map(|s| s * s).sum();
+        (sum_squares / samples.len() as f32).sqrt()
+    }
+
+    fn sine(freq_hz: f64, seconds: f64, amplitude: f32) -> Vec<f32> {
+        let sample_count = (SAMPLE_RATE * seconds) as usize;
+        (0..sample_count)
+            .map(|i| {
+                let t = i as f64 / SAMPLE_RATE;
+                (2.0 * PI * freq_hz * t).sin() as f32 * amplitude
+            })
+            .collect()
+    }
+
+    fn composite_sine(freqs_hz: &[f64], seconds: f64, amplitude_per_tone: f32) -> Vec<f32> {
+        let sample_count = (SAMPLE_RATE * seconds) as usize;
+        (0..sample_count)
+            .map(|i| {
+                let t = i as f64 / SAMPLE_RATE;
+                freqs_hz
+                    .iter()
+                    .map(|freq| (2.0 * PI * freq * t).sin() as f32 * amplitude_per_tone)
+                    .sum()
+            })
+            .collect()
+    }
+
+    fn steady_rms_after_warmup(samples: &[f32]) -> f32 {
+        let warmup = (SAMPLE_RATE as usize) / 5;
+        rms(&samples[warmup.min(samples.len())..])
+    }
+
+    fn tone_magnitude_after_warmup(samples: &[f32], freq_hz: f64) -> f32 {
+        let warmup = (SAMPLE_RATE as usize) / 5;
+        let samples = &samples[warmup.min(samples.len())..];
+        if samples.is_empty() {
+            return 0.0;
+        }
+
+        let (sin_sum, cos_sum) =
+            samples
+                .iter()
+                .enumerate()
+                .fold((0.0f64, 0.0f64), |(sin_sum, cos_sum), (i, sample)| {
+                    let phase = 2.0 * PI * freq_hz * i as f64 / SAMPLE_RATE;
+                    (
+                        sin_sum + *sample as f64 * phase.sin(),
+                        cos_sum + *sample as f64 * phase.cos(),
+                    )
+                });
+
+        (2.0 * (sin_sum.hypot(cos_sum)) / samples.len() as f64) as f32
+    }
 
     #[test]
     fn highpass_filter_removes_dc_offset() {
@@ -174,6 +352,69 @@ mod tests {
             "60Hz should be attenuated, got max {}",
             max_output
         );
+    }
+
+    #[test]
+    fn notch_filter_attenuates_center_frequency() {
+        let input = sine(120.0, 1.0, 0.5);
+        let input_rms = steady_rms_after_warmup(&input);
+
+        let mut filter = NotchFilter::new(120.0, SAMPLE_RATE, 35.0);
+        let output: Vec<f32> = input.iter().map(|sample| filter.process(*sample)).collect();
+        let output_rms = steady_rms_after_warmup(&output);
+
+        assert!(
+            output_rms < input_rms * 0.2,
+            "notch should attenuate center frequency: input={input_rms}, output={output_rms}"
+        );
+    }
+
+    #[test]
+    fn denoise_chain_reduces_powerline_harmonics_beyond_highpass() {
+        const POWERLINE_HARMONICS_HZ: [f64; 6] = [50.0, 60.0, 100.0, 120.0, 150.0, 180.0];
+        let input = composite_sine(&POWERLINE_HARMONICS_HZ, 1.0, 0.08);
+
+        let mut filters = [HighpassFilter::new(80.0, SAMPLE_RATE)];
+        let highpass_only: Vec<f32> = input
+            .iter()
+            .map(|sample| filters[0].process(*sample))
+            .collect();
+        let highpass_rms = steady_rms_after_warmup(&highpass_only);
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+        let denoised_rms = steady_rms_after_warmup(&denoised);
+
+        assert!(
+            denoised_rms < highpass_rms * 0.45,
+            "denoise chain should reduce residual powerline harmonics: highpass={highpass_rms}, denoised={denoised_rms}"
+        );
+
+        for freq in POWERLINE_HARMONICS_HZ {
+            let highpass_tone = tone_magnitude_after_warmup(&highpass_only, freq);
+            let denoised_tone = tone_magnitude_after_warmup(&denoised, freq);
+            assert!(
+                denoised_tone < highpass_tone * 0.35,
+                "{freq}Hz tone should be attenuated beyond highpass: highpass={highpass_tone}, denoised={denoised_tone}"
+            );
+        }
+    }
+
+    #[test]
+    fn denoise_chain_preserves_voice_band_signal() {
+        for freq in [250.0, 300.0, 500.0, 1000.0, 2000.0] {
+            let input = sine(freq, 1.0, 0.5);
+            let input_rms = steady_rms_after_warmup(&input);
+
+            let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+            let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+            let denoised_rms = steady_rms_after_warmup(&denoised);
+
+            assert!(
+                denoised_rms > input_rms * 0.9,
+                "{freq}Hz voice-band signal should be preserved: input={input_rms}, denoised={denoised_rms}"
+            );
+        }
     }
 
     #[test]
