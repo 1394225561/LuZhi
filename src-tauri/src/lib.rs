@@ -245,14 +245,7 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
             .map_err(|_| "录制服务锁已损坏".to_string())?;
         if let Some(receiver) = service_guard.take_window_state_receiver() {
             let window_app = app.clone();
-            let window_title = {
-                let config = state
-                    .capture_config
-                    .lock()
-                    .map_err(|_| "捕获配置锁已损坏".to_string())?;
-                // 获取窗口标题（从配置中无法获取，需要重新查询）
-                "录制窗口".to_string()
-            };
+            let window_title = "录制窗口".to_string();
 
             // Spawn a thread to listen for window state changes.
             std::thread::spawn(move || {
