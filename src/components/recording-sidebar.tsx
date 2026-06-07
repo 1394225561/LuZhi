@@ -99,9 +99,9 @@ export function RecordingSidebar({
       <button
         onClick={onToggle}
         className={cn(
-          'fixed top-1/2 -translate-y-1/2 z-40 bg-card/95 border border-border/60 rounded-l-lg p-2 shadow-lg shadow-black/20',
-          'hover:bg-surface-hover hover:border-border transition-all duration-200',
-          isOpen ? 'right-[360px]' : 'right-0',
+          'fixed top-1/2 -translate-y-1/2 z-40 rounded-lg bg-surface/95 p-2 text-muted-foreground outline-none',
+          'hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 transition-all duration-200',
+          isOpen ? 'right-[360px]' : 'right-[max(12px,calc(50%_-_208px))]',
         )}
         title="历史录制"
       >
@@ -111,9 +111,11 @@ export function RecordingSidebar({
       {/* Sidebar panel */}
       <div
         className={cn(
-          'fixed right-0 top-0 h-full bg-card/98 border-l border-border/60 shadow-2xl shadow-black/30',
+          'fixed right-0 top-0 h-full bg-card/98',
           'transition-all duration-300 ease-in-out z-30 flex flex-col',
-          isOpen ? 'w-[360px]' : 'w-0 overflow-hidden',
+          isOpen
+            ? 'w-[360px] shadow-2xl shadow-black/30'
+            : 'w-0 overflow-hidden border-l-0 shadow-none pointer-events-none',
         )}
       >
         {/* Header */}
