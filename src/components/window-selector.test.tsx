@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { WindowSelector } from './window-selector'
 import { listWindows, type WindowInfo } from '@/lib/tauri'
 
@@ -91,11 +91,11 @@ describe('WindowSelector', () => {
     // Find the Terminal button (which is minimized)
     const buttons = screen.getAllByRole('button')
     const terminalButton = buttons.find(btn => {
-      return btn.textContent?.includes('Terminal') && btn.disabled
+      return btn.textContent?.includes('Terminal') && (btn as HTMLButtonElement).disabled
     })
 
     // Terminal should be disabled because it's minimized (isOnScreen: false)
     expect(terminalButton).toBeDefined()
-    expect(terminalButton!.disabled).toBe(true)
+    expect((terminalButton as HTMLButtonElement).disabled).toBe(true)
   })
 })
