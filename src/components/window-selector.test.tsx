@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { WindowSelector } from './window-selector'
 import { listWindows, type WindowInfo } from '@/lib/tauri'
 
@@ -65,5 +65,37 @@ describe('WindowSelector', () => {
 
     // Loading spinner should be visible
     expect(document.querySelector('.animate-spin')).toBeInTheDocument()
+  })
+
+  it('disables minimized windows', async () => {
+    render(<WindowSelector isOpen={true} onSelect={vi.fn()} onClose={vi.fn()} />)
+
+    await waitFor(() => {
+      // Terminal is minimized (isOnScreen: false), so its button should be disabled
+      const terminalButtons = screen.getAllByText('Terminal')
+      // Find the button element (the card container)
+      const terminalCard = terminalButtons[0].closest('button')
+      expect(terminalCard).toBeDisabled()
+    })
+  })
+
+  it('disables minimized windows', async () => {
+    render(<WindowSelector isOpen={true} onSelect={vi.fn()} onClose={vi.fn()} />)
+
+    // Wait for windows to load
+    await waitFor(() => {
+      const appNames = screen.getAllByText('Terminal')
+      expect(appNames.length).toBeGreaterThan(0)
+    })
+
+    // Find the Terminal button (which is minimized)
+    const buttons = screen.getAllByRole('button')
+    const terminalButton = buttons.find(btn => {
+      return btn.textContent?.includes('Terminal') && btn.disabled
+    })
+
+    // Terminal should be disabled because it's minimized (isOnScreen: false)
+    expect(terminalButton).toBeDefined()
+    expect(terminalButton!.disabled).toBe(true)
   })
 })
