@@ -840,6 +840,160 @@ impl MacScreenCapture {
         Ok(())
     }
 
+    /// Creates and starts an SCStream for window capture.
+    #[allow(unused_unsafe)]
+    pub fn start_window_stream(
+        &mut self,
+        window_id: u32,
+        capture_system_audio: bool,
+        video_sink: VideoFrameSink,
+        audio_sink: AudioChunkSink,
+        session_clock: Arc<crate::core::clock::SessionClock>,
+    ) -> AppResult<()> {
+        // Conservative policy: if a previous stop timed out, refuse to start.
+        if self.needs_reset {
+            return Err(AppError::NativeCaptureUnavailable {
+                reason: "上次停止录制超时，请重启应用后再试",
+            });
+        }
+
+        // Get SCShareableContent
+        let content = Self::get_shareable_content_sync()?;
+        let windows = unsafe { content.windows() };
+
+        // Find target window
+        let target_window = (0..windows.count())
+            .map(|i| unsafe { windows.objectAtIndex(i) })
+            .find(|w| unsafe { w.windowID() } == window_id)
+            .ok_or(AppError::WindowNotFound { window_id })?;
+
+        // Verify window is on screen
+        if !unsafe { target_window.isOnScreen() } {
+            return Err(AppError::WindowMinimized { window_id });
+        }
+
+        // Read window geometry
+        let frame = unsafe { target_window.frame() };
+        let stream_width = frame.size.width as u32;
+        let stream_height = frame.size.height as u32;
+
+        let capture_geometry = CaptureGeometry {
+            display_id: 0, // Window mode doesn't need display_id
+            content_origin_x: frame.origin.x as f32,
+            content_origin_y: frame.origin.y as f32,
+            content_width: frame.size.width as f32,
+            content_height: frame.size.height as f32,
+            point_pixel_scale: 1.0,
+            stream_width,
+            stream_height,
+        };
+        self.last_capture_geometry = Some(capture_geometry);
+
+        // Create content filter: capture only the target window
+        let filter = unsafe {
+            SCContentFilter::initWithDesktopIndependentWindow(
+                SCContentFilter::alloc(),
+                &target_window,
+            )
+        };
+
+        // Configure stream
+        let stream_config = unsafe { SCStreamConfiguration::new() };
+        unsafe {
+            stream_config.setWidth(stream_width as usize);
+            stream_config.setHeight(stream_height as usize);
+            stream_config.setCapturesAudio(capture_system_audio);
+            stream_config.setSampleRate(48000);
+            stream_config.setChannelCount(2);
+            stream_config.setShowsCursor(true); // Always show cursor in window mode
+            stream_config.setQueueDepth(8);
+            stream_config.setPixelFormat(0x42475241); // BGRA
+
+            let frame_interval = objc2_core_media::CMTime {
+                value: 1,
+                timescale: 30, // Default 30fps for window capture
+                flags: objc2_core_media::CMTimeFlags(1),
+                epoch: 0,
+            };
+            stream_config.setMinimumFrameInterval(frame_interval);
+        }
+
+        // Create stream delegate
+        let delegate = StreamOutput::new(video_sink, audio_sink, session_clock);
+
+        // Create SCStream
+        let stream = unsafe {
+            SCStream::initWithFilter_configuration_delegate(
+                SCStream::alloc(),
+                &filter,
+                &stream_config,
+                Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)),
+            )
+        };
+
+        // Add video output
+        unsafe {
+            if let Err(e) = stream.addStreamOutput_type_sampleHandlerQueue_error(
+                objc2::runtime::ProtocolObject::from_ref(&*delegate),
+                SCStreamOutputType::Screen,
+                None,
+            ) {
+                return Err(AppError::CaptureFailed {
+                    reason: format!("添加视频输出失败: {}", e),
+                });
+            }
+        }
+
+        // Add audio output (if enabled)
+        if capture_system_audio {
+            unsafe {
+                if let Err(e) = stream.addStreamOutput_type_sampleHandlerQueue_error(
+                    objc2::runtime::ProtocolObject::from_ref(&*delegate),
+                    SCStreamOutputType::Audio,
+                    None,
+                ) {
+                    return Err(AppError::CaptureFailed {
+                        reason: format!("添加音频输出失败: {}", e),
+                    });
+                }
+            }
+        }
+
+        // Start capture and wait for completion
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        unsafe {
+            stream.startCaptureWithCompletionHandler(Some(&block2::RcBlock::new(
+                move |error: *mut NSError| {
+                    let result = if error.is_null() {
+                        Ok(())
+                    } else {
+                        let error_ref = unsafe { &*error };
+                        Err(AppError::CaptureFailed {
+                            reason: format!("启动捕获失败: {}", error_ref),
+                        })
+                    };
+                    let _ = tx.send(result);
+                },
+            )));
+        }
+
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(AppError::CaptureFailed {
+                    reason: "启动捕获超时".to_string(),
+                });
+            }
+        }
+
+        self.stream = Some(SendSCStream(stream));
+        self.delegate = Some(delegate);
+        self.running = true;
+
+        Ok(())
+    }
+
     /// Synchronously fetches SCShareableContent.
     fn get_shareable_content_sync() -> AppResult<Retained<SCShareableContent>> {
         let (tx, rx) = std::sync::mpsc::channel();
