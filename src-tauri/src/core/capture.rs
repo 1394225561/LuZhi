@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use crate::app::error::AppResult;
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::MediaSender;
+use crate::core::window::{WindowInfo, WindowRecordingState};
 
 /// 音频降噪模式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -110,4 +113,29 @@ pub trait AudioCapture: Send {
 
     /// Returns the audio features supported by this adapter.
     fn capabilities(&self) -> AudioCapabilities;
+}
+
+/// 平台无关的窗口捕获接口
+pub trait WindowCapture: Send {
+    /// 获取当前可见窗口列表
+    fn list_windows(&self) -> AppResult<Vec<WindowInfo>>;
+
+    /// 获取窗口缩略图（Base64 PNG）
+    fn get_thumbnail(&self, window_id: u32) -> AppResult<Option<String>>;
+
+    /// 启动窗口捕获流
+    fn start_window_stream(
+        &mut self,
+        window_id: u32,
+        capture_system_audio: bool,
+        video_sink: VideoFrameSink,
+        audio_sink: AudioChunkSink,
+        session_clock: Arc<crate::core::clock::SessionClock>,
+    ) -> AppResult<()>;
+
+    /// 停止窗口捕获流
+    fn stop_window_stream(&mut self) -> AppResult<()>;
+
+    /// 检查窗口当前状态
+    fn window_state(&self, window_id: u32) -> AppResult<WindowRecordingState>;
 }
