@@ -413,9 +413,10 @@ export default function App() {
   // Idle state
   if (appState === 'idle') {
     return (
-      <div className="min-h-screen flex" data-luzhi-drag-region="surface">
+      <>
         <Toaster position="top-right" />
-        {/* Main content area */}
+        <div className="min-h-screen flex" data-luzhi-drag-region="surface">
+          {/* Main content area */}
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="relative">
             <RecordingPanel
@@ -469,19 +470,21 @@ export default function App() {
           </div>
         </div>
       </div>
+      </>
     )
   }
 
   // Recording state
   if (appState === 'recording') {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-between p-8" data-luzhi-drag-region="surface">
+      <>
         <Toaster position="top-right" />
-        <div className="pt-4">
-          <AnimatePresence>
-            <RecordingStatusBar
-              elapsedTime={elapsedTime}
-              isPaused={isPaused}
+        <div className="min-h-screen flex flex-col items-center justify-between p-8" data-luzhi-drag-region="surface">
+          <div className="pt-4">
+            <AnimatePresence>
+              <RecordingStatusBar
+                elapsedTime={elapsedTime}
+                isPaused={isPaused}
               onPause={handlePauseRecording}
               onStop={handleStopRecording}
               micEnabled={micEnabled}
@@ -499,25 +502,39 @@ export default function App() {
         </div>
         <div className="h-12" />
       </div>
+      </>
     )
   }
 
   // Processing state
   if (appState === 'processing') {
-    return <ProcessingView />
+    return (
+      <>
+        <Toaster position="top-right" />
+        <ProcessingView />
+      </>
+    )
   }
 
   // Failed state
   if (appState === 'failed') {
     return (
-      <ErrorView
-        message={errorMessage}
-        onRetry={handleRetry}
-        onBack={handleBackToIdle}
-      />
+      <>
+        <Toaster position="top-right" />
+        <ErrorView
+          message={errorMessage}
+          onRetry={handleRetry}
+          onBack={handleBackToIdle}
+        />
+      </>
     )
   }
 
   // Preview state
-  return <PreviewView onBack={handleBackToIdle} recordingResult={recordingResult} licenseStatus={licenseStatus} recordingId={selectedRecordingId} />
+  return (
+    <>
+      <Toaster position="top-right" />
+      <PreviewView onBack={handleBackToIdle} recordingResult={recordingResult} licenseStatus={licenseStatus} recordingId={selectedRecordingId} />
+    </>
+  )
 }
