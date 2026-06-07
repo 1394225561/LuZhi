@@ -996,7 +996,7 @@ impl MacScreenCapture {
     }
 
     /// Synchronously fetches SCShareableContent.
-    fn get_shareable_content_sync() -> AppResult<Retained<SCShareableContent>> {
+    pub fn get_shareable_content_sync() -> AppResult<Retained<SCShareableContent>> {
         let (tx, rx) = std::sync::mpsc::channel();
 
         unsafe {

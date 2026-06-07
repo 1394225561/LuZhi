@@ -1,15 +1,14 @@
-use std::sync::{Arc, Mutex};
-
-use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2_screen_capture_kit::{SCShareableContent, SCWindow};
+use objc2_screen_capture_kit::SCWindow;
 
 use crate::app::error::{AppError, AppResult};
 use crate::core::window::WindowInfo;
 
+use super::screen_capture_kit::MacScreenCapture;
+
 /// 获取当前可见窗口列表
 pub fn list_windows() -> AppResult<Vec<WindowInfo>> {
-    let content = get_shareable_content_sync()?;
+    let content = MacScreenCapture::get_shareable_content_sync()?;
     let windows = unsafe { content.windows() };
     let mut result = Vec::new();
 
@@ -37,48 +36,6 @@ pub fn list_windows() -> AppResult<Vec<WindowInfo>> {
 /// 后续可实现 SCScreenshotManager.captureImage。
 pub fn get_window_thumbnail(_window_id: u32) -> AppResult<Option<String>> {
     Ok(None)
-}
-
-/// 同步获取 SCShareableContent
-fn get_shareable_content_sync() -> AppResult<Retained<SCShareableContent>> {
-    let result: Arc<Mutex<Option<AppResult<Retained<SCShareableContent>>>>> =
-        Arc::new(Mutex::new(None));
-    let result_clone = result.clone();
-
-    let block = RcBlock::new(
-        move |content: *mut SCShareableContent, error: *mut objc2_foundation::NSError| {
-            let outcome = if error.is_null() && !content.is_null() {
-                Ok(unsafe { Retained::retain(content) }.unwrap())
-            } else {
-                Err(AppError::CaptureFailed {
-                    reason: "获取屏幕内容失败".to_string(),
-                })
-            };
-            *result_clone.lock().unwrap() = Some(outcome);
-        },
-    );
-
-    unsafe {
-        SCShareableContent::getShareableContentWithCompletionHandler(&block);
-    }
-
-    // 等待异步回调完成
-    let mut attempts = 0;
-    loop {
-        let guard = result.lock().unwrap();
-        if guard.is_some() {
-            return guard.as_ref().unwrap().clone();
-        }
-        drop(guard);
-
-        attempts += 1;
-        if attempts > 100 {
-            return Err(AppError::CaptureFailed {
-                reason: "获取屏幕内容超时".to_string(),
-            });
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// 判断窗口是否应该包含在列表中
