@@ -128,6 +128,7 @@ pub trait WindowCapture: Send {
         &mut self,
         window_id: u32,
         capture_system_audio: bool,
+        show_system_cursor: bool,
         video_sink: VideoFrameSink,
         audio_sink: AudioChunkSink,
         session_clock: Arc<crate::core::clock::SessionClock>,

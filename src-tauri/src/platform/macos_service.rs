@@ -310,6 +310,7 @@ impl MacRecordingService {
     pub fn start_window(
         &mut self,
         window_id: u32,
+        show_system_cursor: bool,
         audio_config: AudioConfig,
         beautify_snapshot: BeautifyConfigSnapshot,
         cursor_main_thread_dispatcher: Box<dyn CursorMainThreadDispatcher>,
@@ -342,6 +343,7 @@ impl MacRecordingService {
         if let Err(error) = self.screen_capture.start_window_stream(
             window_id,
             audio_config.capture_system_audio,
+            show_system_cursor,
             video_sender,
             audio_sender,
             session_clock.clone(),

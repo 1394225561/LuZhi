@@ -213,6 +213,7 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
                 service
                     .start_window(
                         window_id,
+                        config.show_system_cursor,
                         audio_config,
                         beautify_snapshot,
                         cursor_main_thread_dispatcher,

@@ -27,6 +27,7 @@ impl WindowCapture for WinWindowCapture {
         &mut self,
         _window_id: u32,
         _capture_system_audio: bool,
+        _show_system_cursor: bool,
         _video_sink: VideoFrameSink,
         _audio_sink: AudioChunkSink,
         _session_clock: Arc<crate::core::clock::SessionClock>,

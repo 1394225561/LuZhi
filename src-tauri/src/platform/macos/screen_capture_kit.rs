@@ -846,6 +846,7 @@ impl MacScreenCapture {
         &mut self,
         window_id: u32,
         capture_system_audio: bool,
+        show_system_cursor: bool,
         video_sink: VideoFrameSink,
         audio_sink: AudioChunkSink,
         session_clock: Arc<crate::core::clock::SessionClock>,
@@ -905,7 +906,7 @@ impl MacScreenCapture {
             stream_config.setCapturesAudio(capture_system_audio);
             stream_config.setSampleRate(48000);
             stream_config.setChannelCount(2);
-            stream_config.setShowsCursor(true); // Always show cursor in window mode
+            stream_config.setShowsCursor(show_system_cursor);
             stream_config.setQueueDepth(8);
             stream_config.setPixelFormat(0x42475241); // BGRA
 
