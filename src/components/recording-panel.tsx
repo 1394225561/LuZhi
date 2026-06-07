@@ -12,7 +12,8 @@ import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 import { motion } from 'framer-motion'
-import { listMicrophoneDevices, type MicrophoneDeviceInfo } from '@/lib/tauri'
+import { listMicrophoneDevices, setWindowId, type MicrophoneDeviceInfo, type WindowInfo } from '@/lib/tauri'
+import { WindowSelector } from './window-selector'
 
 interface ResolutionOption {
   width: number
@@ -66,6 +67,8 @@ export function RecordingPanel({
   setFps,
 }: RecordingPanelProps) {
   const [micDevices, setMicDevices] = useState<MicrophoneDeviceInfo[]>([])
+  const [selectedWindow, setSelectedWindow] = useState<WindowInfo | null>(null)
+  const [showWindowSelector, setShowWindowSelector] = useState(false)
 
   // Load microphone devices when mic is enabled.
   useEffect(() => {
@@ -80,6 +83,27 @@ export function RecordingPanel({
   const selectedDevice = micDevices.find((d) => d.name === micDevice)
   const isBluetoothMic = selectedDevice?.isBluetooth ?? false
   const hasBluetoothDevice = micDevices.some((d) => d.isBluetooth)
+
+  const handleModeChange = (mode: 'fullscreen' | 'window' | 'area') => {
+    setRecordingMode(mode)
+
+    if (mode === 'window') {
+      setShowWindowSelector(true)
+    }
+  }
+
+  const handleWindowSelect = async (window: WindowInfo) => {
+    setSelectedWindow(window)
+    setShowWindowSelector(false)
+
+    try {
+      await setWindowId(window.windowId)
+    } catch (error) {
+      console.error('设置窗口失败:', error)
+    }
+  }
+
+  const canStartRecording = recordingMode === 'window' ? selectedWindow !== null : true
 
   const modes = [
     { id: 'fullscreen' as const, icon: Monitor, label: '全屏' },
@@ -115,7 +139,8 @@ export function RecordingPanel({
               key={mode.id}
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
-              onClick={() => setRecordingMode(mode.id)}
+              onClick={() => handleModeChange(mode.id)}
+              disabled={mode.id === 'area'}
               className={cn(
                 'flex-1 flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl transition-all duration-200',
                 recordingMode === mode.id
@@ -128,14 +153,38 @@ export function RecordingPanel({
             </motion.button>
           ))}
         </div>
-        {isNonFullscreen && (
-          <p className="text-xs text-amber-400 mt-2.5 text-center">
-            该模式正在开发中，将随后续版本推出
-          </p>
+        {recordingMode === 'window' && selectedWindow && (
+          <div className="mt-3 p-3 rounded-xl bg-surface border">
+            <div className="flex items-center gap-2">
+              {selectedWindow.thumbnail ? (
+                <img
+                  src={`data:image/png;base64,${selectedWindow.thumbnail}`}
+                  className="w-16 h-12 object-cover rounded"
+                  alt={selectedWindow.title}
+                />
+              ) : (
+                <div className="w-16 h-12 bg-secondary rounded flex items-center justify-center">
+                  <Monitor className="w-6 h-6 text-muted-foreground" />
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate">{selectedWindow.title}</p>
+                <p className="text-xs text-muted-foreground">{selectedWindow.appName}</p>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowWindowSelector(true)}
+              >
+                更换
+              </Button>
+            </div>
+          </div>
         )}
       </div>
 
-      {/* Resolution & FPS */}
+      {/* Resolution & FPS - Hidden in window mode */}
+      {recordingMode !== 'window' && (
       <div className="mb-4">
         <p className="text-xs text-muted-foreground mb-2.5 uppercase tracking-wide">画面参数</p>
         <div className="flex gap-2">
@@ -172,6 +221,7 @@ export function RecordingPanel({
           </Select>
         </div>
       </div>
+      )}
 
       {/* Audio Controls */}
       <div className="mb-6">
@@ -287,13 +337,24 @@ export function RecordingPanel({
 
       {/* Start Recording Button */}
       <Button
-        onClick={isNonFullscreen ? undefined : onStartRecording}
-        disabled={isNonFullscreen}
+        onClick={canStartRecording ? onStartRecording : undefined}
+        disabled={!canStartRecording || recordingMode === 'area'}
         className="w-full h-12 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-base transition-all duration-200 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <Circle className="w-4 h-4 mr-2 fill-current" />
-        {isNonFullscreen ? '即将推出' : '开始录制'}
+        {recordingMode === 'area'
+          ? '即将推出'
+          : recordingMode === 'window' && !selectedWindow
+            ? '请选择窗口'
+            : '开始录制'}
       </Button>
+
+      {/* Window Selector Dialog */}
+      <WindowSelector
+        isOpen={showWindowSelector}
+        onSelect={handleWindowSelect}
+        onClose={() => setShowWindowSelector(false)}
+      />
     </motion.div>
   )
 }

@@ -92,11 +92,8 @@ describe('App', () => {
     fireEvent.click(windowButtons[0])
 
     await vi.waitFor(() => {
-      expect(screen.getAllByText('即将推出').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('请选择窗口').length).toBeGreaterThan(0)
     })
-    expect(
-      screen.getAllByText('该模式正在开发中，将随后续版本推出').length,
-    ).toBeGreaterThan(0)
   })
 
   it('shows coming-soon button for area mode', async () => {
@@ -104,13 +101,10 @@ describe('App', () => {
 
     await screen.findAllByText('全屏')
 
-    // Click area mode
+    // Area mode button should be disabled
     const areaButtons = screen.getAllByText('区域')
-    fireEvent.click(areaButtons[0])
-
-    await vi.waitFor(() => {
-      expect(screen.getAllByText('即将推出').length).toBeGreaterThan(0)
-    })
+    const areaBtn = areaButtons[0].closest('button')
+    expect(areaBtn).toBeDisabled()
   })
 
   it('shows notDetermined permission guidance', async () => {
@@ -424,17 +418,17 @@ describe('App', () => {
     fireEvent.click(windowButtons[0])
 
     await vi.waitFor(() => {
-      expect(screen.getAllByText('即将推出').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('请选择窗口').length).toBeGreaterThan(0)
     })
 
-    // The coming-soon button should be disabled
-    const comingSoonBtns = screen.getAllByText('即将推出')
-    const btn = comingSoonBtns[0].closest('button')
+    // The button should be disabled when no window is selected
+    const selectWindowBtns = screen.getAllByText('请选择窗口')
+    const btn = selectWindowBtns[0].closest('button')
     expect(btn).toBeDisabled()
 
-    // No additional Tauri invokes beyond initial status/permissions/license
+    // Window mode triggers list_windows call
     const expectedCalls = invokeMock.mock.calls.length
-    expect(expectedCalls).toBe(3) // recording_status + recording_permissions + license_status
+    expect(expectedCalls).toBe(4) // recording_status + recording_permissions + license_status + list_windows
   })
 
   it('does not render area-level false drag-region wrappers', async () => {
