@@ -99,8 +99,9 @@ export function RecordingSidebar({
       <button
         onClick={onToggle}
         className={cn(
-          'absolute -top-8 right-0 z-40 rounded-t-lg rounded-b-none bg-surface/95 p-2 text-muted-foreground outline-none',
+          'absolute -top-8 z-40 rounded-t-lg rounded-b-none bg-surface/95 p-2 text-muted-foreground outline-none',
           'hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 transition-all duration-200',
+          isOpen ? 'right-[calc(360px+0.5rem)]' : 'right-2',
         )}
         title="历史录制"
       >

@@ -117,9 +117,12 @@ describe('RecordingSidebar', () => {
     expect(panel).toHaveClass('pointer-events-none')
   })
 
-  it.each([false, true])(
-    'anchors the borderless toggle to the recording panel corner when open is %s',
-    (isOpen) => {
+  it.each([
+    { isOpen: false, expectedRightClass: 'right-2' },
+    { isOpen: true, expectedRightClass: 'right-[calc(360px+0.5rem)]' },
+  ])(
+    'anchors the borderless toggle with the correct right offset when open is $isOpen',
+    ({ isOpen, expectedRightClass }) => {
       render(
         <RecordingSidebar
           isOpen={isOpen}
@@ -132,8 +135,9 @@ describe('RecordingSidebar', () => {
 
       expect(toggle).toHaveClass('absolute')
       expect(toggle).toHaveClass('-top-8')
-      expect(toggle).toHaveClass('right-0')
+      expect(toggle).toHaveClass(expectedRightClass)
       expect(toggle).not.toHaveClass('fixed')
+      expect(toggle).not.toHaveClass('right-0')
       expect(toggle).not.toHaveClass('right-[360px]')
       expect(toggle).not.toHaveClass('right-[max(12px,calc(50%_-_208px))]')
       expect(toggle).not.toHaveClass('border')
