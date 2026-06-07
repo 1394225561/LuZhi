@@ -437,15 +437,14 @@ export default function App() {
             <div className="flex w-full items-start justify-end mt-4">
               <LicenseStatus status={licenseStatus} />
             </div>
+            {/* History sidebar */}
+            <RecordingSidebar
+              isOpen={sidebarOpen}
+              onToggle={() => setSidebarOpen(!sidebarOpen)}
+              onSelectRecording={(id) => void handleSelectRecording(id)}
+            />
           </div>
         </div>
-
-        {/* History sidebar */}
-        <RecordingSidebar
-          isOpen={sidebarOpen}
-          onToggle={() => setSidebarOpen(!sidebarOpen)}
-          onSelectRecording={(id) => void handleSelectRecording(id)}
-        />
       </div>
     )
   }

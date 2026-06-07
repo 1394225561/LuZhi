@@ -117,20 +117,45 @@ describe('RecordingSidebar', () => {
     expect(panel).toHaveClass('pointer-events-none')
   })
 
-  it('uses a borderless toggle positioned near the recording panel when collapsed', () => {
-    render(
+  it.each([false, true])(
+    'anchors the borderless toggle to the recording panel corner when open is %s',
+    (isOpen) => {
+      render(
+        <RecordingSidebar
+          isOpen={isOpen}
+          onToggle={vi.fn()}
+          onSelectRecording={vi.fn()}
+        />,
+      )
+
+      const toggle = screen.getByTitle('历史录制')
+
+      expect(toggle).toHaveClass('absolute')
+      expect(toggle).toHaveClass('-top-8')
+      expect(toggle).toHaveClass('right-0')
+      expect(toggle).not.toHaveClass('fixed')
+      expect(toggle).not.toHaveClass('right-[360px]')
+      expect(toggle).not.toHaveClass('right-[max(12px,calc(50%_-_208px))]')
+      expect(toggle).not.toHaveClass('border')
+      expect(toggle).not.toHaveClass('shadow-lg')
+    },
+  )
+
+  it('keeps the open panel from drawing a left-edge line', () => {
+    const { container } = render(
       <RecordingSidebar
-        isOpen={false}
+        isOpen={true}
         onToggle={vi.fn()}
         onSelectRecording={vi.fn()}
       />,
     )
 
-    const toggle = screen.getByTitle('历史录制')
+    const panel = container.querySelector('div.fixed.right-0.top-0')
 
-    expect(toggle).toHaveClass('right-[max(12px,calc(50%_-_208px))]')
-    expect(toggle).not.toHaveClass('right-0')
-    expect(toggle).not.toHaveClass('border')
-    expect(toggle).not.toHaveClass('shadow-lg')
+    expect(panel).toBeInTheDocument()
+    expect(panel).toHaveClass('w-[360px]')
+    expect(panel).toHaveClass('border-l-0')
+    expect(panel).toHaveClass('shadow-none')
+    expect(panel).not.toHaveClass('shadow-2xl')
   })
 })
