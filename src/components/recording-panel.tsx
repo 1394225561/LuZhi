@@ -103,15 +103,13 @@ export function RecordingPanel({
     }
   }
 
-  const canStartRecording = recordingMode === 'window' ? selectedWindow !== null : true
+  const canStartRecording = recordingMode === 'window' ? selectedWindow !== null : recordingMode !== 'area'
 
   const modes = [
     { id: 'fullscreen' as const, icon: Monitor, label: '全屏' },
     { id: 'window' as const, icon: AppWindow, label: '窗口' },
     { id: 'area' as const, icon: Square, label: '区域' },
   ]
-
-  const isNonFullscreen = recordingMode !== 'fullscreen'
 
   return (
     <motion.div
