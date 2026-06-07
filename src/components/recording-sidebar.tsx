@@ -99,9 +99,9 @@ export function RecordingSidebar({
       <button
         onClick={onToggle}
         className={cn(
-          'fixed top-1/2 -translate-y-1/2 z-40 bg-card border border-border/50 rounded-l-lg p-2',
-          'hover:bg-secondary transition-all duration-200',
-          isOpen ? 'right-80' : 'right-0',
+          'fixed top-1/2 -translate-y-1/2 z-40 bg-card/95 border border-border/60 rounded-l-lg p-2 shadow-lg shadow-black/20',
+          'hover:bg-surface-hover hover:border-border transition-all duration-200',
+          isOpen ? 'right-[360px]' : 'right-0',
         )}
         title="历史录制"
       >
@@ -111,81 +111,104 @@ export function RecordingSidebar({
       {/* Sidebar panel */}
       <div
         className={cn(
-          'fixed right-0 top-0 h-full bg-card border-l border-border/50',
+          'fixed right-0 top-0 h-full bg-card/98 border-l border-border/60 shadow-2xl shadow-black/30',
           'transition-all duration-300 ease-in-out z-30 flex flex-col',
-          isOpen ? 'w-80' : 'w-0 overflow-hidden',
+          isOpen ? 'w-[360px]' : 'w-0 overflow-hidden',
         )}
       >
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-border/50 shrink-0">
-          <h3 className="font-semibold text-sm">历史录制</h3>
-          <div className="flex items-center gap-1">
-            <Button variant="ghost" size="sm" onClick={handleImport} title="导入录制">
-              <Upload className="w-4 h-4" />
+        <div className="shrink-0 border-b border-border/60 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-surface text-foreground">
+                <History className="h-4 w-4" />
+              </div>
+              <h3 className="text-sm font-semibold text-foreground">历史录制</h3>
+            </div>
+            <Button variant="ghost" size="sm" onClick={onToggle} title="关闭历史录制">
+              <X className="h-4 w-4" />
             </Button>
-            <Button variant="ghost" size="sm" onClick={onToggle}>
-              <X className="w-4 h-4" />
+          </div>
+          <div className="mt-3 flex items-center justify-between">
+            <p className="text-xs text-muted-foreground">共 {recordings.length} 条录制</p>
+            <Button variant="ghost" size="sm" onClick={handleImport} title="导入录制">
+              <Upload className="h-4 w-4" />
             </Button>
           </div>
         </div>
 
         {/* Error banner */}
         {importError && (
-          <div className="mx-3 mt-2 p-2 rounded-lg bg-destructive/10 border border-destructive/20 text-xs text-destructive">
+          <div className="mx-4 mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-destructive">
             {importError}
           </div>
         )}
 
         {/* List */}
-        <div className="flex-1 overflow-y-auto p-2">
+        <div className="flex-1 overflow-y-auto px-3 py-3">
           {isLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+            <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 text-muted-foreground">
+              <Loader2 className="h-5 w-5 animate-spin" />
+              <p className="text-xs">加载历史录制...</p>
             </div>
           ) : loadError ? (
-            <div className="flex flex-col items-center justify-center py-12 text-destructive">
-              <p className="text-xs">{loadError}</p>
+            <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-xs leading-relaxed text-destructive">
+              {loadError}
             </div>
           ) : recordings.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-              <Film className="w-8 h-8 mb-2 opacity-40" />
-              <p className="text-xs">暂无历史录制</p>
+            <div className="flex h-full min-h-64 flex-col items-center justify-center text-center text-muted-foreground">
+              <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-surface">
+                <Film className="h-5 w-5 opacity-60" />
+              </div>
+              <p className="text-sm font-medium text-foreground">暂无历史录制</p>
+              <p className="mt-1 text-xs">录制完成后会出现在这里</p>
             </div>
           ) : (
-            recordings.map((rec) => (
-              <div
-                key={rec.id}
-                className="group relative bg-secondary/50 rounded-lg p-3 mb-2 hover:bg-secondary cursor-pointer"
-                onClick={() => onSelectRecording(rec.id)}
-              >
-                <div className="flex justify-between items-start">
-                  <div>
-                    <p className="text-sm font-medium">{formatDate(rec.createdAt)}</p>
-                    <p className="text-xs text-muted-foreground">
+            <div className="space-y-1.5">
+              {recordings.map((rec) => (
+                <div
+                  key={rec.id}
+                  className={cn(
+                    'group relative flex min-h-16 cursor-pointer items-center gap-3 rounded-lg border border-transparent px-3 py-2.5',
+                    'bg-secondary/30 transition-all duration-150 hover:-translate-y-px hover:border-border/70 hover:bg-surface',
+                    'focus-within:border-border/70 focus-within:bg-surface',
+                  )}
+                  onClick={() => onSelectRecording(rec.id)}
+                >
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-card text-muted-foreground group-hover:text-foreground">
+                    <Film className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {formatDate(rec.createdAt)}
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
                       时长：{formatDuration(rec.durationSecs)}
                     </p>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                  <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0" />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void handleDelete(rec.id)
+                    }}
+                    disabled={deletingId === rec.id}
+                    className={cn(
+                      'absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg',
+                      'text-muted-foreground opacity-0 transition-all hover:bg-destructive/10 hover:text-destructive',
+                      'group-hover:opacity-100 group-focus-within:opacity-100 disabled:pointer-events-none',
+                    )}
+                    title="删除"
+                  >
+                    {deletingId === rec.id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3.5 w-3.5" />
+                    )}
+                  </button>
                 </div>
-
-                {/* Delete button */}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    void handleDelete(rec.id)
-                  }}
-                  disabled={deletingId === rec.id}
-                  className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-all p-1"
-                  title="删除"
-                >
-                  {deletingId === rec.id ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <Trash2 className="w-3 h-3" />
-                  )}
-                </button>
-              </div>
-            ))
+              ))}
+            </div>
           )}
         </div>
       </div>
