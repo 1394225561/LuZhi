@@ -22,11 +22,14 @@ use objc2_screen_capture_kit::{
 use crate::app::error::{AppError, AppResult};
 use crate::core::capture::{
     AudioCapabilities, AudioCapture, AudioChunkSink, AudioConfig, AudioDevice, CaptureCapabilities,
-    ScreenCapture, VideoFrameSink,
+    ScreenCapture, VideoFrameSink, WindowCapture,
 };
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, FrameBuffer, PixelFormat, VideoFrame};
 use crate::core::timeline::CaptureGeometry;
+use crate::core::window::{WindowInfo, WindowRecordingState};
+
+use super::window_list;
 
 // ---------------------------------------------------------------------------
 // Send wrapper for SCStream
@@ -666,6 +669,33 @@ impl MacScreenCapture {
         }
     }
 
+    fn window_geometry_from_content_rect(
+        origin_x: f64,
+        origin_y: f64,
+        width_points: f64,
+        height_points: f64,
+        point_pixel_scale: f32,
+    ) -> CaptureGeometry {
+        let scale = if point_pixel_scale.is_finite() && point_pixel_scale > 0.0 {
+            point_pixel_scale
+        } else {
+            1.0
+        };
+        let stream_width = ((width_points * scale as f64).round().max(1.0)) as u32;
+        let stream_height = ((height_points * scale as f64).round().max(1.0)) as u32;
+
+        CaptureGeometry {
+            display_id: 0,
+            content_origin_x: origin_x as f32,
+            content_origin_y: origin_y as f32,
+            content_width: width_points as f32,
+            content_height: height_points as f32,
+            point_pixel_scale: scale,
+            stream_width,
+            stream_height,
+        }
+    }
+
     /// Returns the capture geometry from the last `start_stream()` call.
     pub fn last_capture_geometry(&self) -> Option<CaptureGeometry> {
         self.last_capture_geometry
@@ -873,23 +903,6 @@ impl MacScreenCapture {
             return Err(AppError::WindowMinimized { window_id });
         }
 
-        // Read window geometry
-        let frame = unsafe { target_window.frame() };
-        let stream_width = frame.size.width as u32;
-        let stream_height = frame.size.height as u32;
-
-        let capture_geometry = CaptureGeometry {
-            display_id: 0, // Window mode doesn't need display_id
-            content_origin_x: frame.origin.x as f32,
-            content_origin_y: frame.origin.y as f32,
-            content_width: frame.size.width as f32,
-            content_height: frame.size.height as f32,
-            point_pixel_scale: 1.0,
-            stream_width,
-            stream_height,
-        };
-        self.last_capture_geometry = Some(capture_geometry);
-
         // Create content filter: capture only the target window
         let filter = unsafe {
             SCContentFilter::initWithDesktopIndependentWindow(
@@ -897,6 +910,19 @@ impl MacScreenCapture {
                 &target_window,
             )
         };
+
+        let content_rect = unsafe { filter.contentRect() };
+        let point_pixel_scale = unsafe { filter.pointPixelScale() };
+        let capture_geometry = Self::window_geometry_from_content_rect(
+            content_rect.origin.x,
+            content_rect.origin.y,
+            content_rect.size.width,
+            content_rect.size.height,
+            point_pixel_scale,
+        );
+        let stream_width = capture_geometry.stream_width;
+        let stream_height = capture_geometry.stream_height;
+        self.last_capture_geometry = Some(capture_geometry);
 
         // Configure stream
         let stream_config = unsafe { SCStreamConfiguration::new() };
@@ -1004,7 +1030,7 @@ impl MacScreenCapture {
                 move |content: *mut SCShareableContent, error: *mut NSError| {
                     if error.is_null() && !content.is_null() {
                         // SAFETY: content is non-null and we verified no error.
-                        if let Some(retained) = unsafe { Retained::retain(content) } {
+                        if let Some(retained) = Retained::retain(content) {
                             let _ = tx.send(Some(retained));
                         } else {
                             let _ = tx.send(None);
@@ -1114,9 +1140,56 @@ impl ScreenCapture for MacScreenCapture {
     fn capabilities(&self) -> CaptureCapabilities {
         CaptureCapabilities {
             supports_full_screen: true,
-            supports_window: false,
+            supports_window: true,
             supports_region: false,
             supports_4k: false,
+        }
+    }
+}
+
+impl WindowCapture for MacScreenCapture {
+    fn list_windows(&self) -> AppResult<Vec<WindowInfo>> {
+        window_list::list_windows()
+    }
+
+    fn get_thumbnail(&self, window_id: u32) -> AppResult<Option<String>> {
+        window_list::get_window_thumbnail(window_id)
+    }
+
+    fn start_window_stream(
+        &mut self,
+        window_id: u32,
+        capture_system_audio: bool,
+        show_system_cursor: bool,
+        video_sink: VideoFrameSink,
+        audio_sink: AudioChunkSink,
+        session_clock: Arc<crate::core::clock::SessionClock>,
+    ) -> AppResult<()> {
+        MacScreenCapture::start_window_stream(
+            self,
+            window_id,
+            capture_system_audio,
+            show_system_cursor,
+            video_sink,
+            audio_sink,
+            session_clock,
+        )
+    }
+
+    fn stop_window_stream(&mut self) -> AppResult<()> {
+        MacScreenCapture::stop_window_stream(self)
+    }
+
+    fn window_state(&self, window_id: u32) -> AppResult<WindowRecordingState> {
+        let windows = window_list::list_windows()?;
+        if let Some(window) = windows.iter().find(|window| window.window_id == window_id) {
+            if window.is_on_screen {
+                Ok(WindowRecordingState::Recording)
+            } else {
+                Ok(WindowRecordingState::Minimized)
+            }
+        } else {
+            Ok(WindowRecordingState::Closed)
         }
     }
 }
@@ -1461,8 +1534,22 @@ mod tests {
         let capabilities = ScreenCapture::capabilities(&capture);
 
         assert!(capabilities.supports_full_screen);
-        assert!(!capabilities.supports_window);
+        assert!(capabilities.supports_window);
         assert!(!capabilities.supports_region);
+    }
+
+    #[test]
+    fn window_geometry_uses_content_rect_scale_for_stream_pixels() {
+        let geometry =
+            MacScreenCapture::window_geometry_from_content_rect(10.0, 20.0, 720.0, 450.0, 2.0_f32);
+
+        assert_eq!(geometry.content_origin_x, 10.0);
+        assert_eq!(geometry.content_origin_y, 20.0);
+        assert_eq!(geometry.content_width, 720.0);
+        assert_eq!(geometry.content_height, 450.0);
+        assert_eq!(geometry.point_pixel_scale, 2.0);
+        assert_eq!(geometry.stream_width, 1440);
+        assert_eq!(geometry.stream_height, 900);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-05 | 播放控件完整功能实现完成；美化界面主预览/右侧边栏空白可拖，文本和按钮不可拖。
+> 最后更新：2026-06-07 | BUG-0020 双音频窗口录制退出/Cmd+Q 停止时低音量 artifact contract 误判修复完成，source-aware 通过后低音量 aggregate 校验降级为 warning。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,106 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-07：BUG-0020 双音频窗口录制退出时近乎静音误判修复
+
+输入文件：
+
+- 用户反馈：窗口录制同时开启系统音频和麦克风，通过“退出”或 `Command + Q` 结束软件进程后，录制 finalize 报“请求了音频录制但解码后音频近乎静音”
+- `BUG.md` BUG-005 / BUG-005_2 / BUG-0013 预防规则
+- `HANDOFF.md`
+- `.claude/rules/0-global.md`
+- `.claude/rules/2-testing.md`
+
+根因结论：
+
+1. 日志证明 `writer.finish()`、mic stop、RecordingDiagnostics、WriterDiagnostics 和 artifact decode validation 均已执行；这不是退出事件未清理或 writer 未完成
+2. 失败点是 source artifact aggregate RMS/peak Level 1 校验先于 source-aware contract 执行
+3. 系统音频全程静音、麦克风较安静时，global decoded RMS/peak 被系统静音与时间轴 padding 稀释到阈值以下；但 source-aware/writer 诊断已证明系统音频和麦克风 chunks/windows/frames/counters 均到达 writer
+
+已完成：
+
+1. `RequestedAudioContract` 新增 `allow_quiet_when_source_verified`，默认保持严格校验
+2. source artifact contract 在 source-aware 已验证且 decoded 音频非零时，将低音量 aggregate 判定降级为 warning
+3. macOS 录制收尾改为先执行 `validate_source_aware_audio_contract()`，只有通过后才允许 source artifact low-volume bypass
+4. 导出路径未启用该 bypass，避免无 source-aware 诊断的 export 校验误放宽
+5. 新增回归测试覆盖 source-aware verified 双源低音量通过、全零音频仍失败、source artifact contract 构造策略
+6. 更新 `BUG.md` BUG-0020 预防规则和本轮自测清单
+
+当前验证结果：
+
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib --features ffmpeg requested_audio_contract_allows_quiet_dual_source_when_source_verified` 修复前失败，失败信息为 `RMS=0.002007 < 0.003000`、`peak=0.002338 < 0.020000`
+- GREEN：同一测试修复后通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib --features ffmpeg requested_audio_contract_source_verified_still_rejects_zero_audio` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib --features ffmpeg source_artifact_audio_contract` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib --features ffmpeg requested_audio_contract` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 通过（333 tests）
+- `npm test -- --run` 通过（80 tests）
+- `npm run build` 通过
+- `cargo build --manifest-path src-tauri/Cargo.toml` 通过；剩余 warning 为既有 FFI/可见性/死代码类告警
+- `rustfmt --check src-tauri/src/media/ffmpeg_common.rs src-tauri/src/platform/macos_service.rs` 通过
+- `git diff --check` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib --features ffmpeg` 未全绿：本轮新增/相关音频测试通过，但 `media::cursor_overlay::tests::rendered_arrow_rgba_blends_yuv_planes` 单独运行仍失败，失败断言为 `arrow cursor should be visible on Y plane near cursor position`；该测试不在本轮音频 contract 修改链路中
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/ffmpeg_common.rs`, `src-tauri/src/platform/macos_service.rs`
+- **修改**: `BUG.md`, `HANDOFF.md`
+- **新增**: `tests/2026-06-07-bug-0020-window-recording-quit-audio-contract-checklist.md`
+
+人工复核建议：
+
+1. 窗口录制同时开启系统音频和麦克风，保持系统音频静音，用较低麦克风音量录制 5-10 秒后点击“退出”结束应用；应不再报近乎静音 finalize failure
+2. 同一场景用 `Command + Q` 结束应用；应生成可预览录制结果，若音量偏低只应在日志中出现 warning
+3. 真正麦克风无输入/权限异常/无 chunks 的场景仍应被 source-aware contract 拦截为失败
+
+### 2026-06-07：窗口录制 Code Review 阻断问题修复
+
+输入文件：
+
+- `docs/superpowers/plans/2026-06-07-window-recording-plan.md`
+- Code review 范围：`1c5d4260cde5ee8970caa4bd801bb8ea13d0d3b9 ~ f4d386927afc8bce06f717738ddc0a1a121d2cb2`
+- `BUG.md`
+- `.claude/rules/0-global.md`
+- `.claude/rules/1-coding-style.md`
+- `.claude/rules/2-testing.md`
+- `.claude/rules/4-security.md`
+
+已完成：
+
+1. 修复窗口 ID 丢失：前端 `App` 持有选中窗口 ID，开始录制时传入 `set_capture_mode.windowId`；后端配置更新保留窗口模式已有 `window_id`
+2. 修复窗口关闭只 toast：窗口关闭事件复用 stop/finalize/register 清理路径自动停止录制，并在 completed 事件中携带录制结果供前端预览
+3. 最小化/恢复窗口时触发后端 pause/resume 状态，暂停期间消费线程继续排空但丢弃音视频，UI 状态不再只靠 toast 文案
+4. 修复窗口录制启动失败回滚：writer 创建提前到 native capture 启动之前，mic 启动失败会停止窗口 monitor 和 SCK stream
+5. 修复 Retina/多显示器窗口几何：窗口模式使用 `SCContentFilter.contentRect()` 和 `pointPixelScale()` 计算 `CaptureGeometry`
+6. macOS `MacScreenCapture` 实现 `WindowCapture` trait，capabilities 改为 `supports_window: true`
+7. `WindowSelector` 不再吞掉 `list_windows` 错误，新增错误文案和重试按钮；合并重复 minimized window 测试
+8. 窗口 monitor 文档/行为对齐为 200ms 轮询，不再声称未实现的 NSWorkspace 通知层
+9. 明确缩略图在 MVP 中为 `None` 降级，UI 使用占位图；未擅自修改核心依赖版本或新增编码依赖
+10. 更新 `BUG.md` BUG-0019 预防规则和本轮自测清单
+
+当前验证结果：
+
+- `npm test -- src/App.test.tsx -t "preserves the selected window"` 通过
+- `npm test -- src/App.test.tsx -t "uses recording result from completed state event"` 通过
+- `npm test -- src/components/window-selector.test.tsx` **6 tests** 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib consume_frames_drops_queued_media_when_stopped_while_paused` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 通过；剩余 warning 为既有 FFI/可见性/死代码类告警
+
+改动文件：
+
+- **修改**: `src/App.tsx`, `src/App.test.tsx`, `src/lib/tauri.ts`, `src/components/recording-panel.tsx`, `src/components/window-selector.tsx`, `src/components/window-selector.test.tsx`
+- **修改**: `src-tauri/src/lib.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/platform/macos/screen_capture_kit.rs`, `src-tauri/src/platform/macos/window_list.rs`, `src-tauri/src/platform/macos/window_monitor.rs`
+- **修改**: `BUG.md`, `HANDOFF.md`
+- **新增**: `tests/2026-06-07-window-recording-review-fixes-checklist.md`
+
+人工复核建议：
+
+1. 选择一个正常窗口录制：点击开始后不应再出现“未选择录制窗口”
+2. 录制中关闭被录制窗口：应提示录制停止，录制结果进入预览并出现在历史记录
+3. 录制中最小化/恢复被录制窗口：状态栏应切换暂停/录制中，暂停期间内容不应继续写入最终录制
+4. Retina 屏窗口录制后导出美化：光标位置应与源视频一致
+5. 窗口选择器在权限/枚举失败时显示错误和“重试”，而不是“未找到可用窗口”
 
 ### 2026-06-05：播放控件完整功能实现
 

@@ -1,7 +1,6 @@
-use objc2::rc::Retained;
 use objc2_screen_capture_kit::SCWindow;
 
-use crate::app::error::{AppError, AppResult};
+use crate::app::error::AppResult;
 use crate::core::window::WindowInfo;
 
 use super::screen_capture_kit::MacScreenCapture;
@@ -13,7 +12,7 @@ pub fn list_windows() -> AppResult<Vec<WindowInfo>> {
     let mut result = Vec::new();
 
     for i in 0..windows.count() {
-        let window = unsafe { windows.objectAtIndex(i) };
+        let window = windows.objectAtIndex(i);
 
         // 过滤条件
         if !should_include_window(&window) {

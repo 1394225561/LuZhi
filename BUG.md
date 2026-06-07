@@ -10,6 +10,64 @@
 
 ## 已解决
 
+### BUG-0020: 退出/Cmd+Q 停止双音频窗口录制时报近乎静音 ✅ 已修复-待人工验证
+
+**现象**：窗口录制同时开启系统音频和麦克风后，通过“退出”或 `Command + Q` 结束软件进程，录制收尾报错：
+
+`请求了音频录制但解码后音频近乎静音（RMS=0.001726 < 0.003000，peak=0.013317 < 0.020000，system=true, mic=true）`
+
+日志中同时显示 `system_chunks_received`、`mic_chunks_received`、`system_windows_before_writer`、`mic_windows_before_writer`、`system_chunks_received_by_writer`、`mic_chunks_received_by_writer` 均非零，说明捕获、同步器和 writer 侧 source-aware 证据存在。
+
+**根因**：录制 finalize 路径先执行 artifact aggregate RMS/peak 校验，再执行 source-aware contract。系统音频静音且麦克风较安静时，最终文件的 global decoded RMS/peak 会被静音系统音频和时间轴 padding 稀释到 Level 1 阈值以下，即使 source-aware/writer 诊断已经证明麦克风与系统音频均到达 writer，仍被 artifact contract 误判为硬失败。
+
+**修复**：
+
+1. `RequestedAudioContract` 新增 `allow_quiet_when_source_verified`，默认 `false`，不改变默认严格校验。
+2. `validate_source_artifact_with_audio_contract()` 在 source-aware 已验证且 decoded RMS/peak 非零时，将 aggregate low-volume 判定降级为 warning；`sample_count == 0` 和真正全零音频仍失败。
+3. macOS 录制收尾先运行 `validate_source_aware_audio_contract()`，只有它通过时才给 source artifact contract 传入 `allow_quiet_when_source_verified=true`。
+4. 导出路径保持默认严格 contract，未引入 source-aware 证据时不自动放宽。
+5. 新增回归测试覆盖“source-aware 已验证的双源低音量 artifact 通过”和“即使 source-aware 标记为 true，全零音频仍失败”。
+
+**预防规则**：
+
+42. source artifact aggregate RMS/peak 不能覆盖成功的 source-aware/writer 诊断；当 requested source 的 chunks/windows/frames/writer counters 均证明来源存在时，低音量只能作为 warning。
+43. 低音量放宽必须要求 decoded 音频有非零能量；`sample_count == 0` 或 RMS/peak 全零在请求麦克风时仍必须 hard fail。
+44. source-aware 校验必须先于需要依赖 source-aware 结果的 artifact 音量放宽执行；默认 contract 仍保持严格，避免 export 或无诊断路径误放行。
+45. 修复退出/自动停止录制报错时，必须先确认日志中 `writer.finish()`、diagnostics 和 artifact validation 是否已执行，不能把 artifact validation false positive 误判为退出事件未清理。
+
+### BUG-0019: 窗口录制 Code Review 阻断问题 ✅ 已修复-待人工验证
+
+**现象**：
+
+1. UI 选中窗口后点击开始录制，后端仍报“未选择录制窗口”。
+2. 被录制窗口关闭时只弹 toast，不会停止录制；最小化时 UI 提示暂停但后端状态仍为录制中。
+3. 窗口录制启动时先启动 ScreenCaptureKit/窗口监控/麦克风，再创建 writer；writer 创建失败会留下已启动资源。
+4. 窗口捕获几何使用 `SCWindow.frame()` 点尺寸作为像素尺寸，Retina/多显示器下会破坏光标坐标归一化。
+5. macOS 已有窗口捕获实现但 `WindowCapture` trait 未接入，capabilities 仍声明不支持窗口录制。
+6. `WindowSelector` 把 `list_windows` 错误吞成空列表，用户无法区分“没有窗口”和“窗口枚举失败”。
+
+**修复**：
+
+1. 前端将选中窗口 ID 提升到 `App`，开始录制时随 `set_capture_mode` 发送 `windowId`。
+2. 后端 `set_capture_mode` 改为基于旧配置更新，窗口模式保留已有 `window_id`，非窗口模式清空。
+3. 窗口状态监听在最小化时触发后端 pause 状态，消费线程排空但丢弃暂停期间的音视频；恢复时 resume，关闭时复用同一套 stop/finalize/register 逻辑自动停止录制，并在 completed 事件中带回录制结果。
+4. `start_window()` 在启动原生采集资源前先创建 writer；麦克风启动失败时同步停止窗口 monitor、SCK stream 并清理 receiver。
+5. 窗口捕获几何改用 `SCContentFilter.contentRect()` 和 `pointPixelScale()` 计算 stream 像素尺寸与 `CaptureGeometry`。
+6. macOS `MacScreenCapture` 实现 `WindowCapture` trait，并将 capabilities 的 `supports_window` 改为 true。
+7. `WindowSelector` 增加错误态与重试按钮，保留空列表态；合并重复 minimized window 测试。
+8. 窗口缩略图保持 `None` 的 MVP 降级：当前 UI 使用占位预览，后续实现 PNG 编码前不得伪装为已支持。
+
+**预防规则**：
+
+34. 前端选择态如果会影响后端启动参数，必须在最终启动命令链路中显式传递，不能只依赖早先一次 setter 调用。
+35. 后端配置更新函数不得用不完整 payload 直接重建完整配置；必须保留同模式仍有效的状态，并在跨模式时显式清空无效字段。
+36. Native capture 启动顺序必须先准备会失败的纯 Rust/文件资源，再启动 ScreenCaptureKit、麦克风、monitor 等原生资源；任何启动后失败路径必须回滚已启动资源。
+37. 窗口录制的光标几何必须使用 SCK content rect 和 point pixel scale，不能把窗口点尺寸当像素尺寸。
+38. 能力声明必须和 trait 实现一致；新增平台能力后，capabilities 测试必须同步更新。
+39. 后端自动停止录制时必须复用手动停止的 finalize/register 清理路径，并向前端返回或事件携带录制结果，避免进入无结果预览。
+40. 资源枚举失败不得吞成空列表；UI 必须区分“没有数据”和“加载失败”，并提供可重试路径。
+41. 暂停录制不能只更新状态机；捕获消费线程必须同步停止写入，同时继续排空通道，避免暂停期间媒体误写入或阻塞原生捕获回调。
+
 ### BUG-0018: 历史录制侧栏折叠按钮和边框视觉异常 ✅ 已修复
 
 **现象**：

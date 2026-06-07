@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Monitor, Loader2, X } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { Monitor, Loader2, RotateCcw, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { listWindows, type WindowInfo } from '@/lib/tauri'
 
@@ -12,16 +12,25 @@ interface WindowSelectorProps {
 export function WindowSelector({ isOpen, onSelect, onClose }: WindowSelectorProps) {
   const [windows, setWindows] = useState<WindowInfo[]>([])
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const loadWindows = useCallback(() => {
+    setLoading(true)
+    setError(null)
+    listWindows()
+      .then((items) => {
+        setWindows(items)
+      })
+      .catch((err) => {
+        setWindows([])
+        setError(`窗口列表加载失败：${String(err)}`)
+      })
+      .finally(() => setLoading(false))
+  }, [])
 
   useEffect(() => {
-    if (isOpen) {
-      setLoading(true)
-      listWindows()
-        .then(setWindows)
-        .catch(() => setWindows([]))
-        .finally(() => setLoading(false))
-    }
-  }, [isOpen])
+    if (isOpen) loadWindows()
+  }, [isOpen, loadWindows])
 
   if (!isOpen) return null
 
@@ -44,6 +53,19 @@ export function WindowSelector({ isOpen, onSelect, onClose }: WindowSelectorProp
           {loading ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+              <Monitor className="w-12 h-12 mb-4" />
+              <p className="text-sm text-destructive">{error}</p>
+              <button
+                type="button"
+                onClick={loadWindows}
+                className="mt-4 inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm text-foreground hover:bg-secondary"
+              >
+                <RotateCcw className="w-4 h-4" />
+                重试
+              </button>
             </div>
           ) : windows.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">

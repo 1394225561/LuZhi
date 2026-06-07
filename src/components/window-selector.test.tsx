@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { WindowSelector } from './window-selector'
 import { listWindows, type WindowInfo } from '@/lib/tauri'
 
@@ -32,6 +32,7 @@ const mockWindows: WindowInfo[] = [
 
 describe('WindowSelector', () => {
   beforeEach(() => {
+    vi.clearAllMocks()
     vi.mocked(listWindows).mockResolvedValue(mockWindows)
   })
 
@@ -71,31 +72,28 @@ describe('WindowSelector', () => {
     render(<WindowSelector isOpen={true} onSelect={vi.fn()} onClose={vi.fn()} />)
 
     await waitFor(() => {
-      // Terminal is minimized (isOnScreen: false), so its button should be disabled
       const terminalButtons = screen.getAllByText('Terminal')
-      // Find the button element (the card container)
       const terminalCard = terminalButtons[0].closest('button')
       expect(terminalCard).toBeDisabled()
     })
   })
 
-  it('disables minimized windows', async () => {
+  it('shows list_windows errors and allows retry', async () => {
+    vi.mocked(listWindows)
+      .mockRejectedValueOnce(new Error('permission denied'))
+      .mockResolvedValueOnce(mockWindows)
+
     render(<WindowSelector isOpen={true} onSelect={vi.fn()} onClose={vi.fn()} />)
 
-    // Wait for windows to load
     await waitFor(() => {
-      const appNames = screen.getAllByText('Terminal')
-      expect(appNames.length).toBeGreaterThan(0)
+      expect(screen.getByText(/窗口列表加载失败/)).toBeInTheDocument()
     })
 
-    // Find the Terminal button (which is minimized)
-    const buttons = screen.getAllByRole('button')
-    const terminalButton = buttons.find(btn => {
-      return btn.textContent?.includes('Terminal') && (btn as HTMLButtonElement).disabled
-    })
+    fireEvent.click(screen.getByRole('button', { name: /重试/ }))
 
-    // Terminal should be disabled because it's minimized (isOnScreen: false)
-    expect(terminalButton).toBeDefined()
-    expect((terminalButton as HTMLButtonElement).disabled).toBe(true)
+    await waitFor(() => {
+      expect(screen.getAllByText('Safari').length).toBeGreaterThan(0)
+    })
+    expect(listWindows).toHaveBeenCalledTimes(2)
   })
 })

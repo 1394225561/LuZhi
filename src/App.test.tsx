@@ -431,6 +431,59 @@ describe('App', () => {
     expect(expectedCalls).toBe(4) // recording_status + recording_permissions + license_status + list_windows
   })
 
+  it('preserves the selected window when starting window recording', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
+      if (command === 'license_status') return Promise.resolve({ kind: 'trial', trialDaysRemaining: 14, isExpired: false, activated: false })
+      if (command === 'list_windows') {
+        return Promise.resolve([
+          {
+            windowId: 42,
+            title: 'Safari',
+            appName: 'Safari',
+            bundleId: 'com.apple.Safari',
+            isOnScreen: true,
+            width: 1440,
+            height: 900,
+            thumbnail: null,
+          },
+        ])
+      }
+      if (command === 'set_window_id') return Promise.resolve()
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+    await screen.findAllByText('全屏')
+
+    fireEvent.click(screen.getAllByText('窗口')[0])
+    await screen.findAllByText('Safari')
+    const safariButton = screen
+      .getAllByRole('button')
+      .find((button) => button.textContent?.includes('Safari') && button.textContent.includes('com.apple') === false)
+    fireEvent.click(safariButton as HTMLButtonElement)
+    await screen.findByText('开始录制')
+
+    invokeMock.mockClear()
+    fireEvent.click(screen.getByText('开始录制'))
+
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('start_recording', undefined)
+    })
+
+    const setCaptureModeCall = invokeMock.mock.calls.find(
+      (call: unknown[]) => call[0] === 'set_capture_mode',
+    )
+    expect(setCaptureModeCall).toEqual([
+      'set_capture_mode',
+      { payload: { mode: 'window', width: 1920, height: 1080, fps: 30, windowId: 42 } },
+    ])
+  })
+
   it('does not render area-level false drag-region wrappers', async () => {
     render(<App />)
 
@@ -651,6 +704,57 @@ describe('App', () => {
     expect(screen.getByText('预览与美化')).toBeTruthy()
     // Verify stop_recording returned camelCase result
     expect(invokeMock).toHaveBeenCalledWith('stop_recording', undefined)
+  })
+
+  it('uses recording result from completed state event after automatic window stop', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    const stateCallbacks: Array<(status: { state: string; result?: unknown }) => void> = []
+
+    vi.mocked(listen).mockImplementation(
+      (event: string, callback: (event: { event: string; id: number; payload: unknown }) => void) => {
+        if (event === 'recording-state-changed') {
+          stateCallbacks.push((status) => callback({ event, id: 0, payload: status }))
+        }
+        return Promise.resolve(() => {})
+      },
+    )
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'recording', canStart: false })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    await screen.findByText('录制中')
+    await vi.waitFor(() => {
+      expect(stateCallbacks.length).toBeGreaterThan(0)
+    })
+
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({
+          state: 'completed',
+          result: {
+            durationSecs: 1,
+            frameCount: 30,
+            mixedAudioChunkCount: 10,
+            outputPath: null,
+            cursorMetadataPath: '/tmp/cursor.json',
+            effectTimelinePath: null,
+            trimMetadataPath: null,
+            cutTimelinePath: null,
+            writerDiagnostics: { audioChunksReceived: 0, audioChunksAppended: 0, audioChunksDiscardedFullOverlap: 0, audioChunksTrimmedPartialOverlap: 0, audioRealFramesAppended: 0, audioSilenceFramesPadded: 0, audioRealRmsMaxBeforeEncode: 0, aacFramesEncoded: 0, silentAacFramesEncoded: 0, generatedSilentTrack: false, videoQueueFullCount: 0, audioQueueFullCount: 0, systemChunksReceivedByWriter: 0, micChunksReceivedByWriter: 0 },
+            diagnostics: { requestedSystemAudio: true, requestedMicrophone: false, microphoneDevice: null, systemChunksReceived: 0, micChunksReceived: 0, systemChunksDropped: 0, micChunksDropped: 0, mixedChunksQueued: 0, writerPushAudioFailures: 0, systemRmsMax: 0, micRmsMax: 0, mixedRmsMax: 0, generatedSilentTrack: false, pairedWindowCount: 0, systemOnlyWindowCount: 0, micOnlyWindowCount: 0, sourceTimeoutWindowCount: 0, systemRmsMaxBeforeWriter: 0, micRmsMaxBeforeWriter: 0, systemWindowsBeforeWriter: 0, micWindowsBeforeWriter: 0, systemFramesBeforeWriter: 0, micFramesBeforeWriter: 0, micStopDiagnostics: null },
+            finalizationErrors: [],
+          },
+        })
+      }
+    })
+
+    await screen.findByText('预览与美化')
+    expect(screen.getByText(/已捕获 30 帧/)).toBeInTheDocument()
   })
 
   it('enters recording state via status fallback when event is not emitted', async () => {

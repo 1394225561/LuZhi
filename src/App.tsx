@@ -27,6 +27,7 @@ import {
   type RecordingPermissions,
   type RecordingResult,
   type RecordingStatus,
+  type WindowInfo,
 } from '@/lib/tauri'
 
 type AppState = 'idle' | 'recording' | 'preview' | 'processing' | 'failed'
@@ -135,6 +136,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState('')
   const [recordingResult, setRecordingResult] = useState<RecordingResult | null>(null)
   const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null)
+  const [selectedWindowId, setSelectedWindowId] = useState<number | null>(null)
   const [resolution, setResolution] = useState(DEFAULT_RESOLUTION)
   const [fps, setFps] = useState(DEFAULT_FPS)
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatusPayload | null>(null)
@@ -175,6 +177,7 @@ export default function App() {
       else if (status.state === 'paused') setIsPaused(true)
       else if (status.state === 'processing') setAppState('processing')
       else if (status.state === 'completed') {
+        if (status.result) setRecordingResult(status.result)
         setAppState('preview')
         setMicVolume(0)
         isStoppingRef.current = false
@@ -257,6 +260,7 @@ export default function App() {
         width: resolution.width,
         height: resolution.height,
         fps,
+        windowId: recordingMode === 'window' ? selectedWindowId ?? undefined : undefined,
       })
       await setAudioConfig({
         captureSystemAudio: systemAudioEnabled,
@@ -279,7 +283,11 @@ export default function App() {
       setErrorMessage(String(e))
       isStartingRef.current = false
     }
-  }, [appState, recordingMode, systemAudioEnabled, micEnabled, micDevice, denoiseEnabled, resolution, fps])
+  }, [appState, recordingMode, selectedWindowId, systemAudioEnabled, micEnabled, micDevice, denoiseEnabled, resolution, fps])
+
+  const handleSelectedWindowChange = useCallback((window: WindowInfo | null) => {
+    setSelectedWindowId(window?.windowId ?? null)
+  }, [])
 
   const handlePauseRecording = useCallback(async () => {
     if (appState !== 'recording') return
@@ -436,6 +444,7 @@ export default function App() {
               setResolution={setResolution}
               fps={fps}
               setFps={setFps}
+              onSelectedWindowChange={handleSelectedWindowChange}
             />
             {/* 权限提示 */}
             {permissions.screenRecording === 'denied' && (

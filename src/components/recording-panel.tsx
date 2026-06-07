@@ -46,6 +46,7 @@ interface RecordingPanelProps {
   setResolution: (res: ResolutionOption) => void
   fps: number
   setFps: (fps: number) => void
+  onSelectedWindowChange: (window: WindowInfo | null) => void
 }
 
 export function RecordingPanel({
@@ -65,6 +66,7 @@ export function RecordingPanel({
   setResolution,
   fps,
   setFps,
+  onSelectedWindowChange,
 }: RecordingPanelProps) {
   const [micDevices, setMicDevices] = useState<MicrophoneDeviceInfo[]>([])
   const [selectedWindow, setSelectedWindow] = useState<WindowInfo | null>(null)
@@ -89,15 +91,19 @@ export function RecordingPanel({
 
     if (mode === 'window') {
       setShowWindowSelector(true)
+    } else {
+      setSelectedWindow(null)
+      onSelectedWindowChange(null)
+      setShowWindowSelector(false)
     }
   }
 
   const handleWindowSelect = async (window: WindowInfo) => {
-    setSelectedWindow(window)
-    setShowWindowSelector(false)
-
     try {
       await setWindowId(window.windowId)
+      setSelectedWindow(window)
+      onSelectedWindowChange(window)
+      setShowWindowSelector(false)
     } catch (error) {
       console.error('设置窗口失败:', error)
     }

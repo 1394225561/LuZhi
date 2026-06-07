@@ -9,21 +9,19 @@ use super::window_list;
 
 /// 窗口状态监控器
 ///
-/// 采用混合事件驱动方案：
-/// - Layer 1: NSWorkspace 通知（实时，应用切换时检测）
-/// - Layer 2: 低频轮询（增量比较，仅状态变化时触发回调）
+/// 采用 200ms 轮询方案检查目标窗口是否仍存在、是否最小化。
 ///
 /// 性能优化：
-/// - 窗口列表缓存 2 秒，避免频繁调用 SCShareableContent
-/// - 200ms 轮询时仅检查缓存的窗口列表
+/// - 仅状态变化时触发回调
+/// - 停止标记由 `stop()` 设置，后台线程在下一轮轮询退出
 pub struct WindowMonitor {
     window_id: u32,
     last_state: Arc<Mutex<WindowRecordingState>>,
     on_state_change: Arc<dyn Fn(WindowRecordingState) + Send + Sync + 'static>,
     stop_flag: Arc<AtomicBool>,
-    /// 窗口列表缓存
+    /// 最近一次窗口列表快照
     cached_windows: Arc<Mutex<Vec<WindowInfo>>>,
-    /// 缓存最后更新时间
+    /// 快照最后更新时间
     last_cache_update: Arc<Mutex<Instant>>,
 }
 
@@ -55,10 +53,6 @@ impl WindowMonitor {
 
     /// 启动监控
     pub fn start(&self) {
-        // Layer 1: NSWorkspace 应用级事件监听
-        self.register_workspace_notifications();
-
-        // Layer 2: 低频轮询（200ms）
         self.start_polling_loop();
     }
 
@@ -72,11 +66,6 @@ impl WindowMonitor {
         self.last_state.lock().unwrap().clone()
     }
 
-    fn register_workspace_notifications(&self) {
-        // TODO: 实现 NSWorkspace 通知监听
-        // 当前仅使用轮询，后续可补充事件监听
-    }
-
     fn start_polling_loop(&self) {
         let window_id = self.window_id;
         let last_state = self.last_state.clone();
@@ -86,15 +75,9 @@ impl WindowMonitor {
         let last_cache_update = self.last_cache_update.clone();
 
         thread::spawn(move || {
-            // 初始加载窗口列表
-            Self::refresh_window_cache(&cached_windows, &last_cache_update);
-
             while !stop_flag.load(Ordering::Relaxed) {
-                let new_state = Self::check_window_state_with_cache(
-                    window_id,
-                    &cached_windows,
-                    &last_cache_update,
-                );
+                Self::refresh_window_cache(&cached_windows, &last_cache_update);
+                let new_state = Self::check_window_state_with_cache(window_id, &cached_windows);
 
                 let mut guard = last_state.lock().unwrap();
 
@@ -131,18 +114,7 @@ impl WindowMonitor {
     fn check_window_state_with_cache(
         window_id: u32,
         cached_windows: &Arc<Mutex<Vec<WindowInfo>>>,
-        last_cache_update: &Arc<Mutex<Instant>>,
     ) -> WindowRecordingState {
-        // 检查是否需要刷新缓存（每 2 秒刷新一次）
-        let needs_refresh = {
-            let last_update = last_cache_update.lock().unwrap();
-            last_update.elapsed() > Duration::from_secs(2)
-        };
-
-        if needs_refresh {
-            Self::refresh_window_cache(cached_windows, last_cache_update);
-        }
-
         // 从缓存中查找窗口
         let windows = cached_windows.lock().unwrap();
         if let Some(window) = windows.iter().find(|w| w.window_id == window_id) {
@@ -197,7 +169,6 @@ mod tests {
     #[test]
     fn window_cache_initialization() {
         let cached_windows: Arc<Mutex<Vec<WindowInfo>>> = Arc::new(Mutex::new(Vec::new()));
-        let last_cache_update = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
 
         // 初始缓存应该为空
         let windows = cached_windows.lock().unwrap();

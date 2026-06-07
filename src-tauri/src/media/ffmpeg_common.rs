@@ -38,6 +38,11 @@ pub struct RequestedAudioContract {
     ///
     /// Default: `false` (strict validation — silent audio is rejected).
     pub allow_silent_if_system_only: bool,
+    /// Whether source-aware diagnostics have already verified requested sources
+    /// reached the writer, allowing aggregate quiet audio to be warning-only.
+    ///
+    /// Default: `false` (strict validation — quiet audio is rejected).
+    pub allow_quiet_when_source_verified: bool,
 }
 
 impl Default for RequestedAudioContract {
@@ -49,6 +54,7 @@ impl Default for RequestedAudioContract {
             min_peak: 0.02,
             audible_min_rms: 0.015,
             allow_silent_if_system_only: false,
+            allow_quiet_when_source_verified: false,
         }
     }
 }
@@ -72,6 +78,12 @@ impl RequestedAudioContract {
         self.allow_silent_if_system_only
             && self.requested_system_audio
             && !self.requested_microphone
+    }
+
+    /// Returns true if quiet non-zero audio should be accepted because
+    /// source-aware diagnostics already verified requested source presence.
+    pub fn should_allow_quiet_source_verified_audio(&self, rms: f64, peak: f32) -> bool {
+        self.allow_quiet_when_source_verified && (rms > 0.0 || peak > 0.0)
     }
 }
 
@@ -578,6 +590,11 @@ pub fn validate_source_artifact_with_audio_contract(
                 "录制音频 contract 验证通过（允许静音）: RMS={:.6}, peak={:.6}, system={}, mic={}",
                 rms, peak, contract.requested_system_audio, contract.requested_microphone,
             );
+        } else if contract.should_allow_quiet_source_verified_audio(rms, peak) {
+            eprintln!(
+                "录制音频 contract 验证通过（source-aware 已验证，允许低音量）: RMS={:.6}, peak={:.6}, system={}, mic={}",
+                rms, peak, contract.requested_system_audio, contract.requested_microphone,
+            );
         } else {
             return Err(AppError::RecordingWriteFailed {
                 reason: format!(
@@ -654,6 +671,11 @@ pub fn validate_export_artifact_with_audio_contract(
         if contract.should_allow_silent_audio() {
             eprintln!(
                 "导出文件 contract 验证通过（允许静音）: RMS={:.6}, peak={:.6}, system={}, mic={}",
+                rms, peak, contract.requested_system_audio, contract.requested_microphone,
+            );
+        } else if contract.should_allow_quiet_source_verified_audio(rms, peak) {
+            eprintln!(
+                "导出文件 contract 验证通过（source-aware 已验证，允许低音量）: RMS={:.6}, peak={:.6}, system={}, mic={}",
                 rms, peak, contract.requested_system_audio, contract.requested_microphone,
             );
         } else {
@@ -1124,6 +1146,90 @@ mod tests {
         assert!(
             result.is_err(),
             "near-silent artifact should still be rejected by Level 1 check"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn requested_audio_contract_allows_quiet_dual_source_when_source_verified() {
+        // BUG-0020 regression: when source-aware diagnostics prove the requested
+        // sources reached the writer, aggregate decoded RMS/peak below Level 1
+        // thresholds should be warning-only, not a finalize failure.
+        use crate::test_support::ffmpeg_helpers::{
+            create_synthetic_source_artifact_strict_with_amplitude, unique_media_path,
+        };
+
+        let path = unique_media_path("source-verified-quiet-dual-audio", "mp4");
+        let result = create_synthetic_source_artifact_strict_with_amplitude(
+            &path,
+            64,
+            48,
+            2_000_000_000,
+            0.002,
+        );
+        assert!(result.is_ok(), "helper should succeed: {:?}", result.err());
+
+        let contract = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: true,
+            allow_quiet_when_source_verified: true,
+            ..Default::default()
+        };
+
+        let result = validate_source_artifact_with_audio_contract(&path, &contract);
+        assert!(
+            result.is_ok(),
+            "quiet source-verified artifact should pass: {:?}",
+            result.err()
+        );
+
+        let inspection = result.unwrap();
+        let rms = inspection.audio_rms.unwrap();
+        let peak = inspection.audio_peak.unwrap();
+        assert!(
+            rms < contract.min_rms,
+            "test premise: RMS should be below min_rms, got {rms}"
+        );
+        assert!(
+            peak < contract.min_peak,
+            "test premise: peak should be below min_peak, got {peak}"
+        );
+        assert!(
+            rms > 0.0 || peak > 0.0,
+            "test premise: artifact should contain quiet non-zero audio"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn requested_audio_contract_source_verified_still_rejects_zero_audio() {
+        // Source-aware quiet bypass must not allow a zero-sample/zero-amplitude
+        // artifact through when microphone was requested.
+        use crate::media::ffmpeg_writer::FfmpegRecordingWriter;
+        use crate::media::recording_writer::RecordingWriter;
+        use crate::test_support::ffmpeg_helpers::{test_video_frame_at, unique_media_path};
+
+        let path = unique_media_path("source-verified-zero-audio-reject", "mp4");
+        {
+            let mut writer = FfmpegRecordingWriter::new(path.clone()).unwrap();
+            writer.push_video(test_video_frame_at(0)).unwrap();
+            writer.push_video(test_video_frame_at(33_333_333)).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let contract = RequestedAudioContract {
+            requested_system_audio: true,
+            requested_microphone: true,
+            allow_quiet_when_source_verified: true,
+            ..Default::default()
+        };
+
+        let result = validate_source_artifact_with_audio_contract(&path, &contract);
+        assert!(
+            result.is_err(),
+            "zero audio should still be rejected when microphone is requested"
         );
 
         let _ = std::fs::remove_file(&path);

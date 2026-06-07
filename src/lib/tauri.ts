@@ -10,6 +10,7 @@ export type RecordingState = 'idle' | 'recording' | 'paused' | 'processing' | 'c
 export type RecordingStatus = {
   state: RecordingState
   canStart: boolean
+  result?: RecordingResult
 }
 
 export type RecordingPermissions = {
@@ -37,6 +38,7 @@ export type CaptureConfig = {
   width?: number
   height?: number
   fps?: number
+  windowId?: number
 }
 
 export type BeautifyConfig = {

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use app::error::AppResult;
 use app::events::{
     CursorEffectSummaryPayload, CutTimelineSummaryPayload, ExportProgressPayload,
     ExportSummaryPayload, LicenseStatusPayload, MicLevelPayload, PermissionPayload,
@@ -22,7 +23,7 @@ use app::recording_library::{LibraryEntrySummary, RecordingContextPayload, Recor
 use app::recording_runtime::TickRuntime;
 use app::state_machine::RecordingState;
 use core::capture::{AudioConfig, DenoiseMode};
-use core::config::CaptureConfig;
+use core::config::{CaptureConfig, CaptureMode};
 use core::cut::{TrimConfig, TrimSensitivity};
 use core::processor::{CursorProcessor, SilenceDetector};
 use core::timeline::{BeautifyConfigSnapshot, EffectTimeline};
@@ -78,6 +79,7 @@ impl Default for BeautifyConfigPayload {
     }
 }
 
+#[derive(Clone)]
 struct AppState {
     service: Arc<Mutex<MacRecordingService>>,
     capture_config: Arc<Mutex<CaptureConfig>>,
@@ -128,6 +130,115 @@ impl AppState {
 fn emit_state_changed(app: &AppHandle, state: RecordingState) {
     let payload = RecordingStatusPayload::from(state);
     let _ = app.emit("recording-state-changed", payload);
+}
+
+fn emit_state_changed_with_result(
+    app: &AppHandle,
+    state: RecordingState,
+    result: &crate::media::recording_writer::RecordingResult,
+) {
+    let status = RecordingStatusPayload::from(state);
+    let _ = app.emit(
+        "recording-state-changed",
+        serde_json::json!({
+            "state": status.state,
+            "canStart": status.can_start,
+            "result": result,
+        }),
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowStateAction {
+    Pause,
+    Resume,
+    Stop,
+}
+
+fn action_for_window_state(
+    window_state: crate::core::window::WindowRecordingState,
+) -> WindowStateAction {
+    use crate::core::window::WindowRecordingState;
+    match window_state {
+        WindowRecordingState::Recording => WindowStateAction::Resume,
+        WindowRecordingState::Minimized => WindowStateAction::Pause,
+        WindowRecordingState::Closed => WindowStateAction::Stop,
+    }
+}
+
+fn register_recording_response(
+    library: &Arc<Mutex<RecordingLibrary>>,
+    response: &StopRecordingResponse,
+) -> Result<(), String> {
+    if let Some(ref video_path) = response.result.output_path {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let cursor_path = response.result.cursor_metadata_path.as_deref();
+        let effect_path = response.result.effect_timeline_path.as_deref();
+        let trim_path = response.result.trim_metadata_path.as_deref();
+        let cut_path = response.result.cut_timeline_path.as_deref();
+
+        let mut library = library.lock().map_err(|_| "录制库锁已损坏".to_string())?;
+        let register_result = library.register(
+            &format!("rec-{now_ms}-{}", response.result.frame_count),
+            now_ms,
+            response.result.duration_secs as f64,
+            video_path,
+            cursor_path,
+            effect_path,
+            trim_path,
+            cut_path,
+        );
+        if let Err(e) = register_result {
+            log::warn!("自动注册录制到历史库失败：{e}");
+        }
+    }
+
+    Ok(())
+}
+
+fn stop_recording_blocking(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(RecordingState, AppResult<StopRecordingResponse>), String> {
+    if let Some(mut tick) = state
+        .tick_runtime
+        .lock()
+        .map_err(|_| "计时器锁已损坏".to_string())?
+        .take()
+    {
+        tick.stop();
+    }
+
+    let response = {
+        let mut service = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        let response = service.stop();
+        let new_state = service.state();
+        (new_state, response)
+    };
+
+    let _ = app.emit("mic-level", MicLevelPayload { level: 0.0 });
+
+    if let Some(mut mic_runtime) = state
+        .mic_level_runtime
+        .lock()
+        .map_err(|_| "麦克风电平锁已损坏".to_string())?
+        .take()
+    {
+        mic_runtime.stop();
+    }
+
+    if let Ok(ref resp) = response.1 {
+        register_recording_response(&state.library, resp)?;
+    }
+
+    Ok(response)
 }
 
 #[tauri::command]
@@ -208,8 +319,7 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
         let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
         match config.mode {
             core::config::CaptureMode::Window => {
-                let window_id = config.window_id
-                    .ok_or("未选择录制窗口".to_string())?;
+                let window_id = config.window_id.ok_or("未选择录制窗口".to_string())?;
                 service
                     .start_window(
                         window_id,
@@ -237,45 +347,6 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
     .map_err(|e| format!("启动录制任务失败: {e}"))??;
 
     emit_state_changed(&app, new_state);
-
-    // Start window-state-monitor runtime (only for window recording mode).
-    {
-        let mut service_guard = state
-            .service
-            .lock()
-            .map_err(|_| "录制服务锁已损坏".to_string())?;
-        if let Some(receiver) = service_guard.take_window_state_receiver() {
-            let window_app = app.clone();
-            let window_title = "录制窗口".to_string();
-
-            // Spawn a thread to listen for window state changes.
-            std::thread::spawn(move || {
-                while let Ok(window_state) = receiver.recv() {
-                    use crate::core::window::WindowRecordingState;
-                    match window_state {
-                        WindowRecordingState::Minimized => {
-                            let _ = window_app.emit("window-state-changed", serde_json::json!({
-                                "state": "minimized",
-                                "windowTitle": window_title
-                            }));
-                        }
-                        WindowRecordingState::Closed => {
-                            let _ = window_app.emit("window-state-changed", serde_json::json!({
-                                "state": "closed",
-                                "windowTitle": window_title
-                            }));
-                            // TODO: 自动停止录制
-                            // let _ = stop_recording(window_app.clone(), state).await;
-                            break;
-                        }
-                        WindowRecordingState::Recording => {
-                            // 窗口恢复，继续录制
-                        }
-                    }
-                }
-            });
-        }
-    }
 
     // Start recording-tick runtime (250ms interval).
     let tick_app = app.clone();
@@ -325,6 +396,89 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
         let _ = app.emit("mic-level", MicLevelPayload { level: 0.0 });
     }
 
+    // Start window-state-monitor listener after runtimes are installed so an
+    // immediate close event cannot leave a fresh tick/mic runtime running.
+    {
+        let mut service_guard = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        if let Some(receiver) = service_guard.take_window_state_receiver() {
+            let window_app = app.clone();
+            let window_state = state.inner().clone();
+            let window_title = "录制窗口".to_string();
+
+            std::thread::spawn(move || {
+                while let Ok(window_state_event) = receiver.recv() {
+                    match action_for_window_state(window_state_event) {
+                        WindowStateAction::Pause => {
+                            let _ = window_app.emit(
+                                "window-state-changed",
+                                serde_json::json!({
+                                    "state": "minimized",
+                                    "windowTitle": window_title
+                                }),
+                            );
+                            let new_state = window_state
+                                .service
+                                .lock()
+                                .map_err(|_| "录制服务锁已损坏".to_string())
+                                .and_then(|mut service| {
+                                    service.pause().map_err(|e| e.to_string())?;
+                                    Ok(service.state())
+                                });
+                            if let Ok(new_state) = new_state {
+                                emit_state_changed(&window_app, new_state);
+                            }
+                        }
+                        WindowStateAction::Resume => {
+                            let new_state = window_state
+                                .service
+                                .lock()
+                                .map_err(|_| "录制服务锁已损坏".to_string())
+                                .and_then(|mut service| {
+                                    service.resume().map_err(|e| e.to_string())?;
+                                    Ok(service.state())
+                                });
+                            if let Ok(new_state) = new_state {
+                                emit_state_changed(&window_app, new_state);
+                            }
+                        }
+                        WindowStateAction::Stop => {
+                            let _ = window_app.emit(
+                                "window-state-changed",
+                                serde_json::json!({
+                                    "state": "closed",
+                                    "windowTitle": window_title
+                                }),
+                            );
+                            match stop_recording_blocking(&window_app, &window_state) {
+                                Ok((new_state, response)) => match response {
+                                    Ok(resp) => {
+                                        emit_state_changed_with_result(
+                                            &window_app,
+                                            new_state,
+                                            &resp.result,
+                                        );
+                                        if resp.failed {
+                                            log::warn!("窗口关闭自动停止录制存在完成错误");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        emit_state_changed(&window_app, new_state);
+                                        log::warn!("窗口关闭自动停止录制失败：{e}");
+                                    }
+                                },
+                                Err(e) => log::warn!("窗口关闭自动停止录制失败：{e}"),
+                            }
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -333,79 +487,15 @@ async fn stop_recording(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<StopRecordingResponse, String> {
-    // Stop the tick runtime first.
-    if let Some(mut tick) = state
-        .tick_runtime
-        .lock()
-        .map_err(|_| "计时器锁已损坏".to_string())?
-        .take()
-    {
-        tick.stop();
-    }
-
-    let service = state.service.clone();
-
+    let app_state = state.inner().clone();
+    let stop_app = app.clone();
     let (new_state, response) = tauri::async_runtime::spawn_blocking(move || {
-        let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
-        let response = service.stop();
-        let new_state = service.state();
-        Ok::<_, String>((new_state, response))
+        stop_recording_blocking(&stop_app, &app_state)
     })
     .await
     .map_err(|e| format!("停止录制任务失败: {e}"))??;
 
-    // Emit final zero mic-level before stopping the runtime so the frontend
-    // receives the zero value and clears its indicator.
-    let _ = app.emit("mic-level", MicLevelPayload { level: 0.0 });
-
-    // Stop the mic-level runtime.
-    if let Some(mut mic_runtime) = state
-        .mic_level_runtime
-        .lock()
-        .map_err(|_| "麦克风电平锁已损坏".to_string())?
-        .take()
-    {
-        mic_runtime.stop();
-    }
-
     emit_state_changed(&app, new_state);
-
-    // Auto-register to library on successful stop. Only video_path is
-    // strictly required; cursor_metadata_path and other sidecar paths
-    // are optional (they may not exist yet or cursor tracking may have
-    // been disabled). Registration proceeds even when `failed` is true
-    // because a valid video file should always appear in the library;
-    // the `failed` flag only controls whether the frontend shows error
-    // diagnostics.
-    if let Ok(ref resp) = response {
-        if let Some(ref video_path) = resp.result.output_path {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            let cursor_path = resp.result.cursor_metadata_path.as_deref();
-            let effect_path = resp.result.effect_timeline_path.as_deref();
-            let trim_path = resp.result.trim_metadata_path.as_deref();
-            let cut_path = resp.result.cut_timeline_path.as_deref();
-
-            let mut library = state.library.lock().map_err(|_| "录制库锁已损坏".to_string())?;
-            let register_result = library.register(
-                &format!("rec-{now_ms}-{}", resp.result.frame_count),
-                now_ms,
-                resp.result.duration_secs as f64,
-                video_path,
-                cursor_path,
-                effect_path,
-                trim_path,
-                cut_path,
-            );
-            if let Err(e) = register_result {
-                log::warn!("自动注册录制到历史库失败：{e}");
-            }
-        }
-    }
-
     response.map_err(|e| e.to_string())
 }
 
@@ -442,6 +532,49 @@ struct SetCaptureModePayload {
     width: Option<u32>,
     height: Option<u32>,
     fps: Option<u32>,
+    window_id: Option<u32>,
+}
+
+fn build_capture_config_update(
+    previous: CaptureConfig,
+    mode: CaptureMode,
+    width: Option<u32>,
+    height: Option<u32>,
+    fps: Option<u32>,
+    show_system_cursor: bool,
+) -> CaptureConfig {
+    CaptureConfig {
+        mode,
+        width: width.unwrap_or(1920),
+        height: height.unwrap_or(1080),
+        fps: fps.unwrap_or(30),
+        show_system_cursor,
+        window_id: if mode == CaptureMode::Window {
+            previous.window_id
+        } else {
+            None
+        },
+    }
+}
+
+fn apply_capture_config_payload(
+    previous: CaptureConfig,
+    payload: SetCaptureModePayload,
+    show_system_cursor: bool,
+) -> Result<CaptureConfig, String> {
+    let mode = CaptureMode::mode_from_str(&payload.mode)?;
+    let mut config = build_capture_config_update(
+        previous,
+        mode,
+        payload.width,
+        payload.height,
+        payload.fps,
+        show_system_cursor,
+    );
+    if mode == CaptureMode::Window && payload.window_id.is_some() {
+        config.window_id = payload.window_id;
+    }
+    Ok(config)
 }
 
 #[tauri::command]
@@ -449,7 +582,6 @@ fn set_capture_mode(
     state: tauri::State<'_, AppState>,
     payload: SetCaptureModePayload,
 ) -> Result<(), String> {
-    let mode = core::config::CaptureMode::mode_from_str(&payload.mode)?;
     let beautify_config = state
         .beautify_config
         .lock()
@@ -461,14 +593,7 @@ fn set_capture_mode(
         .capture_config
         .lock()
         .map_err(|_| "捕获配置锁已损坏".to_string())?;
-    *config = CaptureConfig {
-        mode,
-        width: payload.width.unwrap_or(1920),
-        height: payload.height.unwrap_or(1080),
-        fps: payload.fps.unwrap_or(30),
-        show_system_cursor,
-        window_id: None,
-    };
+    *config = apply_capture_config_payload(*config, payload, show_system_cursor)?;
     Ok(())
 }
 
@@ -837,10 +962,9 @@ async fn get_cursor_effect_timeline(
             .ok_or_else(|| "没有可用的光标效果时间线，请先构建光标效果".to_string())?
     };
 
-    let json = std::fs::read_to_string(&path)
-        .map_err(|e| format!("读取光标效果时间线失败: {e}"))?;
-    serde_json::from_str(&json)
-        .map_err(|e| format!("解析光标效果时间线失败: {e}"))
+    let json =
+        std::fs::read_to_string(&path).map_err(|e| format!("读取光标效果时间线失败: {e}"))?;
+    serde_json::from_str(&json).map_err(|e| format!("解析光标效果时间线失败: {e}"))
 }
 
 fn license_state_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -880,7 +1004,10 @@ fn activate_license(_app: AppHandle, code: String) -> Result<(), String> {
 
 #[tauri::command]
 fn list_recordings(state: tauri::State<'_, AppState>) -> Result<Vec<LibraryEntrySummary>, String> {
-    let library = state.library.lock().map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
     Ok(library.list())
 }
 
@@ -889,14 +1016,37 @@ fn get_recording_context(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<RecordingContextPayload, String> {
-    let library = state.library.lock().map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
     let ctx = library.get_recording(&id).map_err(|e| e.to_string())?;
     Ok(RecordingContextPayload {
         video_path: ctx.entry.video_path.to_string_lossy().to_string(),
-        cursor_metadata_path: ctx.entry.cursor_metadata_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-        effect_timeline_path: ctx.entry.effect_timeline_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-        trim_metadata_path: ctx.entry.trim_metadata_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-        cut_timeline_path: ctx.entry.cut_timeline_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        cursor_metadata_path: ctx
+            .entry
+            .cursor_metadata_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        effect_timeline_path: ctx
+            .entry
+            .effect_timeline_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        trim_metadata_path: ctx
+            .entry
+            .trim_metadata_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        cut_timeline_path: ctx
+            .entry
+            .cut_timeline_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
         metadata_json: ctx.metadata_json,
         effect_timeline_json: ctx.effect_timeline_json,
         cut_timeline_json: ctx.cut_timeline_json,
@@ -908,17 +1058,22 @@ fn import_recording(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<LibraryEntrySummary, String> {
-    let mut library = state.library.lock().map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
-    let entry = library.import(Path::new(&path)).map_err(|e| e.to_string())?;
+    let mut library = state
+        .library
+        .lock()
+        .map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
+    let entry = library
+        .import(Path::new(&path))
+        .map_err(|e| e.to_string())?;
     Ok(entry)
 }
 
 #[tauri::command]
-fn delete_recording(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
-    let mut library = state.library.lock().map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
+fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    let mut library = state
+        .library
+        .lock()
+        .map_err(|_| "录制库锁已损坏：lock poisoned".to_string())?;
     library.delete(&id, true).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -939,17 +1094,15 @@ async fn list_windows() -> Result<Vec<core::window::WindowInfo>, String> {
 
 /// 设置录制目标窗口 ID
 #[tauri::command]
-async fn set_window_id(
-    state: tauri::State<'_, AppState>,
-    window_id: u32,
-) -> Result<(), String> {
+async fn set_window_id(state: tauri::State<'_, AppState>, window_id: u32) -> Result<(), String> {
     // 验证窗口存在
     #[cfg(target_os = "macos")]
     {
-        let windows = platform::macos::window_list::list_windows()
-            .map_err(|e| e.to_string())?;
+        let windows = platform::macos::window_list::list_windows().map_err(|e| e.to_string())?;
 
-        let window = windows.iter().find(|w| w.window_id == window_id)
+        let window = windows
+            .iter()
+            .find(|w| w.window_id == window_id)
             .ok_or(format!("窗口未找到：{window_id}"))?;
 
         if !window.is_on_screen {
@@ -1028,12 +1181,8 @@ async fn export_video(
         // the effect timeline is REQUIRED. A failed build must block export
         // to prevent silent "no cursor, no beautification" exports (BUG-005).
         let cursor_needs_overlay = config.cursor_magnification || config.cursor_smoothing;
-        let cursor = build_cursor_effect_timeline(
-            app.clone(),
-            state.clone(),
-            recording_id.clone(),
-        )
-        .await;
+        let cursor =
+            build_cursor_effect_timeline(app.clone(), state.clone(), recording_id.clone()).await;
 
         // Progress: cursor timeline preparation (0% → 5%).
         let _ = app.emit(
@@ -1069,14 +1218,7 @@ async fn export_video(
         );
 
         let cut = if config.auto_trim_silences {
-            Some(
-                build_cut_timeline(
-                    app.clone(),
-                    state.clone(),
-                    recording_id.clone(),
-                )
-                .await?,
-            )
+            Some(build_cut_timeline(app.clone(), state.clone(), recording_id.clone()).await?)
         } else {
             None
         };
@@ -1583,6 +1725,7 @@ pub fn run() -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::{CaptureConfig, CaptureMode};
     use crate::core::frame::MediaTimestamp;
     use crate::core::timeline::{ClickPhase, CursorClick, CursorKind, CursorSample, MouseButton};
 
@@ -1593,6 +1736,47 @@ mod tests {
             y,
             kind: CursorKind::default(),
         }
+    }
+
+    #[test]
+    fn capture_mode_update_preserves_selected_window_for_window_mode() {
+        let previous = CaptureConfig {
+            mode: CaptureMode::Window,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            show_system_cursor: true,
+            window_id: Some(42),
+        };
+
+        let next = build_capture_config_update(
+            previous,
+            CaptureMode::Window,
+            Some(1280),
+            Some(720),
+            Some(60),
+            false,
+        );
+
+        assert_eq!(next.window_id, Some(42));
+    }
+
+    #[test]
+    fn window_state_actions_pause_resume_and_stop_recording() {
+        use crate::core::window::WindowRecordingState;
+
+        assert_eq!(
+            action_for_window_state(WindowRecordingState::Minimized),
+            WindowStateAction::Pause
+        );
+        assert_eq!(
+            action_for_window_state(WindowRecordingState::Recording),
+            WindowStateAction::Resume
+        );
+        assert_eq!(
+            action_for_window_state(WindowRecordingState::Closed),
+            WindowStateAction::Stop
+        );
     }
 
     fn click(nanos: u64, phase: ClickPhase, x: f32, y: f32) -> CursorClick {
