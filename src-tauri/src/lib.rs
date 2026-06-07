@@ -166,9 +166,9 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
         .lock()
         .map_err(|_| "捕获配置锁已损坏".to_string())?;
 
-    // 窗口/区域录制模式尚未实现
-    if config.mode != core::config::CaptureMode::FullScreen {
-        return Err("窗口/区域录制模式正在开发中，当前仅支持全屏录制".to_string());
+    // 区域录制模式尚未实现
+    if config.mode == core::config::CaptureMode::Area {
+        return Err("区域录制模式正在开发中".to_string());
     }
 
     let audio_config = state
@@ -206,14 +206,30 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
 
     let new_state = tauri::async_runtime::spawn_blocking(move || {
         let mut service = service.lock().map_err(|_| "录制服务锁已损坏".to_string())?;
-        service
-            .start(
-                config,
-                audio_config,
-                beautify_snapshot,
-                cursor_main_thread_dispatcher,
-            )
-            .map_err(|e| e.to_string())?;
+        match config.mode {
+            core::config::CaptureMode::Window => {
+                let window_id = config.window_id
+                    .ok_or("未选择录制窗口".to_string())?;
+                service
+                    .start_window(
+                        window_id,
+                        audio_config,
+                        beautify_snapshot,
+                        cursor_main_thread_dispatcher,
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            _ => {
+                service
+                    .start(
+                        config,
+                        audio_config,
+                        beautify_snapshot,
+                        cursor_main_thread_dispatcher,
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         Ok::<_, String>(service.state())
     })
     .await
@@ -867,6 +883,52 @@ fn delete_recording(
     Ok(())
 }
 
+/// 获取当前可见窗口列表
+#[tauri::command]
+async fn list_windows() -> Result<Vec<core::window::WindowInfo>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::macos::window_list::list_windows().map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("窗口录制尚未支持当前平台".to_string())
+    }
+}
+
+/// 设置录制目标窗口 ID
+#[tauri::command]
+async fn set_window_id(
+    state: tauri::State<'_, AppState>,
+    window_id: u32,
+) -> Result<(), String> {
+    // 验证窗口存在
+    #[cfg(target_os = "macos")]
+    {
+        let windows = platform::macos::window_list::list_windows()
+            .map_err(|e| e.to_string())?;
+
+        let window = windows.iter().find(|w| w.window_id == window_id)
+            .ok_or(format!("窗口未找到：{window_id}"))?;
+
+        if !window.is_on_screen {
+            return Err(format!("窗口已最小化，请恢复窗口后重试：{}", window.title));
+        }
+    }
+
+    // 更新配置
+    let mut config = state
+        .capture_config
+        .lock()
+        .map_err(|_| "捕获配置锁已损坏".to_string())?;
+
+    config.mode = core::config::CaptureMode::Window;
+    config.window_id = Some(window_id);
+
+    Ok(())
+}
+
 #[tauri::command]
 fn cancel_export(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let guard = state
@@ -1461,7 +1523,9 @@ pub fn run() -> tauri::Result<()> {
             list_recordings,
             get_recording_context,
             import_recording,
-            delete_recording
+            delete_recording,
+            list_windows,
+            set_window_id
         ])
         .setup(|app| {
             // Initialize recording library with proper app data dir.
