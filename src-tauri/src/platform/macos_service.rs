@@ -10,6 +10,7 @@ use super::macos::cpal_microphone::CpalMicrophoneCapture;
 use super::macos::cursor_kind::CursorMainThreadDispatcher;
 use super::macos::cursor_source::MacCursorSource;
 use super::macos::screen_capture_kit::MacScreenCapture;
+use super::macos::window_monitor::WindowMonitor;
 use crate::app::cursor_metadata_runtime::CursorMetadataRuntime;
 use crate::app::error::AppResult;
 use crate::app::state_machine::{RecordingState, RecordingStateMachine};
@@ -74,6 +75,10 @@ pub struct MacRecordingService {
     last_requested_system_audio: bool,
     /// Last recording's requested microphone flag (for export contract).
     last_requested_microphone: bool,
+    /// 窗口状态监控器（仅窗口录制模式使用）
+    window_monitor: Option<WindowMonitor>,
+    /// 窗口状态变化接收器（仅窗口录制模式使用）
+    window_state_receiver: Option<std::sync::mpsc::Receiver<crate::core::window::WindowRecordingState>>,
 }
 
 impl MacRecordingService {
@@ -87,6 +92,13 @@ impl MacRecordingService {
 
     pub fn last_requested_microphone(&self) -> bool {
         self.last_requested_microphone
+    }
+
+    /// 取出窗口状态接收器（仅窗口录制模式使用）
+    ///
+    /// 调用后接收器所有权转移给调用者，服务内部不再持有。
+    pub fn take_window_state_receiver(&mut self) -> Option<std::sync::mpsc::Receiver<crate::core::window::WindowRecordingState>> {
+        self.window_state_receiver.take()
     }
 
     pub fn set_last_effect_timeline_path(&mut self, path: Option<String>) {
@@ -138,6 +150,8 @@ impl MacRecordingService {
             session_id: 0,
             last_requested_system_audio: false,
             last_requested_microphone: false,
+            window_monitor: None,
+            window_state_receiver: None,
         }
     }
 
@@ -339,6 +353,13 @@ impl MacRecordingService {
         self.system_audio_receiver = Some(audio_receiver);
         self.last_requested_system_audio = audio_config.capture_system_audio;
 
+        // Start window state monitor for auto-pause/stop on minimize/close.
+        let (window_state_tx, window_state_rx) = std::sync::mpsc::channel();
+        let mut monitor = WindowMonitor::with_channel(window_id, window_state_tx);
+        monitor.start();
+        self.window_monitor = Some(monitor);
+        self.window_state_receiver = Some(window_state_rx);
+
         // Start microphone capture if requested.
         if audio_config.capture_microphone {
             let (mic_sender, mic_receiver) = bounded_media_channel(AUDIO_QUEUE_CAPACITY, "mic");
@@ -530,6 +551,12 @@ impl<'a> RecordingFinalizeGuard<'a> {
         } else {
             eprintln!("本轮未启动麦克风，跳过 mic stop");
         }
+
+        // Stop window monitor if running (window recording mode).
+        if let Some(monitor) = self.service.window_monitor.take() {
+            monitor.stop();
+        }
+        self.service.window_state_receiver = None;
 
         // Then stop screen capture so no new media can be enqueued.
         self.capture_stop_result = ScreenCapture::stop(&mut self.service.screen_capture);

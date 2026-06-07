@@ -20,6 +20,7 @@ pub struct WindowMonitor {
 }
 
 impl WindowMonitor {
+    /// 创建窗口监控器（使用回调）
     pub fn new(
         window_id: u32,
         on_state_change: impl Fn(WindowRecordingState) + Send + Sync + 'static,
@@ -30,6 +31,16 @@ impl WindowMonitor {
             on_state_change: Arc::new(on_state_change),
             stop_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// 创建窗口监控器（使用 channel）
+    pub fn with_channel(
+        window_id: u32,
+        sender: std::sync::mpsc::Sender<WindowRecordingState>,
+    ) -> Self {
+        Self::new(window_id, move |state| {
+            let _ = sender.send(state);
+        })
     }
 
     /// 启动监控
@@ -44,6 +55,11 @@ impl WindowMonitor {
     /// 停止监控
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// 获取当前窗口状态
+    pub fn current_state(&self) -> WindowRecordingState {
+        self.last_state.lock().unwrap().clone()
     }
 
     fn register_workspace_notifications(&self) {
@@ -105,5 +121,26 @@ mod tests {
 
         state = WindowRecordingState::Closed;
         assert_eq!(state, WindowRecordingState::Closed);
+    }
+
+    #[test]
+    fn window_monitor_with_channel() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let monitor = WindowMonitor::with_channel(123, tx);
+
+        // 初始状态应该是 Recording
+        assert_eq!(monitor.current_state(), WindowRecordingState::Recording);
+
+        // 模拟状态变化
+        let mut guard = monitor.last_state.lock().unwrap();
+        *guard = WindowRecordingState::Minimized;
+        drop(guard);
+
+        // 手动调用回调来测试 channel
+        (monitor.on_state_change)(WindowRecordingState::Minimized);
+
+        // 验证 channel 收到了消息
+        let received = rx.recv_timeout(Duration::from_millis(100)).unwrap();
+        assert_eq!(received, WindowRecordingState::Minimized);
     }
 }

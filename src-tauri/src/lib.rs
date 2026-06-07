@@ -237,6 +237,52 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
 
     emit_state_changed(&app, new_state);
 
+    // Start window-state-monitor runtime (only for window recording mode).
+    {
+        let mut service_guard = state
+            .service
+            .lock()
+            .map_err(|_| "录制服务锁已损坏".to_string())?;
+        if let Some(receiver) = service_guard.take_window_state_receiver() {
+            let window_app = app.clone();
+            let window_title = {
+                let config = state
+                    .capture_config
+                    .lock()
+                    .map_err(|_| "捕获配置锁已损坏".to_string())?;
+                // 获取窗口标题（从配置中无法获取，需要重新查询）
+                "录制窗口".to_string()
+            };
+
+            // Spawn a thread to listen for window state changes.
+            std::thread::spawn(move || {
+                while let Ok(window_state) = receiver.recv() {
+                    use crate::core::window::WindowRecordingState;
+                    match window_state {
+                        WindowRecordingState::Minimized => {
+                            let _ = window_app.emit("window-state-changed", serde_json::json!({
+                                "state": "minimized",
+                                "windowTitle": window_title
+                            }));
+                        }
+                        WindowRecordingState::Closed => {
+                            let _ = window_app.emit("window-state-changed", serde_json::json!({
+                                "state": "closed",
+                                "windowTitle": window_title
+                            }));
+                            // TODO: 自动停止录制
+                            // let _ = stop_recording(window_app.clone(), state).await;
+                            break;
+                        }
+                        WindowRecordingState::Recording => {
+                            // 窗口恢复，继续录制
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     // Start recording-tick runtime (250ms interval).
     let tick_app = app.clone();
     let mut tick_runtime = state
