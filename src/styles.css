@@ -10,6 +10,12 @@ html {
   --radius: 0.5rem;
 }
 
+@property --history-sidebar-width {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+
 .dark {
   /* Canvas — near-pure neutral black */
   --background: #040506;

@@ -111,23 +111,16 @@ describe('RecordingSidebar', () => {
     const panel = container.querySelector('div.fixed.right-0.top-0')
 
     expect(panel).toBeInTheDocument()
-    expect(panel).toHaveClass('w-0')
+    expect(panel).toHaveClass('w-[var(--history-sidebar-width)]')
     expect(panel).toHaveClass('border-l-0')
     expect(panel).toHaveClass('shadow-none')
     expect(panel).toHaveClass('pointer-events-none')
   })
 
-  it.each([
-    { isOpen: false, expectedRightClass: 'right-2', expectedDelayClass: 'delay-0' },
-    {
-      isOpen: true,
-      expectedRightClass: 'right-[calc(360px+0.5rem)]',
-      expectedDelayClass: 'delay-200',
-    },
-  ])(
-    'anchors the borderless toggle with the correct right offset when open is $isOpen',
-    ({ isOpen, expectedRightClass, expectedDelayClass }) => {
-      render(
+  it.each([false, true])(
+    'links the borderless toggle to the animated sidebar edge when open is %s',
+    (isOpen) => {
+      const { container } = render(
         <RecordingSidebar
           isOpen={isOpen}
           onToggle={vi.fn()}
@@ -136,16 +129,36 @@ describe('RecordingSidebar', () => {
       )
 
       const toggle = screen.getByTitle('历史录制')
+      const root = toggle.parentElement
+      const panel = container.querySelector('div.fixed.right-0.top-0')
 
+      expect(root).toHaveClass('absolute')
+      expect(root).toHaveClass('inset-x-0')
+      expect(root).toHaveClass('top-0')
+      expect(root).toHaveClass('h-0')
+      expect(root).toHaveClass('pointer-events-none')
+      expect(root).toHaveClass('transition-[--history-sidebar-width]')
+      expect(root).toHaveClass(
+        isOpen ? '[--history-sidebar-width:360px]' : '[--history-sidebar-width:0px]',
+      )
+      expect(panel).toHaveClass('w-[var(--history-sidebar-width)]')
+      expect(panel).toHaveClass(isOpen ? 'pointer-events-auto' : 'pointer-events-none')
       expect(toggle).toHaveClass('absolute')
       expect(toggle).toHaveClass('-top-8')
-      expect(toggle).toHaveClass(expectedRightClass)
-      expect(toggle).toHaveClass(expectedDelayClass)
-      expect(toggle).toHaveClass('transition-[right]')
+      expect(toggle).toHaveClass('pointer-events-auto')
+      expect(toggle).toHaveClass('transition-colors')
+      expect(toggle).toHaveClass(
+        'right-[max(0.5rem,calc(var(--history-sidebar-width)-(50vw-160px)))]',
+      )
+      expect(root).not.toHaveClass('contents')
       expect(toggle).not.toHaveClass('fixed')
       expect(toggle).not.toHaveClass('right-0')
       expect(toggle).not.toHaveClass('right-[360px]')
       expect(toggle).not.toHaveClass('right-[max(12px,calc(50%_-_208px))]')
+      expect(toggle).not.toHaveClass('right-2')
+      expect(toggle).not.toHaveClass('right-[calc(360px+0.5rem)]')
+      expect(toggle).not.toHaveClass('delay-200')
+      expect(toggle).not.toHaveClass('transition-[right]')
       expect(toggle).not.toHaveClass('transition-all')
       expect(toggle).not.toHaveClass('border')
       expect(toggle).not.toHaveClass('shadow-lg')
@@ -164,9 +177,22 @@ describe('RecordingSidebar', () => {
     const panel = container.querySelector('div.fixed.right-0.top-0')
 
     expect(panel).toBeInTheDocument()
-    expect(panel).toHaveClass('w-[360px]')
+    expect(panel).toHaveClass('w-[var(--history-sidebar-width)]')
     expect(panel).toHaveClass('border-l-0')
     expect(panel).toHaveClass('shadow-none')
     expect(panel).not.toHaveClass('shadow-2xl')
+  })
+
+  it('registers the shared sidebar width as an animatable length', async () => {
+    const fsModule = 'node:fs'
+    const { readFileSync } = await import(fsModule) as {
+      readFileSync: (path: string, encoding: string) => string
+    }
+    const css = readFileSync('src/styles.css', 'utf8')
+
+    expect(css).toContain('@property --history-sidebar-width')
+    expect(css).toContain("syntax: '<length>';")
+    expect(css).toContain('inherits: true;')
+    expect(css).toContain('initial-value: 0px;')
   })
 })
