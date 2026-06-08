@@ -503,10 +503,31 @@ export default function App() {
         </div>
         <div className="flex-1 w-full max-w-4xl mx-auto my-8 rounded-2xl border-2 border-dashed border-border/30 flex items-center justify-center">
           <div className="text-center text-muted-foreground">
-            <p className="text-sm mb-1">
+            <p className="text-sm mb-3">
               正在录制 {recordingMode === 'fullscreen' ? '全屏' : recordingMode === 'window' ? '窗口' : '区域'}
             </p>
-            <p className="text-xs opacity-60">此区域表示被录制的屏幕内容</p>
+            <div className="flex gap-8 justify-center">
+              <div className="text-left">
+                <p className="text-[10px] uppercase tracking-wide mb-1.5">画面</p>
+                <p className="text-xs">{resolution.width}×{resolution.height}</p>
+                <p className="text-xs">{fps} fps</p>
+              </div>
+              <div className="text-left">
+                <p className="text-[10px] uppercase tracking-wide mb-1.5">音频</p>
+                <p className="text-xs">
+                  系统音频{' '}
+                  <span className={systemAudioEnabled ? 'text-green-400' : 'text-muted-foreground'}>
+                    {systemAudioEnabled ? '✓' : '✗'}
+                  </span>
+                </p>
+                <p className="text-xs">
+                  麦克风{' '}
+                  <span className={micEnabled ? 'text-green-400' : 'text-muted-foreground'}>
+                    {micEnabled ? '✓' : '✗'}
+                  </span>
+                </p>
+              </div>
+            </div>
           </div>
         </div>
         <div className="h-12" />
