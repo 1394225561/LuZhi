@@ -2714,4 +2714,53 @@ describe('App', () => {
     // At least: progress bar, volume, magnification factor
     expect(sliders.length).toBeGreaterThanOrEqual(3)
   })
+
+  it('shows recording parameter summary during recording', async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+    const stateCallbacks: Array<(status: { state: string }) => void> = []
+
+    vi.mocked(listen).mockImplementation(
+      (event: string, callback: (event: { event: string; id: number; payload: unknown }) => void) => {
+        if (event === 'recording-state-changed') {
+          stateCallbacks.push((status) => callback({ event, id: 0, payload: status }))
+        }
+        return Promise.resolve(() => {})
+      },
+    )
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'recording_status') return Promise.resolve({ state: 'idle', canStart: true })
+      if (command === 'recording_permissions') return Promise.resolve({ screenRecording: 'granted', microphone: 'granted', accessibility: 'granted' })
+      if (command === 'set_capture_mode') return Promise.resolve()
+      if (command === 'set_audio_config') return Promise.resolve()
+      if (command === 'start_recording') return Promise.resolve()
+      return Promise.reject(new Error(`unexpected command ${command}`))
+    })
+
+    render(<App />)
+
+    // Start recording
+    const startButtons = await screen.findAllByText('开始录制')
+    fireEvent.click(startButtons[0])
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('start_recording', undefined)
+    })
+
+    // Enter recording state
+    act(() => {
+      for (const cb of stateCallbacks) {
+        cb({ state: 'recording' })
+      }
+    })
+
+    // Verify grouped grid appears with recording parameters
+    await vi.waitFor(() => {
+      expect(screen.getByText('画面')).toBeInTheDocument()
+      expect(screen.getByText('音频')).toBeInTheDocument()
+      expect(screen.getByText('1920×1080')).toBeInTheDocument()
+      expect(screen.getByText('30 fps')).toBeInTheDocument()
+      expect(screen.getByText(/系统音频/)).toBeInTheDocument()
+      expect(screen.getByText(/麦克风/)).toBeInTheDocument()
+    })
+  })
 })
