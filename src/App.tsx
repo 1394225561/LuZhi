@@ -32,7 +32,11 @@ import {
 
 type AppState = 'idle' | 'recording' | 'preview' | 'processing' | 'failed'
 
-const DEFAULT_RESOLUTION = { width: 1920, height: 1080, label: '1080p (1920×1080)' }
+const DEFAULT_RESOLUTION = {
+  width: 1920,
+  height: 1080,
+  label: '1080p (1920×1080)',
+}
 const DEFAULT_FPS = 30
 const NON_DRAG_TARGET_SELECTOR = [
   'button',
@@ -54,14 +58,17 @@ const NON_DRAG_TARGET_SELECTOR = [
   '[contenteditable]:not([contenteditable="false"])',
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ')
-const TEXT_DRAG_TARGET_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, span, code, pre, kbd, label, small, strong, em'
+const TEXT_DRAG_TARGET_SELECTOR =
+  'p, h1, h2, h3, h4, h5, h6, span, code, pre, kbd, label, small, strong, em'
 
 /**
  * Creates a RecordingResult with zeroed diagnostics for re-opening a past recording.
  * If RecordingResult/WriterDiagnostics/RecordingDiagnostics gain new fields,
  * the TypeScript compiler will flag missing fields here.
  */
-function createEmptyRecordingResult(overrides: Partial<RecordingResult> = {}): RecordingResult {
+function createEmptyRecordingResult(
+  overrides: Partial<RecordingResult> = {},
+): RecordingResult {
   return {
     durationSecs: 0,
     frameCount: 0,
@@ -120,7 +127,9 @@ function createEmptyRecordingResult(overrides: Partial<RecordingResult> = {}): R
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>('idle')
-  const [recordingMode, setRecordingMode] = useState<'fullscreen' | 'window' | 'area'>('fullscreen')
+  const [recordingMode, setRecordingMode] = useState<
+    'fullscreen' | 'window' | 'area'
+  >('fullscreen')
   const [systemAudioEnabled, setSystemAudioEnabled] = useState(true)
   const [micEnabled, setMicEnabled] = useState(false)
   const [micDevice, setMicDevice] = useState<string | null>(null)
@@ -134,12 +143,16 @@ export default function App() {
     accessibility: 'unknown',
   })
   const [errorMessage, setErrorMessage] = useState('')
-  const [recordingResult, setRecordingResult] = useState<RecordingResult | null>(null)
-  const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null)
+  const [recordingResult, setRecordingResult] =
+    useState<RecordingResult | null>(null)
+  const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(
+    null,
+  )
   const [selectedWindowId, setSelectedWindowId] = useState<number | null>(null)
   const [resolution, setResolution] = useState(DEFAULT_RESOLUTION)
   const [fps, setFps] = useState(DEFAULT_FPS)
-  const [licenseStatus, setLicenseStatus] = useState<LicenseStatusPayload | null>(null)
+  const [licenseStatus, setLicenseStatus] =
+    useState<LicenseStatusPayload | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const isStartingRef = useRef(false)
   const isStoppingRef = useRef(false)
@@ -156,7 +169,9 @@ export default function App() {
       }
     })
     void fetchRecordingPermissions().then(setPermissions)
-    void fetchLicenseStatus().then(setLicenseStatus).catch(() => setLicenseStatus(null))
+    void fetchLicenseStatus()
+      .then(setLicenseStatus)
+      .catch(() => setLicenseStatus(null))
   }, [])
 
   // 监听录制状态变化事件
@@ -168,29 +183,30 @@ export default function App() {
         setMicVolume(0)
         isStartingRef.current = false
         isStoppingRef.current = false
-      }
-      else if (status.state === 'recording') {
+      } else if (status.state === 'recording') {
         setAppState('recording')
         setIsPaused(false)
         isStartingRef.current = false
-      }
-      else if (status.state === 'paused') setIsPaused(true)
+      } else if (status.state === 'paused') setIsPaused(true)
       else if (status.state === 'processing') setAppState('processing')
       else if (status.state === 'completed') {
         if (status.result) setRecordingResult(status.result)
         setAppState('preview')
         setMicVolume(0)
         isStoppingRef.current = false
-      }
-      else if (status.state === 'failed') {
+      } else if (status.state === 'failed') {
         setAppState('failed')
         setErrorMessage((current) => current || '录制过程中发生错误')
         setMicVolume(0)
         isStartingRef.current = false
         isStoppingRef.current = false
       }
-    }).then((fn) => { unlisten = fn })
-    return () => { unlisten?.() }
+    }).then((fn) => {
+      unlisten = fn
+    })
+    return () => {
+      unlisten?.()
+    }
   }, [])
 
   // 监听录制计时事件
@@ -198,8 +214,12 @@ export default function App() {
     let unlisten: (() => void) | undefined
     void onRecordingTick((elapsed) => {
       setElapsedTime(elapsed)
-    }).then((fn) => { unlisten = fn })
-    return () => { unlisten?.() }
+    }).then((fn) => {
+      unlisten = fn
+    })
+    return () => {
+      unlisten?.()
+    }
   }, [])
 
   // 监听真实麦克风电平事件
@@ -214,7 +234,10 @@ export default function App() {
         else unlisten = fn
       })
     }
-    return () => { cancelled = true; unlisten?.() }
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
   }, [appState])
 
   // 监听窗口状态变化事件
@@ -237,9 +260,13 @@ export default function App() {
             })
             break
         }
-      }
-    ).then((fn) => { unlisten = fn })
-    return () => { unlisten?.() }
+      },
+    ).then((fn) => {
+      unlisten = fn
+    })
+    return () => {
+      unlisten?.()
+    }
   }, [])
 
   // 麦克风关闭时清空残留电平
@@ -260,7 +287,10 @@ export default function App() {
         width: resolution.width,
         height: resolution.height,
         fps,
-        windowId: recordingMode === 'window' ? selectedWindowId ?? undefined : undefined,
+        windowId:
+          recordingMode === 'window'
+            ? (selectedWindowId ?? undefined)
+            : undefined,
       })
       await setAudioConfig({
         captureSystemAudio: systemAudioEnabled,
@@ -283,11 +313,24 @@ export default function App() {
       setErrorMessage(String(e))
       isStartingRef.current = false
     }
-  }, [appState, recordingMode, selectedWindowId, systemAudioEnabled, micEnabled, micDevice, denoiseEnabled, resolution, fps])
+  }, [
+    appState,
+    recordingMode,
+    selectedWindowId,
+    systemAudioEnabled,
+    micEnabled,
+    micDevice,
+    denoiseEnabled,
+    resolution,
+    fps,
+  ])
 
-  const handleSelectedWindowChange = useCallback((window: WindowInfo | null) => {
-    setSelectedWindowId(window?.windowId ?? null)
-  }, [])
+  const handleSelectedWindowChange = useCallback(
+    (window: WindowInfo | null) => {
+      setSelectedWindowId(window?.windowId ?? null)
+    },
+    [],
+  )
 
   const handlePauseRecording = useCallback(async () => {
     if (appState !== 'recording') return
@@ -324,7 +367,8 @@ export default function App() {
       })
       if (response.failed) {
         // Hard finalize failure — enter failed state with specific error details.
-        const errorDetail = result.finalizationErrors?.join('; ') || '录制完成但存在错误'
+        const errorDetail =
+          result.finalizationErrors?.join('; ') || '录制完成但存在错误'
         setAppState('failed')
         setErrorMessage(errorDetail)
         isStoppingRef.current = false
@@ -409,9 +453,11 @@ export default function App() {
         return
       }
 
-      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-        getCurrentWindow().startDragging()
-      }).catch(() => {})
+      import('@tauri-apps/api/window')
+        .then(({ getCurrentWindow }) => {
+          getCurrentWindow().startDragging()
+        })
+        .catch(() => {})
     }
 
     document.addEventListener('mousedown', handleMouseDown)
@@ -423,62 +469,65 @@ export default function App() {
     return (
       <>
         <Toaster position="top-right" />
-        <div className="min-h-screen flex" data-luzhi-drag-region="surface">
+        <div
+          className="min-h-screen flex"
+          data-luzhi-drag-region="surface"
+        >
           {/* Main content area */}
-        <div className="flex-1 flex items-center justify-center p-8">
-          <div className="relative">
-            <RecordingPanel
-              recordingMode={recordingMode}
-              setRecordingMode={setRecordingMode}
-              systemAudioEnabled={systemAudioEnabled}
-              setSystemAudioEnabled={setSystemAudioEnabled}
-              micEnabled={micEnabled}
-              setMicEnabled={setMicEnabled}
-              micDevice={micDevice}
-              setMicDevice={setMicDevice}
-              micVolume={micVolume}
-              denoiseEnabled={denoiseEnabled}
-              onDenoiseChange={setDenoiseEnabled}
-              onStartRecording={handleStartRecording}
-              resolution={resolution}
-              setResolution={setResolution}
-              fps={fps}
-              setFps={setFps}
-              onSelectedWindowChange={handleSelectedWindowChange}
-            />
-            {/* 权限提示 */}
-            {permissions.screenRecording === 'denied' && (
-              <div className="mt-4 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-sm text-destructive">
-                <p>屏幕录制权限未授权，请在系统设置中开启</p>
+          <div className="flex-1 flex items-center justify-center p-8">
+            <div className="relative">
+              <RecordingPanel
+                recordingMode={recordingMode}
+                setRecordingMode={setRecordingMode}
+                systemAudioEnabled={systemAudioEnabled}
+                setSystemAudioEnabled={setSystemAudioEnabled}
+                micEnabled={micEnabled}
+                setMicEnabled={setMicEnabled}
+                micDevice={micDevice}
+                setMicDevice={setMicDevice}
+                micVolume={micVolume}
+                denoiseEnabled={denoiseEnabled}
+                onDenoiseChange={setDenoiseEnabled}
+                onStartRecording={handleStartRecording}
+                resolution={resolution}
+                setResolution={setResolution}
+                fps={fps}
+                setFps={setFps}
+                onSelectedWindowChange={handleSelectedWindowChange}
+              />
+              {/* 权限提示 */}
+              {permissions.screenRecording === 'denied' && (
+                <div className="mt-4 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-sm text-destructive">
+                  <p>屏幕录制权限未授权，请在系统设置中开启</p>
+                </div>
+              )}
+              {permissions.microphone === 'denied' && (
+                <div className="mt-2 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-sm text-destructive">
+                  <p>麦克风权限未授权，请在系统设置中开启</p>
+                </div>
+              )}
+              {permissions.screenRecording === 'notDetermined' && (
+                <div className="mt-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-sm text-amber-400">
+                  <p>需要屏幕录制权限才能录制，请在启动录制时授权</p>
+                </div>
+              )}
+              {permissions.microphone === 'notDetermined' && micEnabled && (
+                <div className="mt-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-sm text-amber-400">
+                  <p>需要麦克风权限才能录制音频，请在启动录制时授权</p>
+                </div>
+              )}
+              <div className="flex w-full items-start justify-end mt-4">
+                <LicenseStatus status={licenseStatus} />
               </div>
-            )}
-            {permissions.microphone === 'denied' && (
-              <div className="mt-2 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-sm text-destructive">
-                <p>麦克风权限未授权，请在系统设置中开启</p>
-              </div>
-            )}
-            {permissions.screenRecording === 'notDetermined' && (
-              <div className="mt-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-sm text-amber-400">
-                <p>需要屏幕录制权限才能录制，请在启动录制时授权</p>
-              </div>
-            )}
-            {permissions.microphone === 'notDetermined' && micEnabled && (
-              <div className="mt-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-sm text-amber-400">
-                <p>需要麦克风权限才能录制音频，请在启动录制时授权</p>
-              </div>
-            )}
-            <div className="flex w-full items-start justify-end mt-4">
-              <LicenseStatus status={licenseStatus} />
+              {/* History sidebar */}
+              <RecordingSidebar
+                isOpen={sidebarOpen}
+                onToggle={() => setSidebarOpen(!sidebarOpen)}
+                onSelectRecording={(id) => void handleSelectRecording(id)}
+              />
             </div>
-            {/* History sidebar */}
-            <RecordingSidebar
-              isOpen={sidebarOpen}
-              onToggle={() => setSidebarOpen(!sidebarOpen)}
-              onSelectRecording={(id) => void handleSelectRecording(id)}
-            />
           </div>
         </div>
-      </div>
       </>
     )
   }
@@ -488,50 +537,74 @@ export default function App() {
     return (
       <>
         <Toaster position="top-right" />
-        <div className="min-h-screen flex flex-col items-center justify-between p-8" data-luzhi-drag-region="surface">
+        <div
+          className="min-h-screen flex flex-col items-center justify-between p-8"
+          data-luzhi-drag-region="surface"
+        >
           <div className="pt-4">
             <AnimatePresence>
               <RecordingStatusBar
                 elapsedTime={elapsedTime}
                 isPaused={isPaused}
-              onPause={handlePauseRecording}
-              onStop={handleStopRecording}
-              micEnabled={micEnabled}
-              micVolume={micVolume}
-            />
-          </AnimatePresence>
-        </div>
-        <div className="flex-1 w-full max-w-4xl mx-auto my-8 rounded-2xl border-2 border-dashed border-border/30 flex items-center justify-center">
-          <div className="text-center text-muted-foreground">
-            <p className="text-sm mb-3">
-              正在录制 {recordingMode === 'fullscreen' ? '全屏' : recordingMode === 'window' ? '窗口' : '区域'}
-            </p>
-            <div className="flex gap-8 justify-center">
-              <div className="text-left">
-                <p className="text-[10px] uppercase tracking-wide mb-1.5">画面</p>
-                <p className="text-xs">{resolution.width}×{resolution.height}</p>
-                <p className="text-xs">{fps} fps</p>
-              </div>
-              <div className="text-left">
-                <p className="text-[10px] uppercase tracking-wide mb-1.5">音频</p>
-                <p className="text-xs">
-                  系统音频{' '}
-                  <span className={systemAudioEnabled ? 'text-green-400' : 'text-muted-foreground'}>
-                    {systemAudioEnabled ? '✓' : '✗'}
-                  </span>
-                </p>
-                <p className="text-xs">
-                  麦克风{' '}
-                  <span className={micEnabled ? 'text-green-400' : 'text-muted-foreground'}>
-                    {micEnabled ? '✓' : '✗'}
-                  </span>
-                </p>
+                onPause={handlePauseRecording}
+                onStop={handleStopRecording}
+                micEnabled={micEnabled}
+                micVolume={micVolume}
+              />
+            </AnimatePresence>
+          </div>
+          <div className="flex-1 w-full max-w-4xl mx-auto my-8 rounded-2xl border-2 border-dashed border-border/30 flex items-center justify-center">
+            <div className="text-center text-muted-foreground">
+              <p className="text-sm mb-3">
+                正在录制{' '}
+                {recordingMode === 'fullscreen'
+                  ? '全屏'
+                  : recordingMode === 'window'
+                    ? '窗口'
+                    : '区域'}
+              </p>
+              <div className="flex gap-8 justify-center">
+                <div className="text-left">
+                  <p className="text-[16px] uppercase tracking-wide mb-1.5">
+                    画面
+                  </p>
+                  <p className="text-xs">
+                    {resolution.width} × {resolution.height}
+                  </p>
+                  <p className="text-xs">{fps} fps</p>
+                </div>
+                <div className="text-left">
+                  <p className="text-[16px] uppercase tracking-wide mb-1.5">
+                    音频
+                  </p>
+                  <p className="text-xs">
+                    系统音频{' '}
+                    <span
+                      className={
+                        systemAudioEnabled
+                          ? 'text-green-400'
+                          : 'text-muted-foreground'
+                      }
+                    >
+                      {systemAudioEnabled ? '✓' : '✗'}
+                    </span>
+                  </p>
+                  <p className="text-xs">
+                    麦克风{' '}
+                    <span
+                      className={
+                        micEnabled ? 'text-green-400' : 'text-muted-foreground'
+                      }
+                    >
+                      {micEnabled ? '✓' : '✗'}
+                    </span>
+                  </p>
+                </div>
               </div>
             </div>
           </div>
+          <div className="h-12" />
         </div>
-        <div className="h-12" />
-      </div>
       </>
     )
   }
@@ -564,7 +637,12 @@ export default function App() {
   return (
     <>
       <Toaster position="top-right" />
-      <PreviewView onBack={handleBackToIdle} recordingResult={recordingResult} licenseStatus={licenseStatus} recordingId={selectedRecordingId} />
+      <PreviewView
+        onBack={handleBackToIdle}
+        recordingResult={recordingResult}
+        licenseStatus={licenseStatus}
+        recordingId={selectedRecordingId}
+      />
     </>
   )
 }
