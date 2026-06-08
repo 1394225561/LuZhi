@@ -26,7 +26,7 @@ pub trait AudioMixer: Send {
 /// 1. Resampling to a unified 48 kHz sample rate (linear interpolation)
 /// 2. Channel layout normalization to stereo
 /// 3. Timestamp-based alignment with silence padding for missing segments
-/// 4. Weighted sum mixing with hard clipping protection
+/// 4. Weighted sum mixing with soft limiting protection
 /// 5. Optional microphone denoise chain
 pub struct SimpleAudioMixer {
     /// 麦克风降噪链路状态（每个通道一个），使用 Mutex 提供内部可变性
@@ -160,13 +160,13 @@ fn passthrough(
     };
 
     let stereo = to_stereo(&filtered, chunk.channels);
-    let clamped = clamp_samples(&stereo);
+    let limited = soft_limit_samples(&stereo);
 
     Ok(MixedAudioChunk {
         timestamp: chunk.timestamp,
         sample_rate: MIXED_SAMPLE_RATE,
         channels: MIXED_CHANNELS,
-        samples: clamped.into(),
+        samples: limited.into(),
     })
 }
 
@@ -177,7 +177,7 @@ fn passthrough(
 /// 2. Align by timestamp — the earlier chunk is padded with silence at the front
 /// 3. Overlap region: equal-weight sum (0.5 * system + 0.5 * mic)
 /// 4. Non-overlapping tail: passthrough from the longer source
-/// 5. Hard clamp to [-1.0, 1.0] to prevent clipping
+/// 5. Soft-limit peaks near full scale to prevent hard clipping
 fn mix_two(
     system: &AudioChunk,
     mic: &AudioChunk,
@@ -240,8 +240,8 @@ fn mix_two(
         }
     }
 
-    // Hard clamp to prevent clipping
-    let clamped = clamp_samples(&output);
+    // Soft-limit peaks to prevent hard clipping artifacts.
+    let limited = soft_limit_samples(&output);
 
     let earliest_ts = MediaTimestamp::from_nanos(ts_sys.min(ts_mic));
 
@@ -249,7 +249,7 @@ fn mix_two(
         timestamp: earliest_ts,
         sample_rate: MIXED_SAMPLE_RATE,
         channels: MIXED_CHANNELS,
-        samples: clamped.into(),
+        samples: limited.into(),
     })
 }
 
@@ -335,9 +335,31 @@ fn to_stereo(samples: &[f32], src_channels: u16) -> Vec<f32> {
     }
 }
 
-/// Hard-clamps all samples to [-1.0, 1.0] to prevent clipping.
-fn clamp_samples(samples: &[f32]) -> Vec<f32> {
-    samples.iter().map(|s| s.clamp(-1.0, 1.0)).collect()
+/// Soft-limits audio samples near full scale while preserving normal levels.
+///
+/// Samples at or below ±0.95 are left unchanged. Above that knee, peaks are
+/// compressed smoothly toward ±1.0 without creating the flat plateau caused by
+/// hard clipping.
+fn soft_limit_samples(samples: &[f32]) -> Vec<f32> {
+    samples
+        .iter()
+        .map(|sample| soft_limit_sample(*sample))
+        .collect()
+}
+
+fn soft_limit_sample(sample: f32) -> f32 {
+    const KNEE_START: f32 = 0.95;
+    const KNEE_WIDTH: f32 = 1.0 - KNEE_START;
+
+    let magnitude = sample.abs();
+    if magnitude <= KNEE_START {
+        return sample;
+    }
+
+    let over_knee = magnitude - KNEE_START;
+    let limited = KNEE_START + KNEE_WIDTH * (over_knee / (over_knee + KNEE_WIDTH));
+
+    sample.signum() * limited.min(1.0)
 }
 
 #[cfg(test)]
