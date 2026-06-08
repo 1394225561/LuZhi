@@ -353,6 +353,18 @@ mod tests {
         }
     }
 
+    fn deterministic_wideband_noise(frame_count: usize, amplitude: f32) -> Vec<f32> {
+        let mut state = 0x5eed_4321_u32;
+
+        (0..frame_count)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = ((state >> 8) as f32) / 16_777_215.0;
+                (unit * 2.0 - 1.0) * amplitude
+            })
+            .collect()
+    }
+
     #[test]
     fn passthrough_single_source() {
         let mixer = SimpleAudioMixer::new(DenoiseMode::default());
@@ -610,6 +622,29 @@ mod tests {
             "System-only audio should not be denoised, got avg {}",
             avg
         );
+    }
+
+    #[test]
+    fn mixer_dynamic_suppressor_does_not_filter_low_level_system_only_audio() {
+        let samples = deterministic_wideband_noise(4800, 0.012);
+        let highpass_mixer = SimpleAudioMixer::new(DenoiseMode::Highpass);
+        let none_mixer = SimpleAudioMixer::new(DenoiseMode::None);
+        let sys = make_chunk(0, 48000, 1, samples);
+
+        let highpass_result = highpass_mixer.mix(Some(&sys), None).unwrap();
+        let none_result = none_mixer.mix(Some(&sys), None).unwrap();
+
+        assert_eq!(highpass_result.samples.len(), none_result.samples.len());
+        for (highpass_sample, none_sample) in highpass_result
+            .samples
+            .iter()
+            .zip(none_result.samples.iter())
+        {
+            assert!(
+                (*highpass_sample - *none_sample).abs() < 1e-6,
+                "system-only low-level audio should bypass dynamic denoise: highpass={highpass_sample}, none={none_sample}"
+            );
+        }
     }
 
     #[test]
