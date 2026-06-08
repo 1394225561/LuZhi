@@ -515,6 +515,42 @@ mod tests {
     }
 
     #[test]
+    fn denoise_chain_attenuates_30hz_hum_beyond_80hz_baseline() {
+        let input = sine(30.0, 1.0, 0.6);
+
+        let mut old_highpass = HighpassFilter::new(80.0, SAMPLE_RATE);
+        let old_output: Vec<f32> = input
+            .iter()
+            .map(|sample| old_highpass.process(*sample))
+            .collect();
+        let old_rms = steady_rms_after_warmup(&old_output);
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+        let denoised_rms = steady_rms_after_warmup(&denoised);
+
+        assert!(
+            denoised_rms < old_rms * 0.75,
+            "30Hz hum should be lower than the old 80Hz highpass baseline: old={old_rms}, denoised={denoised_rms}"
+        );
+    }
+
+    #[test]
+    fn denoise_chain_preserves_200hz_low_voice_after_stronger_highpass() {
+        let input = sine(200.0, 1.0, 0.3);
+        let input_rms = steady_rms_after_warmup(&input);
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+        let denoised_rms = steady_rms_after_warmup(&denoised);
+
+        assert!(
+            denoised_rms > input_rms * 0.82,
+            "200Hz low voice should remain usable after stronger highpass: input={input_rms}, denoised={denoised_rms}"
+        );
+    }
+
+    #[test]
     fn denoise_chain_preserves_quiet_voice_near_noise_gate() {
         for freq in [300.0, 1000.0, 2000.0] {
             let input = sine(freq, 1.0, 0.024);
