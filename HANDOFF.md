@@ -81,6 +81,58 @@ W1-W12 Phase：
 
 ## 工作任务记录
 
+### 2026-06-08：BUG-0025 麦克风低频嗡声与峰值硬削波失真聚焦优化
+
+输入文件：
+
+- 用户要求：按评估建议重新制定并执行聚焦实施计划
+- `HANDOFF.md`
+- `BUG.md`
+- `src-tauri/src/media/audio_denoise.rs`
+- `src-tauri/src/media/audio_mixer.rs`
+
+根因结论：
+
+1. 原深度优化计划把降噪参数、soft clip、sinc 重采样和通道 drop-oldest 混在一起，范围过大且部分实现前提不成立
+2. 本轮只保留可小步验证的两项：默认麦克风高通 100Hz 和透明 soft-knee limiter
+3. `rubato` 重采样和媒体通道 drop-oldest 策略需要单独 Spike，不在本轮实现
+
+已完成：
+
+1. 新增 30Hz 嗡声相对旧 80Hz highpass baseline 的链路级回归测试
+2. 将默认麦克风高通截止频率提升到 100Hz
+3. 新增 200Hz 低频人声保真回归，避免低频降噪误伤人声
+4. 用透明 soft-knee limiter 替换 `audio_mixer.rs` 中的 hard clamp
+5. 新增 soft limiter 单元测试和 mixer 路径测试
+6. 新增本轮自测清单
+
+当前验证结果：
+
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_attenuates_30hz_hum_beyond_80hz_baseline -- --nocapture` 修改前失败，失败信息为 `old=0.059079938, denoised=0.05902247`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_attenuates_30hz_hum_beyond_80hz_baseline -- --nocapture` 修改后通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_200hz_low_voice_after_stronger_highpass -- --nocapture` 通过
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib soft_limiter_preserves_samples_below_knee -- --nocapture` 修改前因 `soft_limit_samples` 不存在而编译失败
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib soft_limiter -- --nocapture` 通过（4 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_denoise -- --nocapture` 通过（16 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_mixer -- --nocapture` 通过（26 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 通过（354 tests）
+- `rustfmt --check --edition 2021 src-tauri/src/media/audio_denoise.rs src-tauri/src/media/audio_mixer.rs` 通过
+- `git diff --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/audio_denoise.rs`
+- **修改**: `src-tauri/src/media/audio_mixer.rs`
+- **修改**: `BUG.md`, `HANDOFF.md`
+- **新增**: `tests/2026-06-08-mic-denoise-focused-optimization-checklist.md`
+
+人工复核建议：
+
+1. 有线耳机麦克风开启降噪，静音环境录制 10 秒，确认低频嗡声弱于修复前
+2. 开启降噪后正常说话 10 秒，确认开头不被吞字，尾音不过早切断
+3. 同时录制系统音频和麦克风，确认系统音频音质不受影响
+4. 大音量系统音频 + 麦克风同时录制，确认没有 hard clamp 撕裂感
+
 ### 2026-06-08：BUG-0024 有线耳机麦克风残留低电平底噪动态抑制
 
 输入文件：
@@ -402,55 +454,6 @@ W1-W12 Phase：
 3. 录制中最小化/恢复被录制窗口：状态栏应切换暂停/录制中，暂停期间内容不应继续写入最终录制
 4. Retina 屏窗口录制后导出美化：光标位置应与源视频一致
 5. 窗口选择器在权限/枚举失败时显示错误和“重试”，而不是“未找到可用窗口”
-
-### 2026-06-05：播放控件完整功能实现
-
-输入文件：
-
-- `docs/superpowers/specs/2026-06-05-playback-controls-design.md`
-- `docs/superpowers/plans/2026-06-05-playback-controls.md`
-- `reference/ui/ui_spec.md`
-- `.claude/rules/0-global.md`
-- `.claude/rules/1-coding-style.md`
-- `.claude/rules/2-testing.md`
-
-已完成：
-
-1. 添加 `videoRef`、`videoContainerRef`、`isSeekingRef` 引用
-2. 修改初始状态：`currentTime` 从 45→0，`duration` 从 180→0（由视频元数据驱动），新增 `isMuted` 状态
-3. 添加视频事件监听 useEffect（`loadedmetadata`、`timeupdate`、`play`、`pause`、`ended`）
-4. 移除 `<video>` 标签的原生 `controls` 属性，添加 `ref` 和 `playsInline`
-5. 实现 `handlePlayPause`（调用 `video.play()` / `video.pause()`）
-6. 实现 `handleSkipBack` / `handleSkipForward`（±10 秒跳转）
-7. 进度条使用 `onValueCommit` 实现松手 seek，`isSeekingRef` 防止拖拽时跳动
-8. 实现 `handleVolumeChange` 和 `handleMuteToggle`，音量图标切换 `Volume2` / `VolumeX`
-9. 实现 `handleFullscreen`（`requestFullscreen()` / `exitFullscreen()`）
-10. 所有播放控件按钮添加 `disabled={!recordingResult?.outputPath}`
-11. 新增 3 个前端测试：play/pause 按钮调用 video.play()、无视频源时按钮禁用、slider 存在性验证
-
-当前验证结果：
-
-- `npm test -- --run` **63 tests** 通过（+3 相比之前）
-- `npm run build` 通过
-- `git diff --check` 通过
-
-改动文件：
-
-- **修改**: `src/components/preview-view.tsx`, `src/App.test.tsx`
-- **新增**: `docs/superpowers/specs/2026-06-05-playback-controls-design.md`, `docs/superpowers/plans/2026-06-05-playback-controls.md`
-
-人工复核建议：
-
-1. 播放按钮点击 → 视频开始播放，图标变为 Pause
-2. 暂停按钮点击 → 视频暂停，图标变为 Play
-3. 后退按钮 → 视频后退 10 秒
-4. 前进按钮 → 视频前进 10 秒
-5. 进度条拖拽 → 视频 seek 到目标位置，松手前不跳动
-6. 音量滑块 → 视频音量实时变化
-7. 静音图标点击 → 视频静音/取消静音，图标切换
-8. 全屏按钮 → 视频容器进入全屏
-9. 播放结束 → 自动暂停在最后一帧
-10. 无录制文件 → 控件按钮禁用
 
 ## 冬眠记录
 
