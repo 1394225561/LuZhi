@@ -23,7 +23,7 @@ impl HighpassFilter {
     /// 创建高通滤波器。
     ///
     /// # 参数
-    /// - `cutoff_hz`: 截止频率（Hz），建议 80Hz
+    /// - `cutoff_hz`: 截止频率（Hz），麦克风链路默认使用 100Hz
     /// - `sample_rate`: 采样率（Hz），通常 48000
     pub fn new(cutoff_hz: f64, sample_rate: f64) -> Self {
         assert!(cutoff_hz > 0.0, "截止频率必须大于 0");
@@ -165,11 +165,12 @@ impl MicrophoneDenoiseChain {
     /// # 参数
     /// - `sample_rate`: 采样率（Hz），项目混音输出通常为 48000。
     pub fn new(sample_rate: f64) -> Self {
+        const HIGHPASS_CUTOFF_HZ: f64 = 100.0;
         const NOTCH_Q: f64 = 35.0;
         const NOTCH_FREQUENCIES_HZ: [f64; 6] = [50.0, 60.0, 100.0, 120.0, 150.0, 180.0];
 
         Self {
-            highpass: HighpassFilter::new(80.0, sample_rate),
+            highpass: HighpassFilter::new(HIGHPASS_CUTOFF_HZ, sample_rate),
             notches: NOTCH_FREQUENCIES_HZ
                 .into_iter()
                 .filter(|freq| *freq < sample_rate / 2.0)
