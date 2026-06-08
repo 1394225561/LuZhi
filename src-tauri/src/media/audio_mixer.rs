@@ -410,6 +410,62 @@ mod tests {
     }
 
     #[test]
+    fn soft_limiter_preserves_samples_below_knee() {
+        let samples = vec![-0.95f32, -0.5, 0.0, 0.5, 0.95];
+        let result = soft_limit_samples(&samples);
+
+        assert_eq!(result.len(), samples.len());
+        for (input, output) in samples.iter().zip(result.iter()) {
+            assert!(
+                (*input - *output).abs() < 1e-6,
+                "samples below the knee should be unchanged: input={input}, output={output}"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_limiter_compresses_peaks_without_hard_plateau() {
+        let samples = vec![0.96f32, 1.0, 1.2, 1.5, 2.0];
+        let result = soft_limit_samples(&samples);
+
+        for output in &result {
+            assert!(
+                *output > 0.95 && *output < 1.0,
+                "positive peaks should be smoothly compressed below full scale: output={output}"
+            );
+        }
+
+        for pair in result.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "soft limiter should remain monotonic above the knee: previous={}, next={}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn soft_limiter_limits_extreme_values_near_full_scale() {
+        let samples = vec![10.0f32, -10.0];
+        let result = soft_limit_samples(&samples);
+
+        assert!(result[0] > 0.99 && result[0] < 1.0);
+        assert!(result[1] < -0.99 && result[1] > -1.0);
+    }
+
+    #[test]
+    fn mixer_uses_soft_limiter_for_single_source_peaks() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
+        let chunk = make_chunk(0, 48000, 2, vec![2.0, -2.0]);
+
+        let result = mixer.mix(Some(&chunk), None).unwrap();
+
+        assert!(result.samples[0] > 0.99 && result.samples[0] < 1.0);
+        assert!(result.samples[1] < -0.99 && result.samples[1] > -1.0);
+    }
+
+    #[test]
     fn resample_44100_to_48000() {
         let chunk = make_chunk(0, 44100, 2, vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
         let resampled = resample(&chunk, 48000);
