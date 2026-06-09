@@ -96,6 +96,12 @@ W1-W12 Phase：
 1. 原深度优化计划把降噪参数、soft clip、sinc 重采样和通道 drop-oldest 混在一起，范围过大且部分实现前提不成立
 2. 本轮只保留可小步验证的两项：默认麦克风高通 100Hz 和透明 soft-knee limiter
 3. `rubato` 重采样和媒体通道 drop-oldest 策略需要单独 Spike，不在本轮实现
+4. 人工验证补充反馈：静音段几乎无噪音，但语音起始会出现“嗡”一下并伴随低声“滋滋声”
+5. 进一步定位为语音开门后 240Hz/480Hz 残余稳定 buzz 被放出，而不是静音段 suppressor 失效
+6. 二次人工验证反馈：电流滋滋声反而更频繁、更严重
+7. 进一步定位为语音开门后高频宽带 hiss 被全频放出；上一轮低频/窄带 notch 没有覆盖 6kHz 以上电流滋滋
+8. 三次人工验证反馈：无麦克风输入时没有电流滋滋声，一旦开始说话就伴随滋滋声
+9. 最终定位到另一条“说话才出现”的路径：`audio_mixer.rs` 的逐样本 soft-knee limiter 对合法满幅语音做非线性 waveshaping，会生成 3kHz/5kHz/7kHz 谐波，听感类似电流滋滋
 
 已完成：
 
@@ -104,18 +110,36 @@ W1-W12 Phase：
 3. 新增 200Hz 低频人声保真回归，避免低频降噪误伤人声
 4. 用透明 soft-knee limiter 替换 `audio_mixer.rs` 中的 hard clamp
 5. 新增 soft limiter 单元测试和 mixer 路径测试
-6. 新增本轮自测清单
+6. Code Review 后补强 120/150/180Hz speech-like 低频人声保真测试、满幅混音软限幅路径断言和非有限样本拒绝校验
+7. 人工验证反馈后新增语音开门残余 buzz 回归，并将 notch 覆盖扩展到 240Hz/480Hz
+8. Code Review 后补强 240Hz/480Hz 新 notch 邻近人声成分保真测试，避免只用 aggregate RMS 掩盖泛音损伤
+9. 二次人工验证反馈后新增语音开门高频 hiss 回归，并在麦克风 denoise 链路加入 4.8kHz 二阶低通
+10. 补强 4kHz 语音清晰度保真断言，避免高频抑制让人声发闷
+11. 三次人工验证反馈后新增 loud voice harmonic fizz 回归
+12. 将 mixer 峰值保护从逐样本非线性 waveshaping 改为 chunk-wide 线性降增益：合法 `[-1.0, 1.0]` 音频完全不动，只有超过满幅的异常 chunk 才缩到 `0.999`
+13. 新增本轮自测清单
 
 当前验证结果：
 
 - RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_attenuates_30hz_hum_beyond_80hz_baseline -- --nocapture` 修改前失败，失败信息为 `old=0.059079938, denoised=0.05902247`
 - GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_attenuates_30hz_hum_beyond_80hz_baseline -- --nocapture` 修改后通过
 - GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_200hz_low_voice_after_stronger_highpass -- --nocapture` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_speech_like_low_voice_after_stronger_highpass -- --nocapture` 通过
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_suppresses_residual_buzz_when_voice_opens_gate -- --nocapture` 修改前失败，失败信息为 `240Hz residual buzz ... input=0.0053558694, denoised=0.005097435`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_suppresses_residual_buzz_when_voice_opens_gate -- --nocapture` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_voice_components_near_new_notches -- --nocapture` 通过
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_suppresses_high_frequency_hiss_when_voice_opens_gate -- --nocapture` 修改前失败，失败信息为 `6000Hz hiss ... input=0.006, denoised=0.005847291`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_suppresses_high_frequency_hiss_when_voice_opens_gate -- --nocapture` 通过
 - RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib soft_limiter_preserves_samples_below_knee -- --nocapture` 修改前因 `soft_limit_samples` 不存在而编译失败
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib simple_mixer_rejects_non_finite_samples -- --nocapture` 修改前失败，非有限样本未被拒绝
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib limiter_does_not_add_harmonic_fizz_to_loud_voice -- --nocapture` 修改前失败，失败信息为 `fundamental=0.99419343, fizz=0.013985186`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib limiter_does_not_add_harmonic_fizz_to_loud_voice -- --nocapture` 通过
 - GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib soft_limiter -- --nocapture` 通过（4 tests）
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_denoise -- --nocapture` 通过（16 tests）
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_mixer -- --nocapture` 通过（26 tests）
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 通过（354 tests）
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib simple_mixer_rejects_non_finite_samples -- --nocapture` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib mixer_soft_limits_full_scale_mix_without_hard_clipping -- --nocapture` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_denoise -- --nocapture` 通过（20 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_mixer -- --nocapture` 通过（27 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 通过（359 tests）
 - `rustfmt --check --edition 2021 src-tauri/src/media/audio_denoise.rs src-tauri/src/media/audio_mixer.rs` 通过
 - `git diff --check` 通过
 
@@ -130,8 +154,10 @@ W1-W12 Phase：
 
 1. 有线耳机麦克风开启降噪，静音环境录制 10 秒，确认低频嗡声弱于修复前
 2. 开启降噪后正常说话 10 秒，确认开头不被吞字，尾音不过早切断
-3. 同时录制系统音频和麦克风，确认系统音频音质不受影响
-4. 大音量系统音频 + 麦克风同时录制，确认没有 hard clamp 撕裂感
+3. 开启降噪后从静音到说话、持续说话 10 秒，确认电流滋滋声不再比上一轮更频繁
+4. 稍大音量说话但不吼叫，确认没有新增破音、齿音刺耳或电流感
+5. 同时录制系统音频和麦克风，确认系统音频音质不受影响
+6. 大音量系统音频 + 麦克风同时录制，确认没有 hard clamp 撕裂感
 
 ### 2026-06-08：BUG-0024 有线耳机麦克风残留低电平底噪动态抑制
 

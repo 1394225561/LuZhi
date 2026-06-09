@@ -26,7 +26,7 @@ pub trait AudioMixer: Send {
 /// 1. Resampling to a unified 48 kHz sample rate (linear interpolation)
 /// 2. Channel layout normalization to stereo
 /// 3. Timestamp-based alignment with silence padding for missing segments
-/// 4. Weighted sum mixing with soft limiting protection
+/// 4. Weighted sum mixing with peak protection
 /// 5. Optional microphone denoise chain
 pub struct SimpleAudioMixer {
     /// 麦克风降噪链路状态（每个通道一个），使用 Mutex 提供内部可变性
@@ -141,6 +141,16 @@ fn validate_audio_chunk(chunk: &AudioChunk) -> AppResult<()> {
             ),
         });
     }
+    if let Some((index, sample)) = chunk
+        .samples
+        .iter()
+        .enumerate()
+        .find(|(_, sample)| !sample.is_finite())
+    {
+        return Err(AppError::AudioMixFailed {
+            reason: format!("音频样本包含非有限值（index {index}, value {sample}）"),
+        });
+    }
     Ok(())
 }
 
@@ -177,7 +187,7 @@ fn passthrough(
 /// 2. Align by timestamp — the earlier chunk is padded with silence at the front
 /// 3. Overlap region: equal-weight sum (0.5 * system + 0.5 * mic)
 /// 4. Non-overlapping tail: passthrough from the longer source
-/// 5. Soft-limit peaks near full scale to prevent hard clipping
+/// 5. Guard overrange peaks without waveshaping valid audio
 fn mix_two(
     system: &AudioChunk,
     mic: &AudioChunk,
@@ -240,7 +250,7 @@ fn mix_two(
         }
     }
 
-    // Soft-limit peaks to prevent hard clipping artifacts.
+    // Guard peaks without applying nonlinear waveshaping to valid audio.
     let limited = soft_limit_samples(&output);
 
     let earliest_ts = MediaTimestamp::from_nanos(ts_sys.min(ts_mic));
@@ -335,36 +345,32 @@ fn to_stereo(samples: &[f32], src_channels: u16) -> Vec<f32> {
     }
 }
 
-/// Soft-limits audio samples near full scale while preserving normal levels.
+/// Keeps valid audio untouched and linearly scales overrange chunks.
 ///
-/// Samples at or below ±0.95 are left unchanged. Above that knee, peaks are
-/// compressed smoothly toward ±1.0 without creating the flat plateau caused by
-/// hard clipping.
+/// Per-sample waveshaping near full scale creates harmonic fizz on loud voice.
+/// A chunk-wide linear gain preserves the waveform and only engages when a
+/// chunk already exceeds the valid ±1.0 range.
 fn soft_limit_samples(samples: &[f32]) -> Vec<f32> {
-    samples
+    const FULL_SCALE: f32 = 1.0;
+    const TARGET_PEAK: f32 = 0.999;
+
+    let peak = samples
         .iter()
-        .map(|sample| soft_limit_sample(*sample))
-        .collect()
-}
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
 
-fn soft_limit_sample(sample: f32) -> f32 {
-    const KNEE_START: f32 = 0.95;
-    const KNEE_WIDTH: f32 = 1.0 - KNEE_START;
-
-    let magnitude = sample.abs();
-    if magnitude <= KNEE_START {
-        return sample;
+    if peak <= FULL_SCALE {
+        return samples.to_vec();
     }
 
-    let over_knee = magnitude - KNEE_START;
-    let limited = KNEE_START + KNEE_WIDTH * (over_knee / (over_knee + KNEE_WIDTH));
-
-    sample.signum() * limited.min(1.0)
+    let gain = TARGET_PEAK / peak;
+    samples.iter().map(|sample| sample * gain).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SAMPLE_RATE: f64 = 48_000.0;
 
     fn make_chunk(ts_nanos: u64, sample_rate: u32, channels: u16, samples: Vec<f32>) -> AudioChunk {
         AudioChunk {
@@ -373,6 +379,36 @@ mod tests {
             channels,
             samples: samples.into(),
         }
+    }
+
+    fn sine(freq_hz: f64, seconds: f64, amplitude: f32) -> Vec<f32> {
+        let sample_count = (TEST_SAMPLE_RATE * seconds) as usize;
+        (0..sample_count)
+            .map(|i| {
+                let t = i as f64 / TEST_SAMPLE_RATE;
+                (2.0 * std::f64::consts::PI * freq_hz * t).sin() as f32 * amplitude
+            })
+            .collect()
+    }
+
+    fn tone_magnitude(samples: &[f32], freq_hz: f64) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+
+        let (sin_sum, cos_sum) =
+            samples
+                .iter()
+                .enumerate()
+                .fold((0.0f64, 0.0f64), |(sin_sum, cos_sum), (i, sample)| {
+                    let phase = 2.0 * std::f64::consts::PI * freq_hz * i as f64 / TEST_SAMPLE_RATE;
+                    (
+                        sin_sum + *sample as f64 * phase.sin(),
+                        cos_sum + *sample as f64 * phase.cos(),
+                    )
+                });
+
+        (2.0 * sin_sum.hypot(cos_sum) / samples.len() as f64) as f32
     }
 
     fn deterministic_wideband_noise(frame_count: usize, amplitude: f32) -> Vec<f32> {
@@ -416,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn clipping_protection() {
+    fn mixer_soft_limits_full_scale_mix_without_hard_clipping() {
         let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         // Both sources at full amplitude
         let sys = make_chunk(0, 48000, 2, vec![1.0, 1.0]);
@@ -424,45 +460,43 @@ mod tests {
 
         let result = mixer.mix(Some(&sys), Some(&mic)).unwrap();
 
-        // 0.5 * 1.0 + 0.5 * 1.0 = 1.0 — at the boundary, should not exceed
+        // 0.5 * 1.0 + 0.5 * 1.0 reaches valid full scale. It should stay
+        // linear instead of being waveshaped into harmonic fizz.
         for sample in result.samples.iter() {
-            assert!(*sample <= 1.0);
-            assert!(*sample >= -1.0);
+            assert!(
+                (*sample - 1.0).abs() < 1e-6,
+                "valid full-scale mix should remain unchanged: sample={sample}"
+            );
         }
     }
 
     #[test]
     fn soft_limiter_preserves_samples_below_knee() {
-        let samples = vec![-0.95f32, -0.5, 0.0, 0.5, 0.95];
+        let samples = vec![-1.0f32, -0.95, -0.5, 0.0, 0.5, 0.95, 1.0];
         let result = soft_limit_samples(&samples);
 
         assert_eq!(result.len(), samples.len());
         for (input, output) in samples.iter().zip(result.iter()) {
             assert!(
                 (*input - *output).abs() < 1e-6,
-                "samples below the knee should be unchanged: input={input}, output={output}"
+                "valid in-range samples should be unchanged: input={input}, output={output}"
             );
         }
     }
 
     #[test]
     fn soft_limiter_compresses_peaks_without_hard_plateau() {
-        let samples = vec![0.96f32, 1.0, 1.2, 1.5, 2.0];
+        let samples = vec![0.5f32, 1.0, 1.2, 1.5, 2.0];
         let result = soft_limit_samples(&samples);
 
-        for output in &result {
-            assert!(
-                *output > 0.95 && *output < 1.0,
-                "positive peaks should be smoothly compressed below full scale: output={output}"
-            );
-        }
+        assert!(result.iter().all(|sample| sample.abs() < 1.0));
 
-        for pair in result.windows(2) {
+        for (input_pair, output_pair) in samples.windows(2).zip(result.windows(2)) {
+            let input_ratio = input_pair[1] / input_pair[0];
+            let output_ratio = output_pair[1] / output_pair[0];
             assert!(
-                pair[1] > pair[0],
-                "soft limiter should remain monotonic above the knee: previous={}, next={}",
-                pair[0],
-                pair[1]
+                (input_ratio - output_ratio).abs() < 1e-6,
+                "overrange peak guard should preserve waveform ratios: input_ratio={input_ratio}, output_ratio={output_ratio}"
             );
         }
     }
@@ -485,6 +519,26 @@ mod tests {
 
         assert!(result.samples[0] > 0.99 && result.samples[0] < 1.0);
         assert!(result.samples[1] < -0.99 && result.samples[1] > -1.0);
+    }
+
+    #[test]
+    fn limiter_does_not_add_harmonic_fizz_to_loud_voice() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::None);
+        let voice = sine(1_000.0, 1.0, 1.0);
+        let mic = make_chunk(0, 48_000, 1, voice);
+
+        let result = mixer.mix(None, Some(&mic)).unwrap();
+        let left_channel: Vec<f32> = result.samples.iter().step_by(2).copied().collect();
+
+        let fundamental = tone_magnitude(&left_channel, 1_000.0);
+        let harmonic_fizz = tone_magnitude(&left_channel, 3_000.0)
+            + tone_magnitude(&left_channel, 5_000.0)
+            + tone_magnitude(&left_channel, 7_000.0);
+
+        assert!(
+            harmonic_fizz < fundamental * 0.002,
+            "loud voice should not gain audible harmonic fizz: fundamental={fundamental}, fizz={harmonic_fizz}"
+        );
     }
 
     #[test]
@@ -600,6 +654,25 @@ mod tests {
             result.unwrap_err().to_string().contains("整数倍"),
             "error should mention sample/channel mismatch"
         );
+    }
+
+    #[test]
+    fn simple_mixer_rejects_non_finite_samples() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
+
+        for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let chunk = make_chunk(0, 48000, 1, vec![sample]);
+            let result = mixer.mix(Some(&chunk), None);
+
+            assert!(
+                result.is_err(),
+                "non-finite input sample must be rejected: sample={sample}"
+            );
+            assert!(
+                result.unwrap_err().to_string().contains("非有限"),
+                "error should mention non-finite sample"
+            );
+        }
     }
 
     #[test]
