@@ -531,6 +531,15 @@ mod tests {
         }
     }
 
+    fn mic_mono_chunk(ts: u64, sample_rate: u32, samples: Vec<f32>) -> AudioChunk {
+        AudioChunk {
+            timestamp: MediaTimestamp::from_nanos(ts),
+            sample_rate,
+            channels: 1,
+            samples: Arc::from(samples.into_boxed_slice()),
+        }
+    }
+
     fn dual_source_synchronizer() -> AudioSynchronizer<SimpleAudioMixer> {
         AudioSynchronizer::new(
             SimpleAudioMixer::new(DenoiseMode::default()),
@@ -540,6 +549,47 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    #[test]
+    fn synchronizer_outputs_full_windows_for_44100hz_mic_callbacks() {
+        let sample_rate = 44_100u32;
+        let total_frames = sample_rate as usize;
+        let callback_frames = 512usize;
+        let mut synchronizer = AudioSynchronizer::new(
+            SimpleAudioMixer::new(DenoiseMode::Highpass),
+            AudioSynchronizerConfig {
+                requested_system_audio: false,
+                requested_microphone: true,
+                ..Default::default()
+            },
+        );
+
+        let mut start_frame = 0usize;
+        while start_frame < total_frames {
+            let frame_count = callback_frames.min(total_frames - start_frame);
+            let samples: Vec<f32> = (start_frame..start_frame + frame_count)
+                .map(|frame| {
+                    let t = frame as f64 / sample_rate as f64;
+                    (2.0 * std::f64::consts::PI * 777.0 * t).sin() as f32 * 0.2
+                })
+                .collect();
+            let ts = start_frame as u64 * 1_000_000_000 / sample_rate as u64;
+
+            synchronizer.push_mic(mic_mono_chunk(ts, sample_rate, samples));
+            start_frame += frame_count;
+        }
+
+        let results = synchronizer.drain_final();
+
+        assert_eq!(results.len(), 50, "1s input should produce 50 windows");
+        for (idx, (synced, _)) in results.iter().enumerate() {
+            assert_eq!(
+                synced.mixed.samples.len(),
+                1_920,
+                "20ms 44.1kHz mic window {idx} should resample to exactly 48kHz stereo"
+            );
+        }
     }
 
     #[test]

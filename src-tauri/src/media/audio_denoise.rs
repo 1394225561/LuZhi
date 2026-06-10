@@ -216,7 +216,7 @@ impl LowpassFilter {
 pub struct MicrophoneDenoiseChain {
     highpass: HighpassFilter,
     notches: Vec<NotchFilter>,
-    lowpass: LowpassFilter,
+    lowpasses: Vec<LowpassFilter>,
     noise_suppressor: NoiseFloorSuppressor,
 }
 
@@ -226,11 +226,27 @@ impl MicrophoneDenoiseChain {
     /// # 参数
     /// - `sample_rate`: 采样率（Hz），项目混音输出通常为 48000。
     pub fn new(sample_rate: f64) -> Self {
+        Self::new_with_source_sample_rate(sample_rate, sample_rate)
+    }
+
+    /// 创建适配指定麦克风源采样率的降噪链路。
+    ///
+    /// 低采样率麦克风升采样到 48kHz 时，线性插值会留下高频镜像音；
+    /// 根据源采样率追加抗镜像低通，避免语音一出现就带出滋滋声。
+    pub fn new_with_source_sample_rate(sample_rate: f64, source_sample_rate: f64) -> Self {
         const HIGHPASS_CUTOFF_HZ: f64 = 100.0;
         const LOWPASS_CUTOFF_HZ: f64 = 4_800.0;
         const NOTCH_Q: f64 = 35.0;
         const NOTCH_FREQUENCIES_HZ: [f64; 8] =
             [50.0, 60.0, 100.0, 120.0, 150.0, 180.0, 240.0, 480.0];
+
+        let mut lowpasses = vec![LowpassFilter::new(LOWPASS_CUTOFF_HZ, sample_rate)];
+        if let Some(cutoff_hz) =
+            anti_image_lowpass_cutoff_hz(source_sample_rate, sample_rate, LOWPASS_CUTOFF_HZ)
+        {
+            lowpasses.push(LowpassFilter::new(cutoff_hz, sample_rate));
+            lowpasses.push(LowpassFilter::new(cutoff_hz, sample_rate));
+        }
 
         Self {
             highpass: HighpassFilter::new(HIGHPASS_CUTOFF_HZ, sample_rate),
@@ -239,7 +255,7 @@ impl MicrophoneDenoiseChain {
                 .filter(|freq| *freq < sample_rate / 2.0)
                 .map(|freq| NotchFilter::new(freq, sample_rate, NOTCH_Q))
                 .collect(),
-            lowpass: LowpassFilter::new(LOWPASS_CUTOFF_HZ, sample_rate),
+            lowpasses,
             noise_suppressor: NoiseFloorSuppressor::new(sample_rate),
         }
     }
@@ -250,7 +266,9 @@ impl MicrophoneDenoiseChain {
         for notch in &mut self.notches {
             output = notch.process(output);
         }
-        output = self.lowpass.process(output);
+        for lowpass in &mut self.lowpasses {
+            output = lowpass.process(output);
+        }
         self.noise_suppressor.process(output)
     }
 
@@ -261,8 +279,30 @@ impl MicrophoneDenoiseChain {
         for notch in &mut self.notches {
             notch.reset();
         }
-        self.lowpass.reset();
+        for lowpass in &mut self.lowpasses {
+            lowpass.reset();
+        }
         self.noise_suppressor.reset();
+    }
+}
+
+fn anti_image_lowpass_cutoff_hz(
+    source_sample_rate: f64,
+    output_sample_rate: f64,
+    default_cutoff_hz: f64,
+) -> Option<f64> {
+    if source_sample_rate <= 0.0
+        || output_sample_rate <= 0.0
+        || source_sample_rate >= output_sample_rate
+    {
+        return None;
+    }
+
+    let cutoff = (source_sample_rate * 0.40).min(default_cutoff_hz);
+    if cutoff < default_cutoff_hz {
+        Some(cutoff.max(1_000.0))
+    } else {
+        None
     }
 }
 

@@ -30,9 +30,14 @@ pub trait AudioMixer: Send {
 /// 5. Optional microphone denoise chain
 pub struct SimpleAudioMixer {
     /// 麦克风降噪链路状态（每个通道一个），使用 Mutex 提供内部可变性
-    denoise_chains: Mutex<Option<Vec<MicrophoneDenoiseChain>>>,
+    denoise_chains: Mutex<Option<DenoiseChainBank>>,
     /// 降噪模式
     denoise_mode: DenoiseMode,
+}
+
+struct DenoiseChainBank {
+    source_sample_rate: u32,
+    chains: Vec<MicrophoneDenoiseChain>,
 }
 
 impl SimpleAudioMixer {
@@ -46,7 +51,12 @@ impl SimpleAudioMixer {
     /// 使用滤波器处理音频样本。
     ///
     /// 在持有 MutexGuard 的情况下执行处理，确保滤波器状态被正确更新。
-    fn apply_denoise_if_enabled(&self, samples: &[f32], channels: u16) -> Vec<f32> {
+    fn apply_denoise_if_enabled(
+        &self,
+        samples: &[f32],
+        channels: u16,
+        source_sample_rate: u32,
+    ) -> Vec<f32> {
         if self.denoise_mode != DenoiseMode::Highpass {
             return samples.to_vec();
         }
@@ -55,20 +65,25 @@ impl SimpleAudioMixer {
 
         let channel_count = channels as usize;
 
-        // 懒初始化滤波器链路；若设备通道数变化，重建链路避免状态下标越界。
-        if chains_guard
-            .as_ref()
-            .map_or(true, |chains| chains.len() != channel_count)
-        {
-            *chains_guard = Some(
-                (0..channel_count)
-                    .map(|_| MicrophoneDenoiseChain::new(MIXED_SAMPLE_RATE as f64))
+        // 懒初始化滤波器链路；若设备通道数或源采样率变化，重建链路避免状态下标越界和低采样率镜像残留。
+        if chains_guard.as_ref().map_or(true, |bank| {
+            bank.chains.len() != channel_count || bank.source_sample_rate != source_sample_rate
+        }) {
+            *chains_guard = Some(DenoiseChainBank {
+                source_sample_rate,
+                chains: (0..channel_count)
+                    .map(|_| {
+                        MicrophoneDenoiseChain::new_with_source_sample_rate(
+                            MIXED_SAMPLE_RATE as f64,
+                            source_sample_rate as f64,
+                        )
+                    })
                     .collect(),
-            );
+            });
         }
 
-        if let Some(ref mut chains) = *chains_guard {
-            apply_microphone_denoise(samples, channels, chains)
+        if let Some(ref mut bank) = *chains_guard {
+            apply_microphone_denoise(samples, channels, &mut bank.chains)
         } else {
             samples.to_vec()
         }
@@ -164,7 +179,7 @@ fn passthrough(
     let resampled = resample(chunk, MIXED_SAMPLE_RATE);
 
     let filtered = if apply_denoise {
-        mixer.apply_denoise_if_enabled(&resampled, chunk.channels)
+        mixer.apply_denoise_if_enabled(&resampled, chunk.channels, chunk.sample_rate)
     } else {
         resampled
     };
@@ -200,7 +215,8 @@ fn mix_two(
     let mic_resampled = resample(mic, MIXED_SAMPLE_RATE);
 
     // 仅对麦克风通道应用降噪
-    let mic_filtered = mixer.apply_denoise_if_enabled(&mic_resampled, mic.channels);
+    let mic_filtered =
+        mixer.apply_denoise_if_enabled(&mic_resampled, mic.channels, mic.sample_rate);
 
     let sys_stereo = to_stereo(&sys_resampled, system.channels);
     let mic_stereo = to_stereo(&mic_filtered, mic.channels);
@@ -538,6 +554,31 @@ mod tests {
         assert!(
             harmonic_fizz < fundamental * 0.002,
             "loud voice should not gain audible harmonic fizz: fundamental={fundamental}, fizz={harmonic_fizz}"
+        );
+    }
+
+    #[test]
+    fn denoised_low_rate_mic_resample_does_not_leave_image_tone() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::Highpass);
+        let sample_rate = 8_000u32;
+        let freq_hz = 3_000.0;
+        let samples: Vec<f32> = (0..sample_rate as usize)
+            .map(|i| {
+                let t = i as f64 / sample_rate as f64;
+                (2.0 * std::f64::consts::PI * freq_hz * t).sin() as f32 * 0.4
+            })
+            .collect();
+        let mic = make_chunk(0, sample_rate, 1, samples);
+
+        let result = mixer.mix(None, Some(&mic)).unwrap();
+        let left_channel: Vec<f32> = result.samples.iter().step_by(2).copied().collect();
+
+        let fundamental = tone_magnitude(&left_channel, freq_hz);
+        let image_tone = tone_magnitude(&left_channel, 5_000.0);
+
+        assert!(
+            image_tone < fundamental * 0.08,
+            "low-rate mic resampling should suppress 5kHz image tone: fundamental={fundamental}, image={image_tone}"
         );
     }
 

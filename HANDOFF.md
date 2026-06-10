@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-08 | BUG-0024 Code Review Findings 修复完成，动态底噪抑制补强轻声、开头、尾音和系统音频旁路回归。
+> 最后更新：2026-06-09 | BUG-0029 低采样率麦克风升采样镜像音修复完成，补强说话时滋滋/咔哒声回归。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,63 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-09：BUG-0029 低采样率麦克风升采样镜像音导致说话时滋滋/咔哒
+
+输入文件：
+
+- 用户反馈：同时开启系统音频采集、麦克风采集并开启麦克风降噪后，静音段无电流滋滋声，但一说话就出现滋滋电流声、咔哒噪音；此前 `c9b1b2f` 到 `197a423` 多轮修复后效果仍不理想
+- `HANDOFF.md`
+- `BUG.md`
+- `src-tauri/src/media/audio_denoise.rs`
+- `src-tauri/src/media/audio_mixer.rs`
+- `src-tauri/src/media/audio_synchronizer.rs`
+- `src-tauri/src/platform/macos/cpal_microphone.rs`
+
+根因结论：
+
+1. 前几轮修复主要覆盖静音底噪、语音开门高频 hiss、notch 残余 buzz 和 mixer 非线性限幅谐波，但没有覆盖真实麦克风采样率低于 48kHz 时的升采样镜像音
+2. `cpal_microphone.rs` 明确使用设备默认输入配置；前端请求的 48kHz/声道数只代表混音输出目标，真实麦克风可能是 8kHz/16kHz/24kHz/44.1kHz
+3. `audio_mixer.rs` 当前用线性插值把麦克风升采样到 48kHz；低采样率麦克风有语音输入时会留下高频镜像音，静音段没有输入信号所以听不到
+4. 新增 RED 测试复现：8kHz 麦克风 3kHz 语音经降噪链路后残留 5kHz 镜像音，修复前 `fundamental=0.23332335, image=0.06200983`，镜像音约为基频 26.6%
+
+已完成：
+
+1. 新增 `denoised_low_rate_mic_resample_does_not_leave_image_tone` 回归测试，约束低采样率麦克风升采样后 5kHz 镜像音不得显著残留
+2. `MicrophoneDenoiseChain` 新增源采样率感知构造入口；默认 48kHz 路径保持原 4.8kHz 低通行为
+3. 当麦克风源采样率低于混音输出采样率且存在可闻镜像风险时，额外串联抗镜像低通滤波器
+4. `SimpleAudioMixer` 的麦克风降噪链路状态同时跟踪通道数和源采样率；通道数或源采样率变化时重建链路
+5. 新增 `synchronizer_outputs_full_windows_for_44100hz_mic_callbacks` 守卫，确认 44.1kHz CPAL 风格回调经 20ms 同步器窗口后仍输出完整 48kHz stereo 窗口
+6. 更新 `BUG.md` BUG-0029 预防规则和本轮自测清单
+
+当前验证结果：
+
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoised_low_rate_mic_resample_does_not_leave_image_tone -- --nocapture` 修复前失败，失败信息为 `fundamental=0.23332335, image=0.06200983`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoised_low_rate_mic_resample_does_not_leave_image_tone -- --nocapture` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_mixer -- --nocapture` 通过（29 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_denoise -- --nocapture` 通过（20 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_synchronizer -- --nocapture` 通过（27 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 并行运行时出现一次既有非音频测试 `delete_removes_entry_from_index` 临时文件 NotFound 抖动；该测试单独复跑通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1` 通过（362 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib --features ffmpeg denoised_low_rate_mic_resample_does_not_leave_image_tone -- --nocapture` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib --features ffmpeg ffmpeg_writer_records_non_silent_mixed_24khz_mono_mic -- --nocapture` 通过
+- `rustfmt --check --edition 2021 src-tauri/src/media/audio_denoise.rs src-tauri/src/media/audio_mixer.rs src-tauri/src/media/audio_synchronizer.rs` 通过
+- `git diff --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/audio_denoise.rs`
+- **修改**: `src-tauri/src/media/audio_mixer.rs`
+- **修改**: `src-tauri/src/media/audio_synchronizer.rs`
+- **修改**: `BUG.md`, `HANDOFF.md`
+- **新增**: `tests/2026-06-09-bug-0029-low-rate-mic-resample-image-checklist.md`
+
+人工复核建议：
+
+1. 同时开启系统音频和麦克风，开启麦克风降噪，正常说话 10 秒，确认说话时不再出现规律性高频滋滋或咔哒声
+2. 留意终端 “麦克风配置协商” 日志；若设备实际采样率低于 48kHz，重点复核本次抗镜像修复效果
+3. 麦克风静音 10 秒，确认静音段仍保持干净
+4. 系统音频单独播放并录制，确认系统音频路径未被麦克风降噪链路影响
 
 ### 2026-06-08：BUG-0025 麦克风低频嗡声与峰值硬削波失真聚焦优化
 
