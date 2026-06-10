@@ -26,13 +26,18 @@ pub trait AudioMixer: Send {
 /// 1. Resampling to a unified 48 kHz sample rate (linear interpolation)
 /// 2. Channel layout normalization to stereo
 /// 3. Timestamp-based alignment with silence padding for missing segments
-/// 4. Weighted sum mixing with hard clipping protection
+/// 4. Weighted sum mixing with peak protection
 /// 5. Optional microphone denoise chain
 pub struct SimpleAudioMixer {
     /// 麦克风降噪链路状态（每个通道一个），使用 Mutex 提供内部可变性
-    denoise_chains: Mutex<Option<Vec<MicrophoneDenoiseChain>>>,
+    denoise_chains: Mutex<Option<DenoiseChainBank>>,
     /// 降噪模式
     denoise_mode: DenoiseMode,
+}
+
+struct DenoiseChainBank {
+    source_sample_rate: u32,
+    chains: Vec<MicrophoneDenoiseChain>,
 }
 
 impl SimpleAudioMixer {
@@ -46,7 +51,12 @@ impl SimpleAudioMixer {
     /// 使用滤波器处理音频样本。
     ///
     /// 在持有 MutexGuard 的情况下执行处理，确保滤波器状态被正确更新。
-    fn apply_denoise_if_enabled(&self, samples: &[f32], channels: u16) -> Vec<f32> {
+    fn apply_denoise_if_enabled(
+        &self,
+        samples: &[f32],
+        channels: u16,
+        source_sample_rate: u32,
+    ) -> Vec<f32> {
         if self.denoise_mode != DenoiseMode::Highpass {
             return samples.to_vec();
         }
@@ -55,20 +65,25 @@ impl SimpleAudioMixer {
 
         let channel_count = channels as usize;
 
-        // 懒初始化滤波器链路；若设备通道数变化，重建链路避免状态下标越界。
-        if chains_guard
-            .as_ref()
-            .map_or(true, |chains| chains.len() != channel_count)
-        {
-            *chains_guard = Some(
-                (0..channel_count)
-                    .map(|_| MicrophoneDenoiseChain::new(MIXED_SAMPLE_RATE as f64))
+        // 懒初始化滤波器链路；若设备通道数或源采样率变化，重建链路避免状态下标越界和低采样率镜像残留。
+        if chains_guard.as_ref().map_or(true, |bank| {
+            bank.chains.len() != channel_count || bank.source_sample_rate != source_sample_rate
+        }) {
+            *chains_guard = Some(DenoiseChainBank {
+                source_sample_rate,
+                chains: (0..channel_count)
+                    .map(|_| {
+                        MicrophoneDenoiseChain::new_with_source_sample_rate(
+                            MIXED_SAMPLE_RATE as f64,
+                            source_sample_rate as f64,
+                        )
+                    })
                     .collect(),
-            );
+            });
         }
 
-        if let Some(ref mut chains) = *chains_guard {
-            apply_microphone_denoise(samples, channels, chains)
+        if let Some(ref mut bank) = *chains_guard {
+            apply_microphone_denoise(samples, channels, &mut bank.chains)
         } else {
             samples.to_vec()
         }
@@ -141,6 +156,16 @@ fn validate_audio_chunk(chunk: &AudioChunk) -> AppResult<()> {
             ),
         });
     }
+    if let Some((index, sample)) = chunk
+        .samples
+        .iter()
+        .enumerate()
+        .find(|(_, sample)| !sample.is_finite())
+    {
+        return Err(AppError::AudioMixFailed {
+            reason: format!("音频样本包含非有限值（index {index}, value {sample}）"),
+        });
+    }
     Ok(())
 }
 
@@ -154,19 +179,19 @@ fn passthrough(
     let resampled = resample(chunk, MIXED_SAMPLE_RATE);
 
     let filtered = if apply_denoise {
-        mixer.apply_denoise_if_enabled(&resampled, chunk.channels)
+        mixer.apply_denoise_if_enabled(&resampled, chunk.channels, chunk.sample_rate)
     } else {
         resampled
     };
 
     let stereo = to_stereo(&filtered, chunk.channels);
-    let clamped = clamp_samples(&stereo);
+    let limited = soft_limit_samples(&stereo);
 
     Ok(MixedAudioChunk {
         timestamp: chunk.timestamp,
         sample_rate: MIXED_SAMPLE_RATE,
         channels: MIXED_CHANNELS,
-        samples: clamped.into(),
+        samples: limited.into(),
     })
 }
 
@@ -177,7 +202,7 @@ fn passthrough(
 /// 2. Align by timestamp — the earlier chunk is padded with silence at the front
 /// 3. Overlap region: equal-weight sum (0.5 * system + 0.5 * mic)
 /// 4. Non-overlapping tail: passthrough from the longer source
-/// 5. Hard clamp to [-1.0, 1.0] to prevent clipping
+/// 5. Guard overrange peaks without waveshaping valid audio
 fn mix_two(
     system: &AudioChunk,
     mic: &AudioChunk,
@@ -190,7 +215,8 @@ fn mix_two(
     let mic_resampled = resample(mic, MIXED_SAMPLE_RATE);
 
     // 仅对麦克风通道应用降噪
-    let mic_filtered = mixer.apply_denoise_if_enabled(&mic_resampled, mic.channels);
+    let mic_filtered =
+        mixer.apply_denoise_if_enabled(&mic_resampled, mic.channels, mic.sample_rate);
 
     let sys_stereo = to_stereo(&sys_resampled, system.channels);
     let mic_stereo = to_stereo(&mic_filtered, mic.channels);
@@ -240,8 +266,8 @@ fn mix_two(
         }
     }
 
-    // Hard clamp to prevent clipping
-    let clamped = clamp_samples(&output);
+    // Guard peaks without applying nonlinear waveshaping to valid audio.
+    let limited = soft_limit_samples(&output);
 
     let earliest_ts = MediaTimestamp::from_nanos(ts_sys.min(ts_mic));
 
@@ -249,7 +275,7 @@ fn mix_two(
         timestamp: earliest_ts,
         sample_rate: MIXED_SAMPLE_RATE,
         channels: MIXED_CHANNELS,
-        samples: clamped.into(),
+        samples: limited.into(),
     })
 }
 
@@ -335,14 +361,32 @@ fn to_stereo(samples: &[f32], src_channels: u16) -> Vec<f32> {
     }
 }
 
-/// Hard-clamps all samples to [-1.0, 1.0] to prevent clipping.
-fn clamp_samples(samples: &[f32]) -> Vec<f32> {
-    samples.iter().map(|s| s.clamp(-1.0, 1.0)).collect()
+/// Keeps valid audio untouched and linearly scales overrange chunks.
+///
+/// Per-sample waveshaping near full scale creates harmonic fizz on loud voice.
+/// A chunk-wide linear gain preserves the waveform and only engages when a
+/// chunk already exceeds the valid ±1.0 range.
+fn soft_limit_samples(samples: &[f32]) -> Vec<f32> {
+    const FULL_SCALE: f32 = 1.0;
+    const TARGET_PEAK: f32 = 0.999;
+
+    let peak = samples
+        .iter()
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+
+    if peak <= FULL_SCALE {
+        return samples.to_vec();
+    }
+
+    let gain = TARGET_PEAK / peak;
+    samples.iter().map(|sample| sample * gain).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SAMPLE_RATE: f64 = 48_000.0;
 
     fn make_chunk(ts_nanos: u64, sample_rate: u32, channels: u16, samples: Vec<f32>) -> AudioChunk {
         AudioChunk {
@@ -351,6 +395,48 @@ mod tests {
             channels,
             samples: samples.into(),
         }
+    }
+
+    fn sine(freq_hz: f64, seconds: f64, amplitude: f32) -> Vec<f32> {
+        let sample_count = (TEST_SAMPLE_RATE * seconds) as usize;
+        (0..sample_count)
+            .map(|i| {
+                let t = i as f64 / TEST_SAMPLE_RATE;
+                (2.0 * std::f64::consts::PI * freq_hz * t).sin() as f32 * amplitude
+            })
+            .collect()
+    }
+
+    fn tone_magnitude(samples: &[f32], freq_hz: f64) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+
+        let (sin_sum, cos_sum) =
+            samples
+                .iter()
+                .enumerate()
+                .fold((0.0f64, 0.0f64), |(sin_sum, cos_sum), (i, sample)| {
+                    let phase = 2.0 * std::f64::consts::PI * freq_hz * i as f64 / TEST_SAMPLE_RATE;
+                    (
+                        sin_sum + *sample as f64 * phase.sin(),
+                        cos_sum + *sample as f64 * phase.cos(),
+                    )
+                });
+
+        (2.0 * sin_sum.hypot(cos_sum) / samples.len() as f64) as f32
+    }
+
+    fn deterministic_wideband_noise(frame_count: usize, amplitude: f32) -> Vec<f32> {
+        let mut state = 0x5eed_4321_u32;
+
+        (0..frame_count)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = ((state >> 8) as f32) / 16_777_215.0;
+                (unit * 2.0 - 1.0) * amplitude
+            })
+            .collect()
     }
 
     #[test]
@@ -382,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn clipping_protection() {
+    fn mixer_soft_limits_full_scale_mix_without_hard_clipping() {
         let mixer = SimpleAudioMixer::new(DenoiseMode::default());
         // Both sources at full amplitude
         let sys = make_chunk(0, 48000, 2, vec![1.0, 1.0]);
@@ -390,11 +476,110 @@ mod tests {
 
         let result = mixer.mix(Some(&sys), Some(&mic)).unwrap();
 
-        // 0.5 * 1.0 + 0.5 * 1.0 = 1.0 — at the boundary, should not exceed
+        // 0.5 * 1.0 + 0.5 * 1.0 reaches valid full scale. It should stay
+        // linear instead of being waveshaped into harmonic fizz.
         for sample in result.samples.iter() {
-            assert!(*sample <= 1.0);
-            assert!(*sample >= -1.0);
+            assert!(
+                (*sample - 1.0).abs() < 1e-6,
+                "valid full-scale mix should remain unchanged: sample={sample}"
+            );
         }
+    }
+
+    #[test]
+    fn soft_limiter_preserves_samples_below_knee() {
+        let samples = vec![-1.0f32, -0.95, -0.5, 0.0, 0.5, 0.95, 1.0];
+        let result = soft_limit_samples(&samples);
+
+        assert_eq!(result.len(), samples.len());
+        for (input, output) in samples.iter().zip(result.iter()) {
+            assert!(
+                (*input - *output).abs() < 1e-6,
+                "valid in-range samples should be unchanged: input={input}, output={output}"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_limiter_compresses_peaks_without_hard_plateau() {
+        let samples = vec![0.5f32, 1.0, 1.2, 1.5, 2.0];
+        let result = soft_limit_samples(&samples);
+
+        assert!(result.iter().all(|sample| sample.abs() < 1.0));
+
+        for (input_pair, output_pair) in samples.windows(2).zip(result.windows(2)) {
+            let input_ratio = input_pair[1] / input_pair[0];
+            let output_ratio = output_pair[1] / output_pair[0];
+            assert!(
+                (input_ratio - output_ratio).abs() < 1e-6,
+                "overrange peak guard should preserve waveform ratios: input_ratio={input_ratio}, output_ratio={output_ratio}"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_limiter_limits_extreme_values_near_full_scale() {
+        let samples = vec![10.0f32, -10.0];
+        let result = soft_limit_samples(&samples);
+
+        assert!(result[0] > 0.99 && result[0] < 1.0);
+        assert!(result[1] < -0.99 && result[1] > -1.0);
+    }
+
+    #[test]
+    fn mixer_uses_soft_limiter_for_single_source_peaks() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
+        let chunk = make_chunk(0, 48000, 2, vec![2.0, -2.0]);
+
+        let result = mixer.mix(Some(&chunk), None).unwrap();
+
+        assert!(result.samples[0] > 0.99 && result.samples[0] < 1.0);
+        assert!(result.samples[1] < -0.99 && result.samples[1] > -1.0);
+    }
+
+    #[test]
+    fn limiter_does_not_add_harmonic_fizz_to_loud_voice() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::None);
+        let voice = sine(1_000.0, 1.0, 1.0);
+        let mic = make_chunk(0, 48_000, 1, voice);
+
+        let result = mixer.mix(None, Some(&mic)).unwrap();
+        let left_channel: Vec<f32> = result.samples.iter().step_by(2).copied().collect();
+
+        let fundamental = tone_magnitude(&left_channel, 1_000.0);
+        let harmonic_fizz = tone_magnitude(&left_channel, 3_000.0)
+            + tone_magnitude(&left_channel, 5_000.0)
+            + tone_magnitude(&left_channel, 7_000.0);
+
+        assert!(
+            harmonic_fizz < fundamental * 0.002,
+            "loud voice should not gain audible harmonic fizz: fundamental={fundamental}, fizz={harmonic_fizz}"
+        );
+    }
+
+    #[test]
+    fn denoised_low_rate_mic_resample_does_not_leave_image_tone() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::Highpass);
+        let sample_rate = 8_000u32;
+        let freq_hz = 3_000.0;
+        let samples: Vec<f32> = (0..sample_rate as usize)
+            .map(|i| {
+                let t = i as f64 / sample_rate as f64;
+                (2.0 * std::f64::consts::PI * freq_hz * t).sin() as f32 * 0.4
+            })
+            .collect();
+        let mic = make_chunk(0, sample_rate, 1, samples);
+
+        let result = mixer.mix(None, Some(&mic)).unwrap();
+        let left_channel: Vec<f32> = result.samples.iter().step_by(2).copied().collect();
+
+        let fundamental = tone_magnitude(&left_channel, freq_hz);
+        let image_tone = tone_magnitude(&left_channel, 5_000.0);
+
+        assert!(
+            image_tone < fundamental * 0.08,
+            "low-rate mic resampling should suppress 5kHz image tone: fundamental={fundamental}, image={image_tone}"
+        );
     }
 
     #[test]
@@ -513,6 +698,25 @@ mod tests {
     }
 
     #[test]
+    fn simple_mixer_rejects_non_finite_samples() {
+        let mixer = SimpleAudioMixer::new(DenoiseMode::default());
+
+        for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let chunk = make_chunk(0, 48000, 1, vec![sample]);
+            let result = mixer.mix(Some(&chunk), None);
+
+            assert!(
+                result.is_err(),
+                "non-finite input sample must be rejected: sample={sample}"
+            );
+            assert!(
+                result.unwrap_err().to_string().contains("非有限"),
+                "error should mention non-finite sample"
+            );
+        }
+    }
+
+    #[test]
     fn mix_two_rejects_zero_channel_mic_input() {
         // R3: mix_two must also validate both inputs.
         let mixer = SimpleAudioMixer::new(DenoiseMode::default());
@@ -610,6 +814,29 @@ mod tests {
             "System-only audio should not be denoised, got avg {}",
             avg
         );
+    }
+
+    #[test]
+    fn mixer_dynamic_suppressor_does_not_filter_low_level_system_only_audio() {
+        let samples = deterministic_wideband_noise(4800, 0.012);
+        let highpass_mixer = SimpleAudioMixer::new(DenoiseMode::Highpass);
+        let none_mixer = SimpleAudioMixer::new(DenoiseMode::None);
+        let sys = make_chunk(0, 48000, 1, samples);
+
+        let highpass_result = highpass_mixer.mix(Some(&sys), None).unwrap();
+        let none_result = none_mixer.mix(Some(&sys), None).unwrap();
+
+        assert_eq!(highpass_result.samples.len(), none_result.samples.len());
+        for (highpass_sample, none_sample) in highpass_result
+            .samples
+            .iter()
+            .zip(none_result.samples.iter())
+        {
+            assert!(
+                (*highpass_sample - *none_sample).abs() < 1e-6,
+                "system-only low-level audio should bypass dynamic denoise: highpass={highpass_sample}, none={none_sample}"
+            );
+        }
     }
 
     #[test]

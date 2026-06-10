@@ -23,7 +23,7 @@ impl HighpassFilter {
     /// 创建高通滤波器。
     ///
     /// # 参数
-    /// - `cutoff_hz`: 截止频率（Hz），建议 80Hz
+    /// - `cutoff_hz`: 截止频率（Hz），麦克风链路默认使用 100Hz
     /// - `sample_rate`: 采样率（Hz），通常 48000
     pub fn new(cutoff_hz: f64, sample_rate: f64) -> Self {
         assert!(cutoff_hz > 0.0, "截止频率必须大于 0");
@@ -147,14 +147,77 @@ impl NotchFilter {
     }
 }
 
+/// 二阶 Butterworth 低通滤波器（Direct Form II Transposed）。
+///
+/// 用于在麦克风降噪链路中温和压低高频电流 hiss，同时保留主要语音清晰度频段。
+#[derive(Clone)]
+struct LowpassFilter {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    z1: f64,
+    z2: f64,
+}
+
+impl LowpassFilter {
+    fn new(cutoff_hz: f64, sample_rate: f64) -> Self {
+        assert!(cutoff_hz > 0.0, "截止频率必须大于 0");
+        assert!(sample_rate > 0.0, "采样率必须大于 0");
+        assert!(
+            cutoff_hz < sample_rate / 2.0,
+            "截止频率必须小于奈奎斯特频率"
+        );
+
+        let q = 1.0 / 2.0_f64.sqrt();
+        let omega_c = 2.0 * PI * cutoff_hz / sample_rate;
+        let alpha = omega_c.sin() / (2.0 * q);
+        let cos_omega_c = omega_c.cos();
+
+        let b0 = (1.0 - cos_omega_c) / 2.0;
+        let b1 = 1.0 - cos_omega_c;
+        let b2 = (1.0 - cos_omega_c) / 2.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega_c;
+        let a2 = 1.0 - alpha;
+
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    fn process(&mut self, input: f32) -> f32 {
+        let x = input as f64;
+        let y = self.b0 * x + self.z1;
+        self.z1 = self.b1 * x - self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        y as f32
+    }
+
+    fn reset(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+    }
+}
+
 /// 麦克风降噪链路。
 ///
-/// 先用高通去除 DC/低频轰鸣，再用窄带陷波器压制 50/60Hz 及低阶谐波。
+/// 先用高通去除 DC/低频轰鸣，再用窄带陷波器压制 50/60Hz 及低阶谐波，
+/// 然后温和压低高频 hiss，最后用低电平向下扩展器降低静音段残留底噪。
 /// 该链路只用于麦克风输入，系统音频保持原样。
 #[derive(Clone)]
 pub struct MicrophoneDenoiseChain {
     highpass: HighpassFilter,
     notches: Vec<NotchFilter>,
+    lowpasses: Vec<LowpassFilter>,
+    noise_suppressor: NoiseFloorSuppressor,
 }
 
 impl MicrophoneDenoiseChain {
@@ -163,16 +226,37 @@ impl MicrophoneDenoiseChain {
     /// # 参数
     /// - `sample_rate`: 采样率（Hz），项目混音输出通常为 48000。
     pub fn new(sample_rate: f64) -> Self {
+        Self::new_with_source_sample_rate(sample_rate, sample_rate)
+    }
+
+    /// 创建适配指定麦克风源采样率的降噪链路。
+    ///
+    /// 低采样率麦克风升采样到 48kHz 时，线性插值会留下高频镜像音；
+    /// 根据源采样率追加抗镜像低通，避免语音一出现就带出滋滋声。
+    pub fn new_with_source_sample_rate(sample_rate: f64, source_sample_rate: f64) -> Self {
+        const HIGHPASS_CUTOFF_HZ: f64 = 100.0;
+        const LOWPASS_CUTOFF_HZ: f64 = 4_800.0;
         const NOTCH_Q: f64 = 35.0;
-        const NOTCH_FREQUENCIES_HZ: [f64; 6] = [50.0, 60.0, 100.0, 120.0, 150.0, 180.0];
+        const NOTCH_FREQUENCIES_HZ: [f64; 8] =
+            [50.0, 60.0, 100.0, 120.0, 150.0, 180.0, 240.0, 480.0];
+
+        let mut lowpasses = vec![LowpassFilter::new(LOWPASS_CUTOFF_HZ, sample_rate)];
+        if let Some(cutoff_hz) =
+            anti_image_lowpass_cutoff_hz(source_sample_rate, sample_rate, LOWPASS_CUTOFF_HZ)
+        {
+            lowpasses.push(LowpassFilter::new(cutoff_hz, sample_rate));
+            lowpasses.push(LowpassFilter::new(cutoff_hz, sample_rate));
+        }
 
         Self {
-            highpass: HighpassFilter::new(80.0, sample_rate),
+            highpass: HighpassFilter::new(HIGHPASS_CUTOFF_HZ, sample_rate),
             notches: NOTCH_FREQUENCIES_HZ
                 .into_iter()
                 .filter(|freq| *freq < sample_rate / 2.0)
                 .map(|freq| NotchFilter::new(freq, sample_rate, NOTCH_Q))
                 .collect(),
+            lowpasses,
+            noise_suppressor: NoiseFloorSuppressor::new(sample_rate),
         }
     }
 
@@ -182,7 +266,10 @@ impl MicrophoneDenoiseChain {
         for notch in &mut self.notches {
             output = notch.process(output);
         }
-        output
+        for lowpass in &mut self.lowpasses {
+            output = lowpass.process(output);
+        }
+        self.noise_suppressor.process(output)
     }
 
     /// 重置滤波器状态。
@@ -192,7 +279,96 @@ impl MicrophoneDenoiseChain {
         for notch in &mut self.notches {
             notch.reset();
         }
+        for lowpass in &mut self.lowpasses {
+            lowpass.reset();
+        }
+        self.noise_suppressor.reset();
     }
+}
+
+fn anti_image_lowpass_cutoff_hz(
+    source_sample_rate: f64,
+    output_sample_rate: f64,
+    default_cutoff_hz: f64,
+) -> Option<f64> {
+    if source_sample_rate <= 0.0
+        || output_sample_rate <= 0.0
+        || source_sample_rate >= output_sample_rate
+    {
+        return None;
+    }
+
+    let cutoff = (source_sample_rate * 0.40).min(default_cutoff_hz);
+    if cutoff < default_cutoff_hz {
+        Some(cutoff.max(1_000.0))
+    } else {
+        None
+    }
+}
+
+/// 低电平噪声向下扩展器。
+///
+/// 低于噪声门限时平滑降低增益，正常说话电平保持接近原样，避免残留电流底噪
+/// 在静音段被持续听到。
+#[derive(Clone)]
+struct NoiseFloorSuppressor {
+    open_threshold: f32,
+    close_threshold: f32,
+    min_gain: f32,
+    gain: f32,
+    envelope: f32,
+    attack_coeff: f32,
+    release_coeff: f32,
+    envelope_coeff: f32,
+}
+
+impl NoiseFloorSuppressor {
+    fn new(sample_rate: f64) -> Self {
+        assert!(sample_rate > 0.0, "采样率必须大于 0");
+
+        Self {
+            open_threshold: 0.014,
+            close_threshold: 0.006,
+            min_gain: 0.28,
+            gain: 1.0,
+            envelope: 0.0,
+            attack_coeff: smoothing_coeff(0.004, sample_rate),
+            release_coeff: smoothing_coeff(0.080, sample_rate),
+            envelope_coeff: smoothing_coeff(0.010, sample_rate),
+        }
+    }
+
+    fn process(&mut self, input: f32) -> f32 {
+        self.envelope += (input.abs() - self.envelope) * self.envelope_coeff;
+
+        let target_gain = if self.envelope >= self.open_threshold {
+            1.0
+        } else if self.envelope <= self.close_threshold {
+            self.min_gain
+        } else {
+            let t = (self.envelope - self.close_threshold)
+                / (self.open_threshold - self.close_threshold);
+            self.min_gain + (1.0 - self.min_gain) * t
+        };
+
+        let coeff = if target_gain > self.gain {
+            self.attack_coeff
+        } else {
+            self.release_coeff
+        };
+        self.gain += (target_gain - self.gain) * coeff;
+
+        input * self.gain
+    }
+
+    fn reset(&mut self) {
+        self.gain = 1.0;
+        self.envelope = 0.0;
+    }
+}
+
+fn smoothing_coeff(time_seconds: f64, sample_rate: f64) -> f32 {
+    (1.0 - (-1.0 / (time_seconds * sample_rate)).exp()) as f32
 }
 
 #[cfg(test)]
@@ -232,6 +408,19 @@ mod tests {
             .collect()
     }
 
+    fn deterministic_wideband_noise(seconds: f64, amplitude: f32) -> Vec<f32> {
+        let sample_count = (SAMPLE_RATE * seconds) as usize;
+        let mut state = 0x5eed_1234_u32;
+
+        (0..sample_count)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = ((state >> 8) as f32) / 16_777_215.0;
+                (unit * 2.0 - 1.0) * amplitude
+            })
+            .collect()
+    }
+
     fn steady_rms_after_warmup(samples: &[f32]) -> f32 {
         let warmup = (SAMPLE_RATE as usize) / 5;
         rms(&samples[warmup.min(samples.len())..])
@@ -240,6 +429,10 @@ mod tests {
     fn tone_magnitude_after_warmup(samples: &[f32], freq_hz: f64) -> f32 {
         let warmup = (SAMPLE_RATE as usize) / 5;
         let samples = &samples[warmup.min(samples.len())..];
+        tone_magnitude(samples, freq_hz)
+    }
+
+    fn tone_magnitude(samples: &[f32], freq_hz: f64) -> f32 {
         if samples.is_empty() {
             return 0.0;
         }
@@ -402,7 +595,7 @@ mod tests {
 
     #[test]
     fn denoise_chain_preserves_voice_band_signal() {
-        for freq in [250.0, 300.0, 500.0, 1000.0, 2000.0] {
+        for freq in [250.0, 300.0, 500.0, 1000.0, 2000.0, 4000.0] {
             let input = sine(freq, 1.0, 0.5);
             let input_rms = steady_rms_after_warmup(&input);
 
@@ -410,11 +603,220 @@ mod tests {
             let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
             let denoised_rms = steady_rms_after_warmup(&denoised);
 
+            let min_preserved = if freq >= 4000.0 { 0.75 } else { 0.9 };
             assert!(
-                denoised_rms > input_rms * 0.9,
+                denoised_rms > input_rms * min_preserved,
                 "{freq}Hz voice-band signal should be preserved: input={input_rms}, denoised={denoised_rms}"
             );
         }
+    }
+
+    #[test]
+    fn denoise_chain_reduces_low_level_broadband_noise_floor() {
+        let input = deterministic_wideband_noise(1.0, 0.012);
+        let input_rms = steady_rms_after_warmup(&input);
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+        let denoised_rms = steady_rms_after_warmup(&denoised);
+
+        assert!(
+            denoised_rms < input_rms * 0.45,
+            "low-level broadband noise floor should be reduced: input={input_rms}, denoised={denoised_rms}"
+        );
+    }
+
+    #[test]
+    fn denoise_chain_suppresses_residual_buzz_when_voice_opens_gate() {
+        const RESIDUAL_BUZZ_HZ: [f64; 2] = [240.0, 480.0];
+        let mut input = composite_sine(&RESIDUAL_BUZZ_HZ, 0.25, 0.006);
+        let voice_start = input.len();
+
+        let voice = sine(1000.0, 0.35, 0.18);
+        let residual_buzz = composite_sine(&RESIDUAL_BUZZ_HZ, 0.35, 0.006);
+        input.extend(
+            voice
+                .iter()
+                .zip(residual_buzz.iter())
+                .map(|(voice, buzz)| voice + buzz),
+        );
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+
+        let onset_len = (SAMPLE_RATE * 0.080) as usize;
+        let input_onset = &input[voice_start..voice_start + onset_len];
+        let denoised_onset = &denoised[voice_start..voice_start + onset_len];
+
+        for freq in RESIDUAL_BUZZ_HZ {
+            let input_tone = tone_magnitude(input_onset, freq);
+            let denoised_tone = tone_magnitude(denoised_onset, freq);
+            assert!(
+                denoised_tone < input_tone * 0.45,
+                "{freq}Hz residual buzz should stay suppressed when voice opens the gate: input={input_tone}, denoised={denoised_tone}"
+            );
+        }
+    }
+
+    #[test]
+    fn denoise_chain_suppresses_high_frequency_hiss_when_voice_opens_gate() {
+        const HISS_HZ: [f64; 4] = [6_000.0, 7_500.0, 9_000.0, 11_000.0];
+        let mut input = composite_sine(&HISS_HZ, 0.25, 0.006);
+        let voice_start = input.len();
+
+        let voice = sine(1000.0, 0.35, 0.18);
+        let hiss = composite_sine(&HISS_HZ, 0.35, 0.006);
+        input.extend(
+            voice
+                .iter()
+                .zip(hiss.iter())
+                .map(|(voice, hiss)| voice + hiss),
+        );
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+
+        let onset_len = (SAMPLE_RATE * 0.120) as usize;
+        let input_onset = &input[voice_start..voice_start + onset_len];
+        let denoised_onset = &denoised[voice_start..voice_start + onset_len];
+
+        for freq in HISS_HZ {
+            let input_tone = tone_magnitude(input_onset, freq);
+            let denoised_tone = tone_magnitude(denoised_onset, freq);
+            assert!(
+                denoised_tone < input_tone * 0.55,
+                "{freq}Hz hiss should stay suppressed when voice opens the gate: input={input_tone}, denoised={denoised_tone}"
+            );
+        }
+    }
+
+    #[test]
+    fn denoise_chain_attenuates_30hz_hum_beyond_80hz_baseline() {
+        let input = sine(30.0, 1.0, 0.6);
+
+        let mut old_highpass = HighpassFilter::new(80.0, SAMPLE_RATE);
+        let old_output: Vec<f32> = input
+            .iter()
+            .map(|sample| old_highpass.process(*sample))
+            .collect();
+        let old_rms = steady_rms_after_warmup(&old_output);
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+        let denoised_rms = steady_rms_after_warmup(&denoised);
+
+        assert!(
+            denoised_rms < old_rms * 0.75,
+            "30Hz hum should be lower than the old 80Hz highpass baseline: old={old_rms}, denoised={denoised_rms}"
+        );
+    }
+
+    #[test]
+    fn denoise_chain_preserves_200hz_low_voice_after_stronger_highpass() {
+        let input = sine(200.0, 1.0, 0.3);
+        let input_rms = steady_rms_after_warmup(&input);
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+        let denoised_rms = steady_rms_after_warmup(&denoised);
+
+        assert!(
+            denoised_rms > input_rms * 0.82,
+            "200Hz low voice should remain usable after stronger highpass: input={input_rms}, denoised={denoised_rms}"
+        );
+    }
+
+    #[test]
+    fn denoise_chain_preserves_speech_like_low_voice_after_stronger_highpass() {
+        for fundamental_hz in [120.0, 150.0, 180.0] {
+            let input = composite_sine(
+                &[fundamental_hz, fundamental_hz * 2.0, fundamental_hz * 3.0],
+                1.0,
+                0.08,
+            );
+            let input_rms = steady_rms_after_warmup(&input);
+
+            let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+            let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+            let denoised_rms = steady_rms_after_warmup(&denoised);
+
+            assert!(
+                denoised_rms > input_rms * 0.45,
+                "{fundamental_hz}Hz speech-like low voice should remain usable after stronger highpass: input={input_rms}, denoised={denoised_rms}"
+            );
+        }
+    }
+
+    #[test]
+    fn denoise_chain_preserves_voice_components_near_new_notches() {
+        for freq in [235.0, 245.0, 470.0, 490.0] {
+            let input = sine(freq, 1.0, 0.08);
+            let input_tone = tone_magnitude_after_warmup(&input, freq);
+
+            let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+            let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+            let denoised_tone = tone_magnitude_after_warmup(&denoised, freq);
+
+            assert!(
+                denoised_tone > input_tone * 0.70,
+                "{freq}Hz voice component near new notches should remain usable: input={input_tone}, denoised={denoised_tone}"
+            );
+        }
+    }
+
+    #[test]
+    fn denoise_chain_preserves_quiet_voice_near_noise_gate() {
+        for freq in [300.0, 1000.0, 2000.0] {
+            let input = sine(freq, 1.0, 0.024);
+            let input_rms = steady_rms_after_warmup(&input);
+
+            let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+            let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+            let denoised_rms = steady_rms_after_warmup(&denoised);
+
+            assert!(
+                denoised_rms > input_rms * 0.88,
+                "{freq}Hz quiet voice should not be treated as noise: input={input_rms}, denoised={denoised_rms}"
+            );
+        }
+    }
+
+    #[test]
+    fn denoise_chain_does_not_hold_back_voice_after_quiet_noise() {
+        let mut input = deterministic_wideband_noise(0.25, 0.008);
+        input.extend(sine(1000.0, 0.75, 0.18));
+
+        let voice_start = (SAMPLE_RATE * 0.25) as usize;
+        let onset_len = (SAMPLE_RATE * 0.020) as usize;
+        let voice_input_onset_rms = rms(&input[voice_start..voice_start + onset_len]);
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+        let voice_denoised_onset_rms = rms(&denoised[voice_start..voice_start + onset_len]);
+
+        assert!(
+            voice_denoised_onset_rms > voice_input_onset_rms * 0.78,
+            "voice onset should recover quickly after quiet noise: input={voice_input_onset_rms}, denoised={voice_denoised_onset_rms}"
+        );
+    }
+
+    #[test]
+    fn denoise_chain_preserves_quiet_voice_tail_after_normal_speech() {
+        let mut input = sine(1000.0, 0.25, 0.18);
+        input.extend(sine(1000.0, 0.35, 0.024));
+
+        let tail_start = (SAMPLE_RATE * 0.25) as usize;
+        let tail_warmup = (SAMPLE_RATE * 0.12) as usize;
+        let tail_input_rms = rms(&input[tail_start + tail_warmup..]);
+
+        let mut chain = MicrophoneDenoiseChain::new(SAMPLE_RATE);
+        let denoised: Vec<f32> = input.iter().map(|sample| chain.process(*sample)).collect();
+        let tail_denoised_rms = rms(&denoised[tail_start + tail_warmup..]);
+
+        assert!(
+            tail_denoised_rms > tail_input_rms * 0.88,
+            "quiet voice tail should not be cut as noise: input={tail_input_rms}, denoised={tail_denoised_rms}"
+        );
     }
 
     #[test]

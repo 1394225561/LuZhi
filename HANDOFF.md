@@ -1,6 +1,6 @@
 # LuZhi 项目交接文档
 
-> 最后更新：2026-06-07 | BUG-0023 60fps 录制素材导出重复 PTS 修复完成，导出器会跳过映射到同一 30fps 输出 PTS tick 的源帧。
+> 最后更新：2026-06-09 | BUG-0029 低采样率麦克风升采样镜像音修复完成，补强说话时滋滋/咔哒声回归。
 >
 > 更新本文件时，**必须**保持”项目概述 → 完整开发计划 → 工作任务记录（按**时间倒序**，并且只保留最近的 7 条记录） → 冬眠记录（按**时间倒序**，并且只保留最近的 7 条记录）”的结构顺序。
 
@@ -80,6 +80,200 @@ W1-W12 Phase：
 ---
 
 ## 工作任务记录
+
+### 2026-06-09：BUG-0029 低采样率麦克风升采样镜像音导致说话时滋滋/咔哒
+
+输入文件：
+
+- 用户反馈：同时开启系统音频采集、麦克风采集并开启麦克风降噪后，静音段无电流滋滋声，但一说话就出现滋滋电流声、咔哒噪音；此前 `c9b1b2f` 到 `197a423` 多轮修复后效果仍不理想
+- `HANDOFF.md`
+- `BUG.md`
+- `src-tauri/src/media/audio_denoise.rs`
+- `src-tauri/src/media/audio_mixer.rs`
+- `src-tauri/src/media/audio_synchronizer.rs`
+- `src-tauri/src/platform/macos/cpal_microphone.rs`
+
+根因结论：
+
+1. 前几轮修复主要覆盖静音底噪、语音开门高频 hiss、notch 残余 buzz 和 mixer 非线性限幅谐波，但没有覆盖真实麦克风采样率低于 48kHz 时的升采样镜像音
+2. `cpal_microphone.rs` 明确使用设备默认输入配置；前端请求的 48kHz/声道数只代表混音输出目标，真实麦克风可能是 8kHz/16kHz/24kHz/44.1kHz
+3. `audio_mixer.rs` 当前用线性插值把麦克风升采样到 48kHz；低采样率麦克风有语音输入时会留下高频镜像音，静音段没有输入信号所以听不到
+4. 新增 RED 测试复现：8kHz 麦克风 3kHz 语音经降噪链路后残留 5kHz 镜像音，修复前 `fundamental=0.23332335, image=0.06200983`，镜像音约为基频 26.6%
+
+已完成：
+
+1. 新增 `denoised_low_rate_mic_resample_does_not_leave_image_tone` 回归测试，约束低采样率麦克风升采样后 5kHz 镜像音不得显著残留
+2. `MicrophoneDenoiseChain` 新增源采样率感知构造入口；默认 48kHz 路径保持原 4.8kHz 低通行为
+3. 当麦克风源采样率低于混音输出采样率且存在可闻镜像风险时，额外串联抗镜像低通滤波器
+4. `SimpleAudioMixer` 的麦克风降噪链路状态同时跟踪通道数和源采样率；通道数或源采样率变化时重建链路
+5. 新增 `synchronizer_outputs_full_windows_for_44100hz_mic_callbacks` 守卫，确认 44.1kHz CPAL 风格回调经 20ms 同步器窗口后仍输出完整 48kHz stereo 窗口
+6. 更新 `BUG.md` BUG-0029 预防规则和本轮自测清单
+
+当前验证结果：
+
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoised_low_rate_mic_resample_does_not_leave_image_tone -- --nocapture` 修复前失败，失败信息为 `fundamental=0.23332335, image=0.06200983`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoised_low_rate_mic_resample_does_not_leave_image_tone -- --nocapture` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_mixer -- --nocapture` 通过（29 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_denoise -- --nocapture` 通过（20 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_synchronizer -- --nocapture` 通过（27 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 并行运行时出现一次既有非音频测试 `delete_removes_entry_from_index` 临时文件 NotFound 抖动；该测试单独复跑通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1` 通过（362 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib --features ffmpeg denoised_low_rate_mic_resample_does_not_leave_image_tone -- --nocapture` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib --features ffmpeg ffmpeg_writer_records_non_silent_mixed_24khz_mono_mic -- --nocapture` 通过
+- `rustfmt --check --edition 2021 src-tauri/src/media/audio_denoise.rs src-tauri/src/media/audio_mixer.rs src-tauri/src/media/audio_synchronizer.rs` 通过
+- `git diff --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/audio_denoise.rs`
+- **修改**: `src-tauri/src/media/audio_mixer.rs`
+- **修改**: `src-tauri/src/media/audio_synchronizer.rs`
+- **修改**: `BUG.md`, `HANDOFF.md`
+- **新增**: `tests/2026-06-09-bug-0029-low-rate-mic-resample-image-checklist.md`
+
+人工复核建议：
+
+1. 同时开启系统音频和麦克风，开启麦克风降噪，正常说话 10 秒，确认说话时不再出现规律性高频滋滋或咔哒声
+2. 留意终端 “麦克风配置协商” 日志；若设备实际采样率低于 48kHz，重点复核本次抗镜像修复效果
+3. 麦克风静音 10 秒，确认静音段仍保持干净
+4. 系统音频单独播放并录制，确认系统音频路径未被麦克风降噪链路影响
+
+### 2026-06-08：BUG-0025 麦克风低频嗡声与峰值硬削波失真聚焦优化
+
+输入文件：
+
+- 用户要求：按评估建议重新制定并执行聚焦实施计划
+- `HANDOFF.md`
+- `BUG.md`
+- `src-tauri/src/media/audio_denoise.rs`
+- `src-tauri/src/media/audio_mixer.rs`
+
+根因结论：
+
+1. 原深度优化计划把降噪参数、soft clip、sinc 重采样和通道 drop-oldest 混在一起，范围过大且部分实现前提不成立
+2. 本轮只保留可小步验证的两项：默认麦克风高通 100Hz 和透明 soft-knee limiter
+3. `rubato` 重采样和媒体通道 drop-oldest 策略需要单独 Spike，不在本轮实现
+4. 人工验证补充反馈：静音段几乎无噪音，但语音起始会出现“嗡”一下并伴随低声“滋滋声”
+5. 进一步定位为语音开门后 240Hz/480Hz 残余稳定 buzz 被放出，而不是静音段 suppressor 失效
+6. 二次人工验证反馈：电流滋滋声反而更频繁、更严重
+7. 进一步定位为语音开门后高频宽带 hiss 被全频放出；上一轮低频/窄带 notch 没有覆盖 6kHz 以上电流滋滋
+8. 三次人工验证反馈：无麦克风输入时没有电流滋滋声，一旦开始说话就伴随滋滋声
+9. 最终定位到另一条“说话才出现”的路径：`audio_mixer.rs` 的逐样本 soft-knee limiter 对合法满幅语音做非线性 waveshaping，会生成 3kHz/5kHz/7kHz 谐波，听感类似电流滋滋
+
+已完成：
+
+1. 新增 30Hz 嗡声相对旧 80Hz highpass baseline 的链路级回归测试
+2. 将默认麦克风高通截止频率提升到 100Hz
+3. 新增 200Hz 低频人声保真回归，避免低频降噪误伤人声
+4. 用透明 soft-knee limiter 替换 `audio_mixer.rs` 中的 hard clamp
+5. 新增 soft limiter 单元测试和 mixer 路径测试
+6. Code Review 后补强 120/150/180Hz speech-like 低频人声保真测试、满幅混音软限幅路径断言和非有限样本拒绝校验
+7. 人工验证反馈后新增语音开门残余 buzz 回归，并将 notch 覆盖扩展到 240Hz/480Hz
+8. Code Review 后补强 240Hz/480Hz 新 notch 邻近人声成分保真测试，避免只用 aggregate RMS 掩盖泛音损伤
+9. 二次人工验证反馈后新增语音开门高频 hiss 回归，并在麦克风 denoise 链路加入 4.8kHz 二阶低通
+10. 补强 4kHz 语音清晰度保真断言，避免高频抑制让人声发闷
+11. 三次人工验证反馈后新增 loud voice harmonic fizz 回归
+12. 将 mixer 峰值保护从逐样本非线性 waveshaping 改为 chunk-wide 线性降增益：合法 `[-1.0, 1.0]` 音频完全不动，只有超过满幅的异常 chunk 才缩到 `0.999`
+13. 新增本轮自测清单
+
+当前验证结果：
+
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_attenuates_30hz_hum_beyond_80hz_baseline -- --nocapture` 修改前失败，失败信息为 `old=0.059079938, denoised=0.05902247`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_attenuates_30hz_hum_beyond_80hz_baseline -- --nocapture` 修改后通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_200hz_low_voice_after_stronger_highpass -- --nocapture` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_speech_like_low_voice_after_stronger_highpass -- --nocapture` 通过
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_suppresses_residual_buzz_when_voice_opens_gate -- --nocapture` 修改前失败，失败信息为 `240Hz residual buzz ... input=0.0053558694, denoised=0.005097435`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_suppresses_residual_buzz_when_voice_opens_gate -- --nocapture` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_voice_components_near_new_notches -- --nocapture` 通过
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_suppresses_high_frequency_hiss_when_voice_opens_gate -- --nocapture` 修改前失败，失败信息为 `6000Hz hiss ... input=0.006, denoised=0.005847291`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_suppresses_high_frequency_hiss_when_voice_opens_gate -- --nocapture` 通过
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib soft_limiter_preserves_samples_below_knee -- --nocapture` 修改前因 `soft_limit_samples` 不存在而编译失败
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib simple_mixer_rejects_non_finite_samples -- --nocapture` 修改前失败，非有限样本未被拒绝
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib limiter_does_not_add_harmonic_fizz_to_loud_voice -- --nocapture` 修改前失败，失败信息为 `fundamental=0.99419343, fizz=0.013985186`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib limiter_does_not_add_harmonic_fizz_to_loud_voice -- --nocapture` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib soft_limiter -- --nocapture` 通过（4 tests）
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib simple_mixer_rejects_non_finite_samples -- --nocapture` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib mixer_soft_limits_full_scale_mix_without_hard_clipping -- --nocapture` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_denoise -- --nocapture` 通过（20 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_mixer -- --nocapture` 通过（27 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 通过（359 tests）
+- `rustfmt --check --edition 2021 src-tauri/src/media/audio_denoise.rs src-tauri/src/media/audio_mixer.rs` 通过
+- `git diff --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/audio_denoise.rs`
+- **修改**: `src-tauri/src/media/audio_mixer.rs`
+- **修改**: `BUG.md`, `HANDOFF.md`
+- **新增**: `tests/2026-06-08-mic-denoise-focused-optimization-checklist.md`
+
+人工复核建议：
+
+1. 有线耳机麦克风开启降噪，静音环境录制 10 秒，确认低频嗡声弱于修复前
+2. 开启降噪后正常说话 10 秒，确认开头不被吞字，尾音不过早切断
+3. 开启降噪后从静音到说话、持续说话 10 秒，确认电流滋滋声不再比上一轮更频繁
+4. 稍大音量说话但不吼叫，确认没有新增破音、齿音刺耳或电流感
+5. 同时录制系统音频和麦克风，确认系统音频音质不受影响
+6. 大音量系统音频 + 麦克风同时录制，确认没有 hard clamp 撕裂感
+
+### 2026-06-08：BUG-0024 有线耳机麦克风残留低电平底噪动态抑制
+
+输入文件：
+
+- 用户反馈：继续深度优化有线耳机麦克风录制电流噪音
+- `HANDOFF.md`
+- `BUG.md`
+- `.claude/rules/2-testing.md`
+- `src-tauri/src/media/audio_denoise.rs`
+- `src-tauri/src/media/audio_mixer.rs`
+
+根因结论：
+
+1. BUG-0021 的 highpass + notch 链路已经针对 DC、低频轰鸣、50/60Hz 基频与低阶谐波生效
+2. 若剩余噪音更像静音段低电平“滋滋/底噪”，它不一定集中在固定工频频点，继续堆叠 notch 收益有限且可能影响人声自然度
+3. 最小安全插入点仍是 Rust 侧 `MicrophoneDenoiseChain` 末尾；不触碰 CPAL 采集线程、FFI、前端 UI 或核心依赖
+
+已完成：
+
+1. 在 `MicrophoneDenoiseChain` 末尾新增轻量 `NoiseFloorSuppressor`
+2. 低于噪声门限时平滑降低增益，减少静音段残留低电平底噪
+3. 正常说话电平保持接近原样，并通过 attack/release 平滑避免开头吞字或抽吸感
+4. Code Review 后将 `NoiseFloorSuppressor` 门限从 `0.010/0.020` 下调到 `0.006/0.014`，attack 从 8ms 调整为 4ms，保护低增益轻声和开头瞬态
+5. 将低电平底噪测试从三固定音改为确定性伪随机宽带噪声
+6. 新增合成音频测试覆盖低电平宽带底噪降低、轻声保真、语音开头恢复、尾音保留、多频点人声保真
+7. 新增 mixer 层系统音频低电平旁路回归，确认动态 suppressor 仍只作用于麦克风
+8. 更新 `BUG.md` BUG-0024 预防规则和本轮自测清单
+
+当前验证结果：
+
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_reduces_low_level_broadband_noise_floor` 旧行为下失败，失败信息为 `input=0.005095413, denoised=0.005094919`
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_quiet_voice_near_noise_gate` 旧门限下失败，失败信息为 `input=0.016970206, denoised=0.011312481`
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_does_not_hold_back_voice_after_quiet_noise` 旧门限下失败，失败信息为 `input=0.1272791, denoised=0.09398388`
+- RED：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_quiet_voice_tail_after_normal_speech` 旧门限下失败，失败信息为 `input=0.016970742, denoised=0.011902361`
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_reduces_low_level_broadband_noise_floor` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_quiet_voice_near_noise_gate` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_does_not_hold_back_voice_after_quiet_noise` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_quiet_voice_tail_after_normal_speech` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib denoise_chain_preserves_voice_band_signal` 通过
+- GREEN：`cargo test --manifest-path src-tauri/Cargo.toml --lib mixer_dynamic_suppressor_does_not_filter_low_level_system_only_audio` 通过
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_denoise` 通过（14 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib audio_mixer` 通过（22 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 通过（348 tests）；剩余 warning 为既有 FFI/可见性/死代码类告警
+- `rustfmt --check --edition 2021 src-tauri/src/media/audio_denoise.rs src-tauri/src/media/audio_mixer.rs` 通过
+- `git diff --check` 通过
+
+改动文件：
+
+- **修改**: `src-tauri/src/media/audio_denoise.rs`
+- **修改**: `BUG.md`, `HANDOFF.md`
+- **新增**: `tests/2026-06-08-bug-0024-wired-mic-dynamic-noise-suppression-checklist.md`
+
+人工复核建议：
+
+1. 有线耳机麦克风开启降噪，静音环境录制 10 秒，回放确认轻微电流底噪进一步降低
+2. 同一设备关闭降噪录制 10 秒，作为对照确认底噪差异明显
+3. 开启降噪后正常说话 10 秒，确认开头不被吞字，尾音不过早被切掉
+4. 同时录制系统音频和麦克风，确认系统音频音质不受影响
 
 ### 2026-06-07：BUG-0023 60fps 录制素材导出时报“导出失败”
 
@@ -343,143 +537,6 @@ W1-W12 Phase：
 3. 录制中最小化/恢复被录制窗口：状态栏应切换暂停/录制中，暂停期间内容不应继续写入最终录制
 4. Retina 屏窗口录制后导出美化：光标位置应与源视频一致
 5. 窗口选择器在权限/枚举失败时显示错误和“重试”，而不是“未找到可用窗口”
-
-### 2026-06-05：播放控件完整功能实现
-
-输入文件：
-
-- `docs/superpowers/specs/2026-06-05-playback-controls-design.md`
-- `docs/superpowers/plans/2026-06-05-playback-controls.md`
-- `reference/ui/ui_spec.md`
-- `.claude/rules/0-global.md`
-- `.claude/rules/1-coding-style.md`
-- `.claude/rules/2-testing.md`
-
-已完成：
-
-1. 添加 `videoRef`、`videoContainerRef`、`isSeekingRef` 引用
-2. 修改初始状态：`currentTime` 从 45→0，`duration` 从 180→0（由视频元数据驱动），新增 `isMuted` 状态
-3. 添加视频事件监听 useEffect（`loadedmetadata`、`timeupdate`、`play`、`pause`、`ended`）
-4. 移除 `<video>` 标签的原生 `controls` 属性，添加 `ref` 和 `playsInline`
-5. 实现 `handlePlayPause`（调用 `video.play()` / `video.pause()`）
-6. 实现 `handleSkipBack` / `handleSkipForward`（±10 秒跳转）
-7. 进度条使用 `onValueCommit` 实现松手 seek，`isSeekingRef` 防止拖拽时跳动
-8. 实现 `handleVolumeChange` 和 `handleMuteToggle`，音量图标切换 `Volume2` / `VolumeX`
-9. 实现 `handleFullscreen`（`requestFullscreen()` / `exitFullscreen()`）
-10. 所有播放控件按钮添加 `disabled={!recordingResult?.outputPath}`
-11. 新增 3 个前端测试：play/pause 按钮调用 video.play()、无视频源时按钮禁用、slider 存在性验证
-
-当前验证结果：
-
-- `npm test -- --run` **63 tests** 通过（+3 相比之前）
-- `npm run build` 通过
-- `git diff --check` 通过
-
-改动文件：
-
-- **修改**: `src/components/preview-view.tsx`, `src/App.test.tsx`
-- **新增**: `docs/superpowers/specs/2026-06-05-playback-controls-design.md`, `docs/superpowers/plans/2026-06-05-playback-controls.md`
-
-人工复核建议：
-
-1. 播放按钮点击 → 视频开始播放，图标变为 Pause
-2. 暂停按钮点击 → 视频暂停，图标变为 Play
-3. 后退按钮 → 视频后退 10 秒
-4. 前进按钮 → 视频前进 10 秒
-5. 进度条拖拽 → 视频 seek 到目标位置，松手前不跳动
-6. 音量滑块 → 视频音量实时变化
-7. 静音图标点击 → 视频静音/取消静音，图标切换
-8. 全屏按钮 → 视频容器进入全屏
-9. 播放结束 → 自动暂停在最后一帧
-10. 无录制文件 → 控件按钮禁用
-
-### 2026-06-05：BUG-0014 美化界面拖拽触发范围第三轮修复
-
-输入文件：
-
-- `BUG.md` BUG-0014
-- 用户二次反馈：导出视频后保存路径文字无法拖选，仍会触发窗口拖拽
-- 用户三次反馈：第二轮修复过头，美化界面所有区域都无法触发窗口拖拽；期望主预览区域和右侧边栏空白可拖，按钮/文本不可拖
-- `reference/ui/ui_spec.md`
-- `reference/ui/ui-migration-spec.md`
-- `.codex/rules/0-global.md`
-- `.codex/rules/1-coding-style.md`
-- `.codex/rules/2-testing.md`
-
-已完成：
-
-1. 按 systematic debugging 完成根因调查：`App.tsx` 使用 `closest('[data-tauri-drag-region]')`，导致根拖拽区域下的标题/说明文本继承拖拽能力
-2. 识别第二个阻断复制的根因：全局 `selectstart` 被 `preventDefault()`，即使拖拽修复后也无法选择文本
-3. 根据用户二次反馈补充根因：`PreviewView` 根容器仍保留 `data-tauri-drag-region="deep"`，真实 Tauri WebView 原生拖拽机制会绕过程序化监听过滤，导出保存路径仍位于该祖先下
-4. 根据用户三次反馈补充根因：第二轮将 `data-luzhi-drag-region` 放在预览页根节点，并要求事件目标本身带标记；左右内容容器覆盖根节点，导致空白区域也无法命中拖拽标记
-5. 新增/调整前端回归测试覆盖：主预览区域空白触发拖拽、右侧边栏空白触发拖拽、预览文本不触发拖拽、预览文本允许 `selectstart`、导出保存路径不位于 Tauri 原生 drag-region 祖先下且不会触发 `startDragging()`
-6. 最小修复：保留右键菜单禁用；移除全局 `selectstart` 阻止；将 `src` 中真实 `data-tauri-drag-region` 全部替换为应用自定义 `data-luzhi-drag-region`
-7. `PreviewView` 改为在主预览区域和右侧边栏两个内容容器上放置 `data-luzhi-drag-region`
-8. 程序化窗口拖拽改为：命中自定义拖拽容器内空白区域才触发；按钮、输入控件、视频控件、可交互角色和文本元素不触发
-9. 更新 `BUG.md` 根因、修复内容和预防规则
-10. 新增并更新本轮自测清单
-
-当前验证结果：
-
-- 第一轮目标红绿测试：修复前 2 failed / 1 passed；修复后 `npm test -- src/App.test.tsx -t "does not start window drag|keeps direct blank|allows preview text selection"` **3 tests** 通过
-- 第二轮导出路径测试：修复前 `keeps exported output path outside Tauri native drag regions` 失败，失败证据显示最近祖先为 `data-tauri-drag-region="deep"` 的预览页根容器；修复后目标测试 **4 tests** 通过
-- 第三轮左右容器测试：修复前 `starts window drag from main preview container blank area` / `starts window drag from right sidebar blank area` 失败；修复后 BUG-0014 目标测试 **5 tests** 通过
-- `npm test -- --run` **60 tests** 通过
-- `npm run build` 通过
-- `git diff --check` 通过
-
-改动文件：
-
-- **修改**: `src/App.tsx`, `src/App.test.tsx`, `src/components/preview-view.tsx`, `src/components/processing-view.tsx`, `src/components/error-view.tsx`, `BUG.md`, `HANDOFF.md`
-- **新增**: `tests/2026-06-05-bug-0014-drag-region-checklist.md`
-
-人工复核建议：
-
-1. 预览美化界面拖动空白区域：窗口可以移动
-2. 拖动标题/说明文本：不会移动窗口，文本可被选择复制
-3. 导出成功后拖选保存路径文字：不会移动窗口，路径可被选中复制
-4. 点击/拖动返回、播放、滑块、开关、导出按钮：不会触发窗口拖拽
-
-### 2026-06-05：BUG-0011 第 6 轮 FFI Code Review Findings 修复
-
-输入文件：
-
-- 用户反馈：第 6 轮人工验证效果没问题
-- Code review findings：重点修复 NSCursor FFI selector guard、AppKit 线程边界、autorelease 生命周期、C string 类型安全和 clippy 近邻告警
-- `BUG.md` BUG-0011 预防规则 25-29
-
-已完成：
-
-1. 新增 `CursorMainThreadDispatcher`，生产录制链路通过 Tauri `AppHandle::run_on_main_thread` 执行 AppKit cursor 读取
-2. `MacCursorKindProvider` 构造时必须接收 main-thread dispatcher，避免生产路径在 cursor metadata 后台线程直接调用 AppKit
-3. ObjC 消息发送前增加 class/instance method guard，缺失 selector 时 fail closed
-4. selector 参数改为 `&CStr` / `c"..."`，移除裸 `&[u8]` C string 边界
-5. autorelease pool 改为 `objc_autoreleasePoolPush/Pop`
-6. legacy AX 的 `NSWorkspace` ObjC 调用同步使用 guarded helper
-7. 新增 main-thread reader 调度成功/失败测试
-8. 清理本轮 review 指出的 `cursor_source.rs` / `cursor_metadata_runtime.rs` unused import 告警
-9. 更新 BUG.md 和本轮自测清单
-
-当前验证结果：
-
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib cursor_kind` **12 tests** 通过
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib` **294 tests** 通过
-- `cargo clippy --manifest-path src-tauri/Cargo.toml --lib` 通过；剩余 **32 个既有 warning**
-- `cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过
-- `npm test -- --run` **55 tests** 通过
-- `git diff --check` 通过
-
-改动文件：
-
-- **修改**: `src-tauri/src/platform/macos/cursor_kind.rs`, `src-tauri/src/platform/macos/cursor_source.rs`, `src-tauri/src/platform/macos_service.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/app/cursor_metadata_runtime.rs`, `BUG.md`, `HANDOFF.md`
-- **新增**: `tests/2026-06-05-bug-0011-ffi-review-findings-checklist.md`
-
-人工复核建议：
-
-1. 普通桌面/空白区域：导出美化光标为 Arrow
-2. WebView/浏览器按钮或链接：导出美化光标为 Hand
-3. 文本输入框：导出美化光标为 IBeam
-4. 四指上划进入 Mission Control：macOS 显示 Arrow，导出美化视频也显示 Arrow
 
 ## 冬眠记录
 
