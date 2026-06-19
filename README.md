@@ -2,15 +2,15 @@
 
 录智是一个基于 Tauri 2 的桌面录屏 MVP：专注于“录屏 + 录后自动美化 + 一键导出”的单点工作流。
 
-当前仓库处于 MVP 阶段：macOS 录制主链路优先打穿，Windows 底层模块已有目录和 Trait 预留，但完整 Windows Tauri 应用接线尚未完成。
+当前仓库处于 MVP 阶段：macOS 录制主链路优先打穿，Windows MVP 已进入实现路径，WindowsRecordingService 已接入 WGC/WASAPI/cpal/FFmpeg 管线。
 
 ## 当前状态
 
-| 平台     | 状态                               | 说明                                                                                        |
-| -------- | ---------------------------------- | ------------------------------------------------------------------------------------------- |
-| macOS    | 可开发、可运行 MVP                 | 使用 ScreenCaptureKit + cpal + FFmpeg feature 跑通全屏录制、预览、美化和导出                |
-| Windows  | 环境可准备，原生应用暂不可直接运行 | `src-tauri/src/lib.rs` 当前对非 macOS 构建有 `compile_error!`；DXGI/WASAPI 模块仍是占位实现 |
-| Web 前端 | 可独立开发和测试                   | `npm run dev` 启动 Vite，适合 UI 调试                                                       |
+| 平台     | 状态                           | 说明                                                                                        |
+| -------- | ------------------------------ | ------------------------------------------------------------------------------------------- |
+| macOS    | 可开发、可运行 MVP             | 使用 ScreenCaptureKit + cpal + FFmpeg feature 跑通全屏录制、预览、美化和导出                |
+| Windows  | MVP 开发中                     | 应用可启动；录制主链路按 Windows Graphics Capture / WASAPI / cpal / FFmpeg 逐步验收         |
+| Web 前端 | 可独立开发和测试               | `npm run dev` 启动 Vite，适合 UI 调试                                                       |
 
 ## 功能概览
 

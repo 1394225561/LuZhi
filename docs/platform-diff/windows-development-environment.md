@@ -1,8 +1,8 @@
 # Windows 开发环境准备
 
-> 最后更新：2026-06-13
+> 最后更新：2026-06-19
 >
-> 适用阶段：Windows MVP 开发启动前的本机环境准备。当前项目的 Windows 原生录制接线尚未完成，本文用于确认开发机已具备 Tauri 2、Rust MSVC、前端构建、DXGI/WASAPI/FFmpeg 后续开发所需的基础环境。
+> 适用阶段：Windows MVP 开发。Windows 原生应用已进入 MVP 实现路径：`npm run tauri:dev` 应能启动应用壳；录制能力按 Windows Graphics Capture、WASAPI、cpal 麦克风和 FFmpeg feature 的接入状态逐步验证。
 
 ## 1. 当前项目边界
 
@@ -17,15 +17,15 @@ LuZhi 当前技术栈：
 
 当前 Windows 侧状态：
 
-- `src-tauri/src/platform/windows/` 已有 `dxgi_capture.rs`、`wasapi_loopback.rs`、`window_capture.rs` 预留模块。
-- 这些模块当前仍是占位实现。
-- `src-tauri/src/lib.rs` 对非 macOS 构建有编译期保护：
-
-```rust
-compile_error!("LuZhi recording service currently supports macOS builds only; Windows app wiring requires a WindowsRecordingService.");
-```
-
-因此，Windows 上 `npm run tauri:dev` 或 `cargo check --manifest-path src-tauri/Cargo.toml` 走到该错误时，通常说明环境已进入项目当前代码边界，不应优先判断为开发环境损坏。
+- `src-tauri/src/lib.rs` 已移除 macOS 编译期保护，Windows 构建路径已开放。
+- `WindowsRecordingService` 实现了 `PlatformRecordingService` trait，接入 WGC/WASAPI/cpal/FFmpeg 管线。
+- `src-tauri/src/platform/windows/` 包含以下已实现模块：
+  - `graphics_capture.rs`：Windows Graphics Capture 帧辅助工具和全屏/窗口适配器骨架
+  - `wasapi_loopback.rs`：WASAPI 回环音频捕获生命周期管理
+  - `window_capture.rs`：基于 EnumWindows 的窗口枚举
+  - `cursor_source.rs`：Windows 光标位置和按键状态采集
+  - `audio_device.rs`：音频格式转换辅助工具
+- Windows 窗口录制采用 Windows Graphics Capture，不以 DXGI 桌面帧裁剪作为正式窗口录制方案。若窗口最小化、关闭、受保护或 API 不支持，应用应给出中文错误，不生成假成功录制。
 
 ---
 
