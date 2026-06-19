@@ -3,11 +3,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::cursor_metadata_runtime::CursorKindDiagnostics;
 use crate::app::error::{AppError, AppResult};
 use crate::core::timeline::{
     BeautifyConfigSnapshot, CaptureGeometry, CursorClick, CursorSample, EffectTimeline,
 };
-use crate::platform::macos::cursor_kind::CursorKindDiagnostics;
 
 /// Recording sidecar metadata saved next to the intermediate recording artifact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

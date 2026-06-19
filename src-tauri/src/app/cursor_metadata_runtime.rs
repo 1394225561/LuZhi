@@ -12,10 +12,34 @@ use crate::core::timeline::{
     MouseButton,
 };
 use crate::media::recording_metadata::RecordingMetadata;
-use crate::platform::macos::cursor_kind::cursor_kind_diagnostics_merged;
 
 const DEFAULT_MAX_CURSOR_SAMPLES: usize = 120_000;
 const DEFAULT_MAX_CURSOR_CLICKS: usize = 10_000;
+
+/// Diagnostics for cursor kind classification.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorKindDiagnostics {
+    pub ax_query_failure_count: u64,
+    pub ax_fallback_arrow_count: u64,
+    pub arrow_count: u64,
+    pub hand_count: u64,
+    pub ibeam_count: u64,
+}
+
+fn cursor_kind_diagnostics_from_counts(
+    arrow_count: u64,
+    hand_count: u64,
+    ibeam_count: u64,
+) -> CursorKindDiagnostics {
+    CursorKindDiagnostics {
+        ax_query_failure_count: 0,
+        ax_fallback_arrow_count: 0,
+        arrow_count,
+        hand_count,
+        ibeam_count,
+    }
+}
 
 /// Snapshot of the current cursor position, button states, and kind.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -251,7 +275,7 @@ impl CursorMetadataRecorder {
             cursor_snapshot_success_count: self.snapshot_success_count,
             cursor_snapshot_error_count: self.snapshot_error_count,
             capture_geometry,
-            cursor_kind_diagnostics: Some(cursor_kind_diagnostics_merged(
+            cursor_kind_diagnostics: Some(cursor_kind_diagnostics_from_counts(
                 self.arrow_count,
                 self.hand_count,
                 self.ibeam_count,

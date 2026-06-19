@@ -129,16 +129,9 @@ const K_AX_ERROR_SUCCESS: i32 = 0;
 // Diagnostics
 // ---------------------------------------------------------------------------
 
-/// Diagnostics for cursor kind queries.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CursorKindDiagnostics {
-    pub ax_query_failure_count: u64,
-    pub ax_fallback_arrow_count: u64,
-    pub arrow_count: u64,
-    pub hand_count: u64,
-    pub ibeam_count: u64,
-}
+// CursorKindDiagnostics is now defined in app::cursor_metadata_runtime
+// and re-exported here for backward compatibility within the macos module.
+pub use crate::app::cursor_metadata_runtime::CursorKindDiagnostics;
 
 /// Snapshot of cursor kind distribution for diagnostics logging.
 pub fn cursor_kind_diagnostics_snapshot() -> CursorKindDiagnostics {

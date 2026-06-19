@@ -602,6 +602,22 @@ impl<'a> RecordingFinalizeGuard<'a> {
             .and_then(|runtime| runtime.stop());
         self.service.cursor_runtime = None;
 
+        // Merge macOS AX diagnostic counters into cursor metadata.
+        // The common runtime only tracks arrow/hand/ibeam from the cursor source;
+        // macOS-specific ax_query_failure_count and ax_fallback_arrow_count come
+        // from the global atomic counters in macos::cursor_kind.
+        if let Some(ref mut metadata) = self.cursor_metadata {
+            if let Some(ref diag) = metadata.cursor_kind_diagnostics {
+                metadata.cursor_kind_diagnostics = Some(
+                    crate::platform::macos::cursor_kind::cursor_kind_diagnostics_merged(
+                        diag.arrow_count,
+                        diag.hand_count,
+                        diag.ibeam_count,
+                    ),
+                );
+            }
+        }
+
         // Stop mic first to release Bluetooth HFP profile ASAP.
         if self.service.last_requested_microphone {
             eprintln!("麦克风已启动，执行 mic stop...");
