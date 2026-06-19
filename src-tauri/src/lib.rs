@@ -1105,7 +1105,12 @@ async fn list_windows() -> Result<Vec<core::window::WindowInfo>, String> {
         platform::macos::window_list::list_windows().map_err(|e| e.to_string())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        platform::windows::window_capture::list_windows().map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Err("窗口录制尚未支持当前平台".to_string())
     }
