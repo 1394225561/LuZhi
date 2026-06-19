@@ -35,22 +35,19 @@ use media::recording_writer::StopRecordingResponse;
 use media::silence_detector::SilenceDetectorEngine;
 use media::trim_exporter::ExportProgressReporter;
 use media::trim_metadata::TrimMetadataWriter;
-#[cfg(target_os = "macos")]
-use platform::macos::cursor_kind::CursorMainThreadDispatcher;
+use app::recording_service_boundary::{CursorMainThreadDispatcher, PlatformRecordingService};
 #[cfg(target_os = "macos")]
 use platform::macos_service::MacRecordingService;
-#[cfg(not(target_os = "macos"))]
-compile_error!("LuZhi recording service currently supports macOS builds only; Windows app wiring requires a WindowsRecordingService.");
+#[cfg(target_os = "windows")]
+use platform::windows_service::WindowsRecordingService;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
 struct TauriCursorMainThreadDispatcher {
     app: AppHandle,
 }
 
-#[cfg(target_os = "macos")]
 impl CursorMainThreadDispatcher for TauriCursorMainThreadDispatcher {
     fn run_on_main_thread(&self, task: Box<dyn FnOnce() + Send>) -> Result<(), String> {
         self.app.run_on_main_thread(task).map_err(|e| e.to_string())
@@ -80,9 +77,21 @@ impl Default for BeautifyConfigPayload {
     }
 }
 
+fn create_platform_recording_service() -> Box<dyn PlatformRecordingService> {
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(MacRecordingService::new())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(WindowsRecordingService::new())
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
-    service: Arc<Mutex<MacRecordingService>>,
+    service: Arc<Mutex<Box<dyn PlatformRecordingService>>>,
     capture_config: Arc<Mutex<CaptureConfig>>,
     audio_config: Arc<Mutex<AudioConfig>>,
     tick_runtime: Arc<Mutex<Option<TickRuntime>>>,
@@ -97,7 +106,7 @@ struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            service: Arc::new(Mutex::new(MacRecordingService::new())),
+            service: Arc::new(Mutex::new(create_platform_recording_service())),
             capture_config: Arc::new(Mutex::new(CaptureConfig::full_screen_1080p_30fps())),
             audio_config: Arc::new(Mutex::new(AudioConfig {
                 capture_system_audio: true,

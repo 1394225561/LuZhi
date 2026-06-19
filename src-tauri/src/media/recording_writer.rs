@@ -104,8 +104,11 @@ pub struct RecordingDiagnostics {
     /// Contains pause/drop/wait/callbacks_after_stop information.
     /// Only populated when microphone was requested and stop was called.
     /// Persisted before mic capture is rebuilt (BUG.md rule 21).
+    #[cfg(target_os = "macos")]
     pub mic_stop_diagnostics:
         Option<crate::platform::macos::cpal_microphone::CpalMicrophoneStopDiagnostics>,
+    #[cfg(not(target_os = "macos"))]
+    pub mic_stop_diagnostics: Option<()>,
 }
 
 /// Source-aware audio contract validation.
@@ -787,6 +790,7 @@ mod tests {
     }
 
     /// Verifies that RecordingResult serializes diagnostics as camelCase.
+    #[cfg(target_os = "macos")]
     #[test]
     fn recording_result_serializes_diagnostics_as_camel_case() {
         use crate::platform::macos::cpal_microphone::CpalMicrophoneStopDiagnostics;

@@ -1008,6 +1008,7 @@ mod tests {
         assert!((metadata.cursor_clicks[0].y - 540.0).abs() < 0.01);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn finish_merges_ax_failure_counts_into_metadata() {
         // Reset global counters to ensure clean state.
