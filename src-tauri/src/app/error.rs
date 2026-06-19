@@ -210,10 +210,7 @@ mod tests {
     #[test]
     fn window_minimized_chinese_message() {
         let err = AppError::WindowMinimized { window_id: 42 };
-        assert_eq!(
-            err.to_string(),
-            "窗口已最小化，请恢复窗口后重试：42"
-        );
+        assert_eq!(err.to_string(), "窗口已最小化，请恢复窗口后重试：42");
     }
 
     #[test]

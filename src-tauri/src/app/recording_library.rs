@@ -156,8 +156,12 @@ impl RecordingLibrary {
         }
 
         // Optional companion files: use if exists, ignore if missing.
-        let cmp = cursor_metadata_path.map(PathBuf::from).filter(|p| p.exists());
-        let etp = effect_timeline_path.map(PathBuf::from).filter(|p| p.exists());
+        let cmp = cursor_metadata_path
+            .map(PathBuf::from)
+            .filter(|p| p.exists());
+        let etp = effect_timeline_path
+            .map(PathBuf::from)
+            .filter(|p| p.exists());
         let tmp = trim_metadata_path.map(PathBuf::from).filter(|p| p.exists());
         let ctp = cut_timeline_path.map(PathBuf::from).filter(|p| p.exists());
 
@@ -256,12 +260,12 @@ impl RecordingLibrary {
 
     /// Parse "recording-{millis}-{seq}" from a file stem.
     fn parse_recording_filename(path: &Path) -> AppResult<(u64, u64)> {
-        let stem = path
-            .file_stem()
-            .and_then(|f| f.to_str())
-            .ok_or_else(|| AppError::ImportFailed {
-                reason: "无效的文件名".to_string(),
-            })?;
+        let stem =
+            path.file_stem()
+                .and_then(|f| f.to_str())
+                .ok_or_else(|| AppError::ImportFailed {
+                    reason: "无效的文件名".to_string(),
+                })?;
 
         let parts: Vec<&str> = stem.split('-').collect();
         if parts.len() != 3 || parts[0] != "recording" {
@@ -270,12 +274,16 @@ impl RecordingLibrary {
             });
         }
 
-        let millis = parts[1].parse::<u64>().map_err(|_| AppError::ImportFailed {
-            reason: "文件名格式错误".to_string(),
-        })?;
-        let seq = parts[2].parse::<u64>().map_err(|_| AppError::ImportFailed {
-            reason: "文件名格式错误".to_string(),
-        })?;
+        let millis = parts[1]
+            .parse::<u64>()
+            .map_err(|_| AppError::ImportFailed {
+                reason: "文件名格式错误".to_string(),
+            })?;
+        let seq = parts[2]
+            .parse::<u64>()
+            .map_err(|_| AppError::ImportFailed {
+                reason: "文件名格式错误".to_string(),
+            })?;
 
         Ok((millis, seq))
     }
@@ -289,12 +297,7 @@ impl RecordingLibrary {
     ///
     /// If multiple files match (e.g., from different sessions with the same
     /// seq after an app restart), returns the most recent one.
-    fn find_companion_file(
-        dir: &Path,
-        prefix: &str,
-        seq: u64,
-        extension: &str,
-    ) -> Option<PathBuf> {
+    fn find_companion_file(dir: &Path, prefix: &str, seq: u64, extension: &str) -> Option<PathBuf> {
         let entries = fs::read_dir(dir).ok()?;
         let mut candidates: Vec<PathBuf> = entries
             .filter_map(|e| e.ok())
@@ -334,25 +337,19 @@ impl RecordingLibrary {
 
         // Find companion files by prefix pattern. Metadata files have different
         // timestamps than the video file (created at recording start vs stop).
-        let cursor_metadata_path =
-            Self::find_companion_file(dir, "cursor-metadata", seq, "json").ok_or_else(|| {
-                AppError::ImportFailed {
-                    reason: "缺少配套文件：cursor-metadata".to_string(),
-                }
-            })?;
+        let cursor_metadata_path = Self::find_companion_file(dir, "cursor-metadata", seq, "json")
+            .ok_or_else(|| AppError::ImportFailed {
+            reason: "缺少配套文件：cursor-metadata".to_string(),
+        })?;
 
-        let effect_timeline_path =
-            Self::find_companion_file(dir, "cursor-effects", seq, "json").ok_or_else(|| {
-                AppError::ImportFailed {
-                    reason: "缺少配套文件：cursor-effects".to_string(),
-                }
+        let effect_timeline_path = Self::find_companion_file(dir, "cursor-effects", seq, "json")
+            .ok_or_else(|| AppError::ImportFailed {
+                reason: "缺少配套文件：cursor-effects".to_string(),
             })?;
 
         // Optional companion files — only exist after auto-trim is used.
-        let trim_metadata_path =
-            Self::find_companion_file(dir, "trim-metadata", seq, "json");
-        let cut_timeline_path =
-            Self::find_companion_file(dir, "cut-timeline", seq, "json");
+        let trim_metadata_path = Self::find_companion_file(dir, "trim-metadata", seq, "json");
+        let cut_timeline_path = Self::find_companion_file(dir, "cut-timeline", seq, "json");
 
         // Validate required metadata is parseable.
         let _meta = crate::media::recording_metadata::RecordingMetadataWriter::read_metadata(
@@ -486,13 +483,17 @@ mod tests {
         }
 
         let mut lib = RecordingLibrary::new(&dir);
-        lib.register("rec-1000-0", 1000, 10.0,
+        lib.register(
+            "rec-1000-0",
+            1000,
+            10.0,
             video.to_str().unwrap(),
             Some(cm.to_str().unwrap()),
             Some(et.to_str().unwrap()),
             Some(tm.to_str().unwrap()),
             Some(ct.to_str().unwrap()),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(lib.list().len(), 1);
 

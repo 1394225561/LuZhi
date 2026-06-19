@@ -7,7 +7,6 @@ use std::thread;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::platform::cpal_microphone::CpalMicrophoneCapture;
 use super::macos::cursor_source::MacCursorSource;
 use super::macos::screen_capture_kit::MacScreenCapture;
 use super::macos::window_monitor::WindowMonitor;
@@ -34,6 +33,7 @@ use crate::media::recording_writer::{
 use crate::media::silence_detector::FrameDiffAnalyzer;
 use crate::media::trim_audio_activity::BaseAudioActivityAnalyzer;
 use crate::media::trim_metadata::{TrimMetadata, TrimMetadataWriter, TRIM_METADATA_SCHEMA_VERSION};
+use crate::platform::cpal_microphone::CpalMicrophoneCapture;
 
 use crate::app::recording_consumer::{
     consume_frames, RecordingConsumerInput, RecordingConsumerOutput,
