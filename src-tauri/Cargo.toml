@@ -46,6 +46,25 @@ objc2-foundation = "0.3"
 objc2-core-foundation = "0.3"
 block2 = "0.6"
 
+[target.'cfg(windows)'.dependencies]
+# Windows Graphics Capture + WASAPI + Win32 API
+# ⚠️ 人工审查点：windows crate 版本需人工确认兼容性
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [features]
 default = []
 ffmpeg = ["dep:ffmpeg-next"]
