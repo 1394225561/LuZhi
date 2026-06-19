@@ -26,6 +26,26 @@ Implementation is intentionally staged:
 
 Do not add area recording, activation-code protocol, D3D/FFmpeg zero-copy, or 4K/60fps stability work in this plan.
 
+### Phase Roadmap
+
+Execute this plan by phase. A phase is complete only when all included tasks are committed, the phase self-tests have been run, and the checkpoint notes are recorded in the implementation log or the commit/PR description.
+
+| Phase | Tasks | Functional outcome | Exit checkpoint |
+|-------|-------|--------------------|-----------------|
+| Phase 1: Platform Boundary And Windows Shell | Tasks 1-4 | Windows build path opens; macOS service remains behaviorally unchanged; Windows service fails visibly before native capture exists. | `cargo check` passes on current platform; Windows `cargo check` has been run on a Windows machine; no duplicate cursor dispatcher trait remains. |
+| Phase 2: Windows Native Capture Primitives | Tasks 5-8 | WGC frame helpers/fullscreen adapter, WASAPI loopback, and Windows cursor source exist as testable primitives. | Native primitives produce real frame/audio/cursor data in smoke tests or have an explicitly recorded environment blocker. |
+| Phase 3: Shared Media Pipeline Integration | Tasks 9-10 | Shared consumer is extracted safely; Windows fullscreen recording uses existing writer/mixer/cursor pipeline. | macOS consumer regression passes; Windows fullscreen recording reaches preview without fake success. |
+| Phase 4: Window Recording | Task 11 | Windows window selector/enumeration and WGC window capture work without desktop-frame crop fallback. | Notepad/Terminal window recording smoke passes; minimized/closed/protected windows fail visibly. |
+| Phase 5: Acceptance, Docs, And Native Safety Review | Tasks 12-13 | Manual checklist, docs, final verification, and native safety review are complete. | MVP checklist has exact PASS/BLOCKED notes; all applicable automated checks pass. |
+
+### Phase Execution Rules
+
+- Do not begin a later phase before the previous phase checkpoint is recorded.
+- If a phase checkpoint fails because of code behavior, fix it inside the same phase before moving on.
+- If a phase checkpoint is blocked by local environment, record the exact blocker, the machine/OS, and the command output; do not report the phase as fully validated.
+- Keep commits task-sized inside each phase. Do not squash multiple phase checkpoints into one unreviewable commit.
+- Run the phase's self-test commands in addition to each task's narrower test commands.
+
 ### macOS Safety Gates
 
 This plan touches shared Rust app state, cursor metadata, microphone capture, and the recording consumer used by macOS. Treat macOS behavior as protected production behavior:
@@ -70,7 +90,36 @@ This plan touches shared Rust app state, cursor metadata, microphone capture, an
 
 ---
 
-## Task 1: Add Platform Recording Service Boundary
+## Phase 1: Platform Boundary And Windows Shell
+
+**Functional goal:** Introduce the platform service boundary, remove the hard Windows compile block, and add a Windows service stub that fails visibly without touching native capture yet.
+
+**Included tasks:** Task 1, Task 2, Task 3, Task 4.
+
+**Self-test commands:**
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib window_state_actions_pause_resume_and_stop_recording
+cargo test --manifest-path src-tauri/Cargo.toml --lib cursor_metadata_runtime
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+Run on a Windows machine before exiting this phase:
+
+```powershell
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+**Checkpoint:**
+
+- [ ] `src-tauri/src/lib.rs` no longer contains the non-macOS `compile_error!`.
+- [ ] `AppState.service` is platform-neutral.
+- [ ] macOS cursor dispatcher has one trait definition shared end-to-end.
+- [ ] Windows service start/window-start returns Chinese `NativeCaptureUnavailable` errors and does not create fake recordings.
+- [ ] Current-platform `cargo check` result recorded.
+- [ ] Windows `cargo check` result recorded, or exact Windows environment blocker recorded.
+
+### Task 1: Add Platform Recording Service Boundary
 
 **Files:**
 - Create: `src-tauri/src/app/recording_service_boundary.rs`
@@ -350,7 +399,7 @@ git commit -m "refactor(app): add platform recording service boundary"
 
 ---
 
-## Task 2: Make Cursor Diagnostics Platform-Neutral
+### Task 2: Make Cursor Diagnostics Platform-Neutral
 
 **Files:**
 - Modify: `src-tauri/src/app/cursor_metadata_runtime.rs`
@@ -461,7 +510,7 @@ git commit -m "refactor(cursor): make cursor diagnostics platform-neutral"
 
 ---
 
-## Task 3: Add WindowsRecordingService Stub And Open Windows Build Path
+### Task 3: Add WindowsRecordingService Stub And Open Windows Build Path
 
 **Files:**
 - Create: `src-tauri/src/platform/windows_service.rs`
@@ -804,7 +853,7 @@ git commit -m "feat(windows): add stub recording service and open build path"
 
 ---
 
-## Task 4: Add Windows API Dependency Behind Windows Target
+### Task 4: Add Windows API Dependency Behind Windows Target
 
 **Files:**
 - Modify: `src-tauri/Cargo.toml`
@@ -858,7 +907,38 @@ git commit -m "chore(windows): add windows-rs capture dependencies"
 
 ---
 
-## Task 5: Implement Windows Graphics Capture Frame Helpers
+## Phase 2: Windows Native Capture Primitives
+
+**Functional goal:** Build independently testable Windows native capture primitives before wiring them into the product recording pipeline.
+
+**Included tasks:** Task 5, Task 6, Task 7, Task 8.
+
+**Self-test commands:**
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib graphics_capture
+cargo test --manifest-path src-tauri/Cargo.toml --lib audio_device
+cargo test --manifest-path src-tauri/Cargo.toml --lib windows_cursor_source_constructs_with_session_clock
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+Manual smoke on Windows:
+
+1. Start the WGC display adapter through the test harness or the app path available at this phase.
+2. Confirm at least one real `VideoFrameRef` is produced within 3 seconds.
+3. Play system audio and confirm WASAPI loopback produces nonzero audio chunks.
+4. Move and click the mouse and confirm Windows cursor snapshots report changing coordinates and click state.
+
+**Checkpoint:**
+
+- [ ] WGC helper tests pass.
+- [ ] WGC fullscreen primitive sends owned BGRA frames, not borrowed frame-pool surfaces.
+- [ ] WASAPI conversion tests pass and preserve sample rate/channels/timestamps.
+- [ ] WASAPI manual smoke produces nonzero system-audio chunks, or exact device/API blocker recorded.
+- [ ] Windows cursor source constructs and manual smoke confirms coordinates/click state.
+- [ ] Native safety notes are present in WGC/WASAPI files.
+
+### Task 5: Implement Windows Graphics Capture Frame Helpers
 
 **Files:**
 - Create: `src-tauri/src/platform/windows/graphics_capture.rs`
@@ -1002,7 +1082,7 @@ git commit -m "feat(windows): add graphics capture frame helpers"
 
 ---
 
-## Task 6: Implement Windows Graphics Capture Fullscreen Adapter
+### Task 6: Implement Windows Graphics Capture Fullscreen Adapter
 
 **Files:**
 - Modify: `src-tauri/src/platform/windows/graphics_capture.rs`
@@ -1198,7 +1278,7 @@ git commit -m "feat(windows): implement graphics capture fullscreen adapter"
 
 ---
 
-## Task 7: Implement WASAPI Loopback Audio Capture
+### Task 7: Implement WASAPI Loopback Audio Capture
 
 **Files:**
 - Create: `src-tauri/src/platform/windows/audio_device.rs`
@@ -1476,7 +1556,7 @@ git commit -m "feat(windows): implement wasapi loopback capture"
 
 ---
 
-## Task 8: Add Windows Cursor Source
+### Task 8: Add Windows Cursor Source
 
 **Files:**
 - Create: `src-tauri/src/platform/windows/cursor_source.rs`
@@ -1599,7 +1679,41 @@ git commit -m "feat(windows): add cursor metadata source"
 
 ---
 
-## Task 9: Extract Shared Recording Consumer Without Changing macOS Behavior
+## Phase 3: Shared Media Pipeline Integration
+
+**Functional goal:** Reuse the existing media writer/mixer/finalization path for Windows while proving the macOS recording consumer behavior did not change.
+
+**Included tasks:** Task 9, Task 10.
+
+**Self-test commands:**
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib consume_frames
+cargo test --manifest-path src-tauri/Cargo.toml --lib macos_service
+cargo test --manifest-path src-tauri/Cargo.toml --lib recording_writer
+cargo test --manifest-path src-tauri/Cargo.toml --lib recording_metadata
+cargo test --manifest-path src-tauri/Cargo.toml --lib windows_service
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+Manual smoke:
+
+1. On macOS, run one fullscreen recording and one window recording after Task 9; both must stop into preview.
+2. On Windows, start fullscreen recording with system audio off and microphone off.
+3. Stop after 5 seconds and confirm preview opens.
+4. Repeat with system audio on.
+5. Repeat with microphone on.
+
+**Checkpoint:**
+
+- [ ] Shared consumer extraction is committed separately from Windows service wiring.
+- [ ] macOS consumer tests pass without weakened assertions.
+- [ ] macOS manual smoke is PASS, or exact non-macOS execution blocker is recorded.
+- [ ] Windows fullscreen recording produces a real output artifact and preview entry.
+- [ ] Requested system audio/microphone diagnostics are nonzero when enabled.
+- [ ] Failed Windows recording paths do not register fake history items.
+
+### Task 9: Extract Shared Recording Consumer Without Changing macOS Behavior
 
 **Files:**
 - Create: `src-tauri/src/app/recording_consumer.rs`
@@ -1773,7 +1887,7 @@ git commit -m "refactor(recording): extract shared consumer without behavior cha
 
 ---
 
-## Task 10: Wire WindowsRecordingService To Existing Writer/Mixer Flow
+### Task 10: Wire WindowsRecordingService To Existing Writer/Mixer Flow
 
 **Files:**
 - Modify: `src-tauri/src/platform/windows_service.rs`
@@ -1952,7 +2066,38 @@ git commit -m "feat(windows): wire recording service to shared media pipeline"
 
 ---
 
-## Task 11: Implement Windows Window Enumeration And WGC Window Capture
+## Phase 4: Window Recording
+
+**Functional goal:** Add Windows window enumeration and true WGC window-level recording while explicitly rejecting desktop-frame crop fallback as the MVP path.
+
+**Included tasks:** Task 11.
+
+**Self-test commands:**
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib window_capture
+npm test -- src/components/window-selector.test.tsx
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+Manual smoke on Windows:
+
+1. Open Notepad or Windows Terminal.
+2. Confirm the app appears in the window selector.
+3. Select the window and record for 5 seconds.
+4. Stop and confirm preview shows only the selected window content.
+5. Minimize the target window and confirm recording is disabled or fails with a Chinese error.
+6. Close the target window during recording and confirm auto-stop or visible failure, not fake success.
+
+**Checkpoint:**
+
+- [ ] Window enumeration filters hidden/empty/zero-size app windows.
+- [ ] LuZhi's own window is filtered when identifiable.
+- [ ] Window capture uses `GraphicsCaptureItem` for HWND/window item creation.
+- [ ] No desktop-frame crop fallback is used for successful MVP window recording.
+- [ ] Minimized/closed/protected windows have visible Chinese failure behavior.
+
+### Task 11: Implement Windows Window Enumeration And WGC Window Capture
 
 **Files:**
 - Modify: `src-tauri/src/platform/windows/window_capture.rs`
@@ -2139,7 +2284,37 @@ git commit -m "feat(windows): implement window enumeration and WGC window captur
 
 ---
 
-## Task 12: Update Windows Docs And Manual Checklist
+## Phase 5: Acceptance, Docs, And Native Safety Review
+
+**Functional goal:** Convert implementation evidence into durable docs/checklists and perform final automated, manual, and native-safety validation.
+
+**Included tasks:** Task 12, Task 13.
+
+**Self-test commands:**
+
+```powershell
+npm test -- --run
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+Run when FFmpeg development libraries are available:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg
+```
+
+**Checkpoint:**
+
+- [ ] `tests/2026-06-19-windows-mvp-checklist.md` exists and contains PASS/BLOCKED notes for every applicable item.
+- [ ] Windows docs no longer describe app startup as blocked by `compile_error!`.
+- [ ] README Windows status matches implemented state.
+- [ ] Native safety review completed for WGC, WASAPI, window enumeration, and cursor source.
+- [ ] Any failed or blocked verification has exact command output and environment notes.
+- [ ] No MVP acceptance item is claimed complete without evidence.
+
+### Task 12: Update Windows Docs And Manual Checklist
 
 **Files:**
 - Create: `tests/2026-06-19-windows-mvp-checklist.md`
@@ -2232,7 +2407,7 @@ git commit -m "docs(windows): add MVP validation checklist"
 
 ---
 
-## Task 13: Final Verification And Native Safety Review
+### Task 13: Final Verification And Native Safety Review
 
 **Files:**
 - Modify only if verification finds targeted fixes.
