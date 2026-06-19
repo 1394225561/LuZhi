@@ -1,3 +1,5 @@
+pub mod audio_device;
+pub mod cursor_source;
 pub mod dxgi_capture;
 pub mod graphics_capture;
 pub mod wasapi_loopback;
