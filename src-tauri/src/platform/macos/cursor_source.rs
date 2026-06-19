@@ -9,10 +9,9 @@ use std::sync::Arc;
 
 use crate::app::cursor_metadata_runtime::{CursorSnapshot, CursorSnapshotSource};
 use crate::app::error::{AppError, AppResult};
+use crate::app::recording_service_boundary::CursorMainThreadDispatcher;
 use crate::core::clock::SessionClock;
-use crate::platform::macos::cursor_kind::{
-    CursorKindProvider, CursorMainThreadDispatcher, MacCursorKindProvider,
-};
+use crate::platform::macos::cursor_kind::{CursorKindProvider, MacCursorKindProvider};
 
 #[repr(C)]
 #[derive(Clone, Copy)]

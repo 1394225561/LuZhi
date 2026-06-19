@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -7,18 +8,21 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::macos::cpal_microphone::CpalMicrophoneCapture;
-use super::macos::cursor_kind::CursorMainThreadDispatcher;
 use super::macos::cursor_source::MacCursorSource;
 use super::macos::screen_capture_kit::MacScreenCapture;
 use super::macos::window_monitor::WindowMonitor;
 use crate::app::cursor_metadata_runtime::CursorMetadataRuntime;
 use crate::app::error::AppResult;
+use crate::app::recording_service_boundary::{
+    CursorMainThreadDispatcher, PlatformRecordingService,
+};
 use crate::app::state_machine::{RecordingState, RecordingStateMachine};
 use crate::core::capture::{AudioCapture, AudioConfig, DenoiseMode, ScreenCapture};
 use crate::core::config::CaptureConfig;
 use crate::core::frame::{AudioChunk, VideoFrameRef};
 use crate::core::media_channel::{bounded_media_channel, MediaReceiver};
 use crate::core::timeline::BeautifyConfigSnapshot;
+use crate::core::window::WindowRecordingState;
 use crate::media::audio_mixer::SimpleAudioMixer;
 use crate::media::mic_level::MicLevelDetector;
 use crate::media::recording_metadata::RecordingMetadataWriter;
@@ -111,6 +115,10 @@ impl MacRecordingService {
 
     pub fn last_trim_metadata_path(&self) -> Option<String> {
         self.last_trim_metadata_path.clone()
+    }
+
+    pub fn last_cut_timeline_path(&self) -> Option<String> {
+        self.last_cut_timeline_path.clone()
     }
 
     pub fn set_last_cut_timeline_path(&mut self, path: Option<String>) {
@@ -1398,6 +1406,106 @@ impl MacRecordingService {
 impl Default for MacRecordingService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl PlatformRecordingService for MacRecordingService {
+    fn state(&self) -> RecordingState {
+        MacRecordingService::state(self)
+    }
+
+    fn start(
+        &mut self,
+        config: CaptureConfig,
+        audio_config: AudioConfig,
+        beautify_snapshot: BeautifyConfigSnapshot,
+        cursor_main_thread_dispatcher: Box<dyn CursorMainThreadDispatcher>,
+    ) -> AppResult<()> {
+        MacRecordingService::start(
+            self,
+            config,
+            audio_config,
+            beautify_snapshot,
+            cursor_main_thread_dispatcher,
+        )
+    }
+
+    fn start_window(
+        &mut self,
+        window_id: u32,
+        show_system_cursor: bool,
+        audio_config: AudioConfig,
+        beautify_snapshot: BeautifyConfigSnapshot,
+        cursor_main_thread_dispatcher: Box<dyn CursorMainThreadDispatcher>,
+    ) -> AppResult<()> {
+        MacRecordingService::start_window(
+            self,
+            window_id,
+            show_system_cursor,
+            audio_config,
+            beautify_snapshot,
+            cursor_main_thread_dispatcher,
+        )
+    }
+
+    fn stop(&mut self) -> AppResult<StopRecordingResponse> {
+        MacRecordingService::stop(self)
+    }
+
+    fn pause(&mut self) -> AppResult<()> {
+        MacRecordingService::pause(self)
+    }
+
+    fn resume(&mut self) -> AppResult<()> {
+        MacRecordingService::resume(self)
+    }
+
+    fn mic_level_ref(&self) -> Arc<Mutex<f64>> {
+        MacRecordingService::mic_level_ref(self)
+    }
+
+    fn take_window_state_receiver(&mut self) -> Option<Receiver<WindowRecordingState>> {
+        MacRecordingService::take_window_state_receiver(self)
+    }
+
+    fn current_session_id(&self) -> u64 {
+        MacRecordingService::current_session_id(self)
+    }
+
+    fn last_cursor_metadata_path(&self) -> Option<String> {
+        MacRecordingService::last_cursor_metadata_path(self)
+    }
+
+    fn last_effect_timeline_path(&self) -> Option<String> {
+        MacRecordingService::last_effect_timeline_path(self)
+    }
+
+    fn set_last_effect_timeline_path(&mut self, path: Option<String>) {
+        MacRecordingService::set_last_effect_timeline_path(self, path);
+    }
+
+    fn last_trim_metadata_path(&self) -> Option<String> {
+        MacRecordingService::last_trim_metadata_path(self)
+    }
+
+    fn last_cut_timeline_path(&self) -> Option<String> {
+        MacRecordingService::last_cut_timeline_path(self)
+    }
+
+    fn set_last_cut_timeline_path(&mut self, path: Option<String>) {
+        MacRecordingService::set_last_cut_timeline_path(self, path);
+    }
+
+    fn last_recording_output_path(&self) -> Option<String> {
+        MacRecordingService::last_recording_output_path(self)
+    }
+
+    fn last_requested_system_audio(&self) -> bool {
+        MacRecordingService::last_requested_system_audio(self)
+    }
+
+    fn last_requested_microphone(&self) -> bool {
+        MacRecordingService::last_requested_microphone(self)
     }
 }
 

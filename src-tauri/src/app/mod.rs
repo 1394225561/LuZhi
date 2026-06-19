@@ -8,4 +8,5 @@ pub mod permission_service;
 pub mod recording_library;
 pub mod recording_runtime;
 pub mod recording_service;
+pub mod recording_service_boundary;
 pub mod state_machine;

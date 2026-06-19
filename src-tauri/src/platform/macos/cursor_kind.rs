@@ -219,10 +219,9 @@ pub trait CursorKindProvider: Send + 'static {
     fn query(&mut self, global_x: f32, global_y: f32) -> CursorKind;
 }
 
-/// Runs AppKit cursor reads on the application's main thread.
-pub trait CursorMainThreadDispatcher: Send + Sync + 'static {
-    fn run_on_main_thread(&self, task: Box<dyn FnOnce() + Send>) -> Result<(), String>;
-}
+// CursorMainThreadDispatcher is now defined in app::recording_service_boundary
+// and re-exported here for backward compatibility within the macos module.
+pub use crate::app::recording_service_boundary::CursorMainThreadDispatcher;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SystemCursorShape {
