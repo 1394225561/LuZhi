@@ -1,3 +1,5 @@
+pub mod cpal_microphone;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
 

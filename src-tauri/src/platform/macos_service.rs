@@ -7,7 +7,7 @@ use std::thread;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::macos::cpal_microphone::CpalMicrophoneCapture;
+use crate::platform::cpal_microphone::CpalMicrophoneCapture;
 use super::macos::cursor_source::MacCursorSource;
 use super::macos::screen_capture_kit::MacScreenCapture;
 use super::macos::window_monitor::WindowMonitor;
