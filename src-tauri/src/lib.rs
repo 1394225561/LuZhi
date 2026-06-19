@@ -22,6 +22,7 @@ use app::mic_level_runtime::MicLevelRuntime;
 use app::permission_service::{PermissionStatus, RecordingPermissions};
 use app::recording_library::{LibraryEntrySummary, RecordingContextPayload, RecordingLibrary};
 use app::recording_runtime::TickRuntime;
+use app::recording_service_boundary::{CursorMainThreadDispatcher, PlatformRecordingService};
 use app::state_machine::RecordingState;
 use core::capture::{AudioConfig, DenoiseMode};
 use core::config::{CaptureConfig, CaptureMode};
@@ -35,7 +36,6 @@ use media::recording_writer::StopRecordingResponse;
 use media::silence_detector::SilenceDetectorEngine;
 use media::trim_exporter::ExportProgressReporter;
 use media::trim_metadata::TrimMetadataWriter;
-use app::recording_service_boundary::{CursorMainThreadDispatcher, PlatformRecordingService};
 #[cfg(target_os = "macos")]
 use platform::macos_service::MacRecordingService;
 #[cfg(target_os = "windows")]
@@ -499,11 +499,23 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
     Ok(())
 }
 
+/// Combined payload returned by `stop_recording`, bundling the recording result
+/// with the final state, permissions, and license status so the frontend can
+/// transition in a single round-trip.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordStatePayload {
+    state: &'static str,
+    permissions: app::events::PermissionPayload,
+    license_status: app::events::LicenseStatusPayload,
+    recording: Option<StopRecordingResponse>,
+}
+
 #[tauri::command]
 async fn stop_recording(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-) -> Result<StopRecordingResponse, String> {
+) -> Result<RecordStatePayload, String> {
     let app_state = state.inner().clone();
     let stop_app = app.clone();
     let (new_state, response) = tauri::async_runtime::spawn_blocking(move || {
@@ -512,8 +524,53 @@ async fn stop_recording(
     .await
     .map_err(|e| format!("停止录制任务失败: {e}"))??;
 
+    // Convert AppResult to Option — on error, recording is None.
+    let recording = response.ok();
+
+    // Gather permissions.
+    #[cfg(target_os = "macos")]
+    let permissions = {
+        let perm_service = app::permission_service::PermissionService::new(
+            platform::macos::permissions::MacPermissionProbe,
+        );
+        perm_service.recording_permissions()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let permissions = RecordingPermissions {
+        screen_recording: app::permission_service::PermissionStatus::Unknown,
+        microphone: app::permission_service::PermissionStatus::Unknown,
+        accessibility: app::permission_service::PermissionStatus::Unknown,
+    };
+
+    // Gather license status (non-fatal: recording result must not be lost
+    // if the license lookup fails due to filesystem or corruption issues).
+    let license_status = (|| -> Result<app::events::LicenseStatusPayload, String> {
+        use app::license_service::{
+            FileTrialStore, LicenseService, NoopActivationCredentialStore, SystemLicenseClock,
+        };
+        let path = license_state_path(&app)?;
+        let mut trial_store = FileTrialStore::new(path);
+        let mut activation_store = NoopActivationCredentialStore;
+        let svc = LicenseService::new(&mut trial_store, &mut activation_store, SystemLicenseClock);
+        svc.status()
+            .map(app::events::LicenseStatusPayload::from)
+            .map_err(|e| e.to_string())
+    })()
+    .unwrap_or(app::events::LicenseStatusPayload {
+        kind: "unknown",
+        trial_days_remaining: 0,
+        is_expired: false,
+        activated: false,
+    });
+
     emit_state_changed(&app, new_state);
-    response.map_err(|e| e.to_string())
+
+    Ok(RecordStatePayload {
+        state: new_state.as_str(),
+        permissions: app::events::PermissionPayload::from(permissions),
+        license_status: app::events::LicenseStatusPayload::from(license_status),
+        recording,
+    })
 }
 
 #[tauri::command]

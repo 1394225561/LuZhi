@@ -167,6 +167,14 @@ export type StopRecordingResponse = {
   failed: boolean
 }
 
+/** Combined payload returned by stop_recording. */
+export type RecordStatePayload = {
+  state: RecordingState
+  permissions: RecordingPermissions
+  licenseStatus: LicenseStatus
+  recording: StopRecordingResponse | null
+}
+
 export type WriterDiagnostics = {
   audioChunksReceived: number
   audioChunksAppended: number
@@ -260,8 +268,8 @@ export async function resumeRecording(): Promise<void> {
   return invoke('resume_recording')
 }
 
-export async function stopRecording(): Promise<StopRecordingResponse> {
-  return invoke<StopRecordingResponse>('stop_recording')
+export async function stopRecording(): Promise<RecordStatePayload> {
+  return invoke<RecordStatePayload>('stop_recording')
 }
 
 export async function setCaptureMode(config: CaptureConfig): Promise<void> {

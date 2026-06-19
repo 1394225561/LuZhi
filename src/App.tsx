@@ -349,9 +349,17 @@ export default function App() {
     if (appState !== 'recording' || isStoppingRef.current) return
     isStoppingRef.current = true
     try {
-      const response = await stopRecording()
-      const result = response.result
+      const payload = await stopRecording()
       setSelectedRecordingId(null)
+      setPermissions(payload.permissions)
+      setLicenseStatus(payload.licenseStatus)
+      const recording = payload.recording
+      if (!recording) {
+        setAppState('failed')
+        setErrorMessage('录制停止失败')
+        return
+      }
+      const result = recording.result
       setRecordingResult({
         durationSecs: result.durationSecs,
         frameCount: result.frameCount,
@@ -365,27 +373,23 @@ export default function App() {
         diagnostics: result.diagnostics,
         finalizationErrors: result.finalizationErrors ?? [],
       })
-      if (response.failed) {
-        // Hard finalize failure — enter failed state with specific error details.
+      if (recording.failed) {
         const errorDetail =
           result.finalizationErrors?.join('; ') || '录制完成但存在错误'
         setAppState('failed')
         setErrorMessage(errorDetail)
-        isStoppingRef.current = false
         return
       }
       if (result.finalizationErrors && result.finalizationErrors.length > 0) {
         console.warn('录制完成但有警告:', result.finalizationErrors)
       }
-      // Fallback: sync state via backend query in case recording-state-changed event is lost.
-      const stopStatus = await fetchRecordingStatus()
-      if (stopStatus.state === 'completed') {
+      if (payload.state === 'completed') {
         setAppState('preview')
-        isStoppingRef.current = false
       }
     } catch (e) {
       setAppState('failed')
       setErrorMessage(String(e))
+    } finally {
       isStoppingRef.current = false
     }
   }, [appState])

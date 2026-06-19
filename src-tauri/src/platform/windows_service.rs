@@ -212,7 +212,7 @@ impl PlatformRecordingService for WindowsRecordingService {
             self.last_recording_output_path = Some(output_path.to_string_lossy().to_string());
             Box::new(
                 crate::media::ffmpeg_writer::FfmpegRecordingWriter::with_fps(
-                    &output_path,
+                    output_path,
                     config.fps,
                 )?,
             )
@@ -335,9 +335,12 @@ impl PlatformRecordingService for WindowsRecordingService {
         let writer: Box<dyn crate::media::recording_writer::RecordingWriter> = {
             let output_path = crate::media::export_paths::recording_output_path();
             self.last_recording_output_path = Some(output_path.to_string_lossy().to_string());
-            Box::new(crate::media::ffmpeg_writer::FfmpegRecordingWriter::new(
-                &output_path,
-            )?)
+            Box::new(
+                crate::media::ffmpeg_writer::FfmpegRecordingWriter::with_fps(
+                    output_path,
+                    config.fps,
+                )?,
+            )
         };
 
         #[cfg(not(feature = "ffmpeg"))]
