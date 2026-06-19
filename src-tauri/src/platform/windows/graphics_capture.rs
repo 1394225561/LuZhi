@@ -139,10 +139,21 @@ impl WindowsGraphicsCapture {
         }
 
         if let Some(worker) = self.worker.take() {
-            match worker.join() {
-                Ok(result) => result,
-                Err(_) => Err(AppError::CaptureFailed {
+            // Bounded join: spawn a thread to wait for the worker, then
+            // recv with timeout to avoid blocking forever if the worker
+            // hangs in a COM/WinRT call.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = worker.join();
+                let _ = tx.send(result);
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(AppError::CaptureFailed {
                     reason: "Windows Graphics Capture 线程崩溃".to_string(),
+                }),
+                Err(_) => Err(AppError::CaptureFailed {
+                    reason: "Windows Graphics Capture 停止超时".to_string(),
                 }),
             }
         } else {

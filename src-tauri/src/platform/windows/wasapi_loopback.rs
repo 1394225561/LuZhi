@@ -62,10 +62,21 @@ impl AudioCapture for WasapiLoopback {
         }
 
         if let Some(worker) = self.worker.take() {
-            match worker.join() {
-                Ok(result) => result,
-                Err(_) => Err(AppError::AudioCaptureFailed {
+            // Bounded join: spawn a thread to wait for the worker, then
+            // recv with timeout to avoid blocking forever if the worker
+            // hangs in a WASAPI/COM call.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = worker.join();
+                let _ = tx.send(result);
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(AppError::AudioCaptureFailed {
                     reason: "WASAPI loopback 线程崩溃".to_string(),
+                }),
+                Err(_) => Err(AppError::AudioCaptureFailed {
+                    reason: "WASAPI loopback 停止超时".to_string(),
                 }),
             }
         } else {
@@ -136,6 +147,11 @@ unsafe fn run_loopback_worker_inner(
     // 6. Get IAudioCaptureClient.
     // 7. Start audio client.
     // 8. Poll GetNextPacketSize, then GetBuffer/ReleaseBuffer.
+    //    IMPORTANT: Check the `flags` output parameter from GetBuffer:
+    //    - AUDCLNT_BUFFERFLAGS_SILENT (0x2): buffer contains silence;
+    //      emit a zero-filled silent chunk or skip entirely.
+    //    - AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY (0x4): audio glitch detected;
+    //      flag the timestamp gap to avoid sync issues.
     // 9. Convert PCM float or i16 to interleaved f32.
     // 10. Timestamp with AudioSampleClock lazy offset.
     // 11. Send AudioChunk through sink; record dropped chunks via MediaSender counters.
