@@ -34,6 +34,7 @@
   - **人类负责**：业务逻辑确认、UI 细节确认。
 - **AI 红线**：AI 不得自动执行 git push、npm publish 或修改生产环境配置文件。
 - **Code Review 口径**：
+  - **必须**创建 subagents 从多个维度并行 code review，并汇总结论、修复问题。
   - 如果给定 code Review 范围，优先 Review 指定范围的代码。
   - 如果没有给定 code Review 范围，则 Review 整个项目。
   - AI 在执行代码 Review 时，必须重点检查 AI 生成的以下区域：
