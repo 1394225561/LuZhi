@@ -51,9 +51,13 @@
 
 | 项目 | 状态 | 备注 |
 |------|------|------|
-| 全屏录制 (WGC) | BLOCKED | WGC 内部 worker 需在 Windows 设备上实测 |
-| WASAPI 系统音频 | BLOCKED | WASAPI 内部 worker 需在 Windows 设备上实测 |
-| cpal 麦克风 | 待验证 | cpal 跨平台，理论上可直接工作 |
-| 窗口枚举 | 待验证 | EnumWindows 已实现，需实测 |
-| 窗口录制 (WGC) | BLOCKED | WGC 窗口捕获需在 Windows 设备上实测 |
+| 平台服务边界 | PASS | `PlatformRecordingService` trait 已定义，macOS/Windows 均已实现 |
+| 全屏录制 (WGC) | 待实测 | `WindowsGraphicsCapture` 骨架已实现，worker 需在 Windows 设备上填充 WGC 代码 |
+| WASAPI 系统音频 | 待实测 | `WasapiLoopback` 生命周期已实现，worker 需在 Windows 设备上填充 WASAPI 代码 |
+| cpal 麦克风 | 待实测 | `CpalMicrophoneCapture` 已移至共享模块，理论上可直接工作 |
+| 窗口枚举 | 待实测 | `EnumWindows` 已实现，过滤逻辑有单元测试覆盖 |
+| 窗口录制 (WGC) | 待实测 | `start_window` 接口已实现，WGC 窗口捕获需在 Windows 设备上填充 |
+| 光标元数据 | 待实测 | `WindowsCursorSource` 已实现 `GetCursorPos` + 按键状态 |
+| 共享消费者 | PASS | `consume_frames` 已提取到共享模块，macOS 测试通过 |
 | 导出 (FFmpeg) | 待验证 | 依赖 FFmpeg 开发库配置 |
+| 原生安全 | PASS | WGC/WASAPI stop() 已添加 10 秒超时；安全注释已更新 |
