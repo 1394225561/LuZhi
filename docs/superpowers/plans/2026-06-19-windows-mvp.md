@@ -26,6 +26,16 @@ Implementation is intentionally staged:
 
 Do not add area recording, activation-code protocol, D3D/FFmpeg zero-copy, or 4K/60fps stability work in this plan.
 
+### macOS Safety Gates
+
+This plan touches shared Rust app state, cursor metadata, microphone capture, and the recording consumer used by macOS. Treat macOS behavior as protected production behavior:
+
+- Do not change `MacRecordingService` behavior while opening the Windows build path unless the task explicitly says so.
+- Any trait or module move that affects macOS cursor capture must keep one concrete dispatcher type shared end-to-end; do not leave duplicate `CursorMainThreadDispatcher` traits in different modules.
+- Extracting the recording consumer is a macOS refactor first. It must be completed, tested, and committed before Windows service wiring uses it.
+- After each task that modifies `macos_service.rs`, `macos/cursor_*`, `cpal_microphone`, or shared recording writer/consumer code, run the task's macOS regression commands before committing.
+- If a Windows-only implementation task requires a change to macOS runtime behavior, stop and revise this plan before coding.
+
 ---
 
 ## File Structure
@@ -66,6 +76,8 @@ Do not add area recording, activation-code protocol, D3D/FFmpeg zero-copy, or 4K
 - Create: `src-tauri/src/app/recording_service_boundary.rs`
 - Modify: `src-tauri/src/app/mod.rs`
 - Modify: `src-tauri/src/platform/macos_service.rs`
+- Modify: `src-tauri/src/platform/macos/cursor_kind.rs`
+- Modify: `src-tauri/src/platform/macos/cursor_source.rs`
 
 - [ ] **Step 1: Write the boundary trait**
 
@@ -155,7 +167,37 @@ pub mod recording_service_boundary;
 pub mod state_machine;
 ```
 
-- [ ] **Step 3: Move the dispatcher import for macOS service**
+- [ ] **Step 3: Move the dispatcher trait to the shared boundary**
+
+In `src-tauri/src/platform/macos/cursor_kind.rs`, delete the local trait definition:
+
+```rust
+/// Runs AppKit cursor reads on the application's main thread.
+pub trait CursorMainThreadDispatcher: Send + Sync + 'static {
+    fn run_on_main_thread(&self, task: Box<dyn FnOnce() + Send>) -> Result<(), String>;
+}
+```
+
+Then import the shared trait near the other `use crate::...` imports:
+
+```rust
+use crate::app::recording_service_boundary::CursorMainThreadDispatcher;
+```
+
+In `src-tauri/src/platform/macos/cursor_source.rs`, replace:
+
+```rust
+use crate::platform::macos::cursor_kind::{
+    CursorKindProvider, CursorMainThreadDispatcher, MacCursorKindProvider,
+};
+```
+
+with:
+
+```rust
+use crate::app::recording_service_boundary::CursorMainThreadDispatcher;
+use crate::platform::macos::cursor_kind::{CursorKindProvider, MacCursorKindProvider};
+```
 
 In `src-tauri/src/platform/macos_service.rs`, replace:
 
@@ -256,7 +298,7 @@ impl PlatformRecordingService for MacRecordingService {
     }
 
     fn last_cut_timeline_path(&self) -> Option<String> {
-        self.last_cut_timeline_path.clone()
+        MacRecordingService::last_cut_timeline_path(self)
     }
 
     fn set_last_cut_timeline_path(&mut self, path: Option<String>) {
@@ -277,7 +319,7 @@ impl PlatformRecordingService for MacRecordingService {
 }
 ```
 
-If `last_cut_timeline_path` is private without a getter, add this inherent getter beside the other `last_*` methods:
+Before adding the trait implementation, add this inherent getter beside the other `last_*` methods in `impl MacRecordingService`:
 
 ```rust
 pub fn last_cut_timeline_path(&self) -> Option<String> {
@@ -285,7 +327,7 @@ pub fn last_cut_timeline_path(&self) -> Option<String> {
 }
 ```
 
-Then use `MacRecordingService::last_cut_timeline_path(self)` in the trait implementation.
+The trait implementation must call `MacRecordingService::last_cut_timeline_path(self)` and must not read the private field directly. This keeps the trait implementation safe if it is moved later.
 
 - [ ] **Step 5: Run targeted tests**
 
@@ -293,6 +335,8 @@ Run:
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml --lib window_state_actions_pause_resume_and_stop_recording
+cargo test --manifest-path src-tauri/Cargo.toml --lib cursor_kind
+cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
 Expected: PASS.
@@ -300,7 +344,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add src-tauri/src/app/recording_service_boundary.rs src-tauri/src/app/mod.rs src-tauri/src/platform/macos_service.rs
+git add src-tauri/src/app/recording_service_boundary.rs src-tauri/src/app/mod.rs src-tauri/src/platform/macos_service.rs src-tauri/src/platform/macos/cursor_kind.rs src-tauri/src/platform/macos/cursor_source.rs
 git commit -m "refactor(app): add platform recording service boundary"
 ```
 
@@ -310,8 +354,10 @@ git commit -m "refactor(app): add platform recording service boundary"
 
 **Files:**
 - Modify: `src-tauri/src/app/cursor_metadata_runtime.rs`
+- Modify: `src-tauri/src/media/recording_metadata.rs`
 - Modify: `src-tauri/src/platform/macos/cursor_kind.rs`
 - Modify: `src-tauri/src/platform/macos/cursor_source.rs`
+- Modify: `src-tauri/src/platform/macos_service.rs`
 
 - [ ] **Step 1: Move `CursorKindDiagnostics` to common runtime**
 
@@ -772,11 +818,11 @@ Run:
 cargo add windows --target 'cfg(windows)' --manifest-path src-tauri/Cargo.toml --features Win32_Foundation,Win32_Graphics_Direct3D,Win32_Graphics_Direct3D11,Win32_Graphics_Dxgi,Win32_Graphics_Dxgi_Common,Win32_Graphics_Gdi,Win32_Media_Audio,Win32_System_Com,Win32_UI_WindowsAndMessaging,Graphics_Capture,Graphics_DirectX,Graphics_DirectX_Direct3D11,Foundation
 ```
 
-Expected: `src-tauri/Cargo.toml` gets a target-specific dependency similar to:
+Expected: `src-tauri/Cargo.toml` gets a target-specific dependency. The exact version is the one selected by `cargo add`; keep the dependency target-scoped and keep this feature list intact:
 
 ```toml
 [target.'cfg(windows)'.dependencies]
-windows = { version = "...", features = [
+windows = { features = [
     "Foundation",
     "Graphics_Capture",
     "Graphics_DirectX",
@@ -1128,7 +1174,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 npm run tauri:dev
 ```
 
-Manual action: start a fullscreen recording with system audio and microphone disabled. Expected: at least one `VideoFrameRef` reaches the Windows service consumer in Task 9. If Task 9 is not yet implemented, add a Windows-only test harness in this file that starts the adapter with a test sink and asserts a frame arrives within 3 seconds.
+Manual action: start a fullscreen recording with system audio and microphone disabled. Expected: at least one `VideoFrameRef` reaches the Windows service consumer after Task 10. Before Task 10 exists, add a Windows-only test harness in this file that starts the adapter with a test sink and asserts a frame arrives within 3 seconds.
 
 - [ ] **Step 4: Add native safety notes**
 
@@ -1419,7 +1465,7 @@ Manual smoke on Windows:
 2. Start fullscreen recording with system audio on and mic off.
 3. Stop after 5 seconds.
 
-Expected after Task 9 service integration: recording diagnostics show `requested_system_audio=true` and nonzero system chunks/windows before writer.
+Expected after Task 10 service integration: recording diagnostics show `requested_system_audio=true` and nonzero system chunks/windows before writer.
 
 - [ ] **Step 6: Commit**
 
@@ -1553,7 +1599,181 @@ git commit -m "feat(windows): add cursor metadata source"
 
 ---
 
-## Task 9: Wire WindowsRecordingService To Existing Writer/Mixer Flow
+## Task 9: Extract Shared Recording Consumer Without Changing macOS Behavior
+
+**Files:**
+- Create: `src-tauri/src/app/recording_consumer.rs`
+- Modify: `src-tauri/src/app/mod.rs`
+- Modify: `src-tauri/src/platform/macos_service.rs`
+
+This task is a macOS protection task. It extracts the existing consumer code first, proves macOS behavior still passes the existing tests, and only then allows Windows service wiring to depend on the shared consumer.
+
+- [ ] **Step 1: Export the shared consumer module**
+
+Modify `src-tauri/src/app/mod.rs`:
+
+```rust
+pub mod cursor_metadata_runtime;
+pub mod error;
+pub mod events;
+pub mod export_service;
+pub mod license_service;
+pub mod mic_level_runtime;
+pub mod permission_service;
+pub mod recording_consumer;
+pub mod recording_library;
+pub mod recording_runtime;
+pub mod recording_service;
+pub mod recording_service_boundary;
+pub mod state_machine;
+```
+
+- [ ] **Step 2: Move the consumer data contract**
+
+Create `src-tauri/src/app/recording_consumer.rs` and move the current `RecordingConsumerOutput` shape out of `src-tauri/src/platform/macos_service.rs`:
+
+```rust
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use crate::core::capture::DenoiseMode;
+use crate::core::frame::{AudioChunk, VideoFrameRef};
+use crate::core::media_channel::MediaReceiver;
+use crate::media::recording_writer::{RecordingDiagnostics, RecordingResult, RecordingWriter};
+use crate::media::trim_metadata::TrimMetadata;
+
+/// Return type produced by the recording consumer thread.
+///
+/// This struct intentionally mirrors the previous macOS-private contract.
+/// Keep field semantics unchanged so macOS finalize behavior is preserved.
+pub struct RecordingConsumerOutput {
+    pub result: RecordingResult,
+    pub trim_metadata: TrimMetadata,
+    pub diagnostics: RecordingDiagnostics,
+    pub errors: Vec<String>,
+}
+
+pub struct RecordingConsumerInput {
+    pub stop_flag: Arc<AtomicBool>,
+    pub pause_flag: Arc<AtomicBool>,
+    pub video_rx: MediaReceiver<VideoFrameRef>,
+    pub system_audio_rx: MediaReceiver<AudioChunk>,
+    pub mic_rx: Option<MediaReceiver<AudioChunk>>,
+    pub frame_count: Arc<AtomicU64>,
+    pub writer: Box<dyn RecordingWriter>,
+    pub mic_level: Arc<Mutex<f64>>,
+    pub trim_sensitivity: String,
+    pub requested_system_audio: bool,
+    pub requested_microphone: bool,
+    pub microphone_device: Option<String>,
+    pub denoise_mode: DenoiseMode,
+}
+```
+
+- [ ] **Step 3: Move consumer implementation byte-for-byte where possible**
+
+Move the current `MacRecordingService::consume_frames(...)` body and its direct helper functions from `src-tauri/src/platform/macos_service.rs` into `src-tauri/src/app/recording_consumer.rs` as:
+
+The move is complete only when `src-tauri/src/app/recording_consumer.rs` contains the full former loop and helper logic, and `src-tauri/src/platform/macos_service.rs` no longer contains an associated `fn consume_frames(...)`. Do not leave a temporary function that returns empty diagnostics or a zero-frame result.
+
+Replace the former associated function call sites in `src-tauri/src/platform/macos_service.rs` with:
+
+```rust
+crate::app::recording_consumer::consume_frames(
+    crate::app::recording_consumer::RecordingConsumerInput {
+        stop_flag,
+        pause_flag,
+        video_rx,
+        system_audio_rx,
+        mic_rx,
+        frame_count,
+        writer,
+        mic_level,
+        trim_sensitivity,
+        requested_system_audio,
+        requested_microphone,
+        microphone_device,
+        denoise_mode,
+    },
+)
+```
+
+Also update `consumer_result_rx` and helper signatures in `macos_service.rs` to use:
+
+```rust
+crate::app::recording_consumer::RecordingConsumerOutput
+```
+
+Do not change state-machine behavior, finalization order, sidecar writes, writer settings, diagnostics text, or timeout durations in this task.
+
+- [ ] **Step 4: Update consumer tests to call the shared function**
+
+Move or update every existing `consume_frames_*` test so it calls the shared function with the same values it previously passed positionally:
+
+```rust
+crate::app::recording_consumer::consume_frames(
+    crate::app::recording_consumer::RecordingConsumerInput {
+        stop_flag,
+        pause_flag,
+        video_rx,
+        system_audio_rx: audio_rx,
+        mic_rx,
+        frame_count,
+        writer,
+        mic_level,
+        trim_sensitivity,
+        requested_system_audio,
+        requested_microphone,
+        microphone_device,
+        denoise_mode,
+    },
+)
+```
+
+Keep the existing assertions. Do not weaken tests to make the extraction pass.
+
+- [ ] **Step 5: Run macOS regression commands**
+
+Run:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib consume_frames
+cargo test --manifest-path src-tauri/Cargo.toml --lib macos_service
+cargo test --manifest-path src-tauri/Cargo.toml --lib recording_writer
+cargo test --manifest-path src-tauri/Cargo.toml --lib recording_metadata
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+Expected: all PASS.
+
+- [ ] **Step 6: Manual macOS smoke if running on macOS**
+
+Run:
+
+```powershell
+npm run tauri:dev
+```
+
+Manual checks:
+
+1. Start a fullscreen recording.
+2. Stop after 5 seconds and confirm preview opens.
+3. Start a window recording.
+4. Stop after 5 seconds and confirm preview opens.
+5. Export one 16:9 preset and confirm the file opens.
+
+Expected: behavior matches before extraction. If not running on macOS, record that this smoke is deferred and do not claim macOS manual validation is complete.
+
+- [ ] **Step 7: Commit**
+
+```powershell
+git add src-tauri/src/app/recording_consumer.rs src-tauri/src/app/mod.rs src-tauri/src/platform/macos_service.rs
+git commit -m "refactor(recording): extract shared consumer without behavior changes"
+```
+
+---
+
+## Task 10: Wire WindowsRecordingService To Existing Writer/Mixer Flow
 
 **Files:**
 - Modify: `src-tauri/src/platform/windows_service.rs`
@@ -1603,39 +1823,26 @@ consumer_result_rx: Option<std::sync::mpsc::Receiver<RecordingConsumerOutput>>,
 cursor_runtime: Option<CursorMetadataRuntime>,
 ```
 
-- [ ] **Step 2: Reuse Mac consumer code without duplicating long logic**
-
-Extract the shared consumer pieces from `macos_service.rs` into a new file `src-tauri/src/app/recording_consumer.rs`:
+- [ ] **Step 2: Import the shared consumer**
 
 ```rust
-pub struct RecordingConsumerInput {
-    pub stop_flag: Arc<AtomicBool>,
-    pub pause_flag: Arc<AtomicBool>,
-    pub video_rx: MediaReceiver<VideoFrameRef>,
-    pub system_audio_rx: MediaReceiver<AudioChunk>,
-    pub mic_rx: Option<MediaReceiver<AudioChunk>>,
-    pub frame_count: Arc<AtomicU64>,
-    pub writer: Box<dyn RecordingWriter>,
-    pub mic_level: Arc<Mutex<f64>>,
-    pub trim_sensitivity: String,
-    pub requested_system_audio: bool,
-    pub requested_microphone: bool,
-    pub microphone_device: Option<String>,
-    pub denoise_mode: DenoiseMode,
-}
+use crate::app::recording_consumer::{
+    consume_frames, RecordingConsumerInput, RecordingConsumerOutput,
+};
 ```
 
-Move `RecordingConsumerOutput`, `consume_frames`, and its direct helper types into the shared module. Keep behavior byte-for-byte where possible. Update `MacRecordingService` to call the shared consumer. Then use the same consumer from `WindowsRecordingService`.
+This task must not re-edit the shared consumer logic except for compile fixes required by Windows-only imports. If shared behavior needs to change, stop and create a separate macOS-protected refactor task.
 
-Verification before continuing:
+- [ ] **Step 3: Run pre-wire consumer regression**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml --lib consume_frames
+cargo test --manifest-path src-tauri/Cargo.toml --lib macos_service
 ```
 
 Expected: existing consume-frame tests still pass.
 
-- [ ] **Step 3: Implement `WindowsRecordingService::start`**
+- [ ] **Step 4: Implement `WindowsRecordingService::start`**
 
 `start()` should:
 
@@ -1696,14 +1903,18 @@ fn start(
         self.system_audio_receiver = Some(system_receiver);
     }
 
-    // Continue with mic/cursor/writer/shared consumer.
+    // Continue in the implementation with:
+    // - optional cpal microphone start and rollback on failure
+    // - WindowsCursorSource runtime start
+    // - feature-gated writer construction matching macOS writer settings
+    // - consumer thread spawn through consume_frames(RecordingConsumerInput { ... })
     Ok(())
 }
 ```
 
 Complete the function; do not commit the partial snippet.
 
-- [ ] **Step 4: Implement stop/pause/resume**
+- [ ] **Step 5: Implement stop/pause/resume**
 
 `stop()` should mirror macOS cleanup order:
 
@@ -1720,27 +1931,28 @@ Complete the function; do not commit the partial snippet.
 
 `pause()` and `resume()` should set the same `pause_flag` semantics as macOS.
 
-- [ ] **Step 5: Run service tests**
+- [ ] **Step 6: Run service tests**
 
 Run:
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml --lib consume_frames
+cargo test --manifest-path src-tauri/Cargo.toml --lib macos_service
 cargo test --manifest-path src-tauri/Cargo.toml --lib windows_service
 ```
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```powershell
-git add src-tauri/src/app/recording_consumer.rs src-tauri/src/app/mod.rs src-tauri/src/platform/macos_service.rs src-tauri/src/platform/windows_service.rs src-tauri/src/platform/windows/graphics_capture.rs src-tauri/src/platform/windows/wasapi_loopback.rs
+git add src-tauri/src/platform/windows_service.rs src-tauri/src/platform/windows/graphics_capture.rs src-tauri/src/platform/windows/wasapi_loopback.rs
 git commit -m "feat(windows): wire recording service to shared media pipeline"
 ```
 
 ---
 
-## Task 10: Implement Windows Window Enumeration And WGC Window Capture
+## Task 11: Implement Windows Window Enumeration And WGC Window Capture
 
 **Files:**
 - Modify: `src-tauri/src/platform/windows/window_capture.rs`
@@ -1927,7 +2139,7 @@ git commit -m "feat(windows): implement window enumeration and WGC window captur
 
 ---
 
-## Task 11: Update Windows Docs And Manual Checklist
+## Task 12: Update Windows Docs And Manual Checklist
 
 **Files:**
 - Create: `tests/2026-06-19-windows-mvp-checklist.md`
@@ -2020,7 +2232,7 @@ git commit -m "docs(windows): add MVP validation checklist"
 
 ---
 
-## Task 12: Final Verification And Native Safety Review
+## Task 13: Final Verification And Native Safety Review
 
 **Files:**
 - Modify only if verification finds targeted fixes.
@@ -2105,11 +2317,11 @@ git commit -m "test(windows): record MVP verification results"
 - Platform service boundary: Tasks 1 and 3.
 - Windows Graphics Capture fullscreen: Tasks 5-6.
 - WASAPI loopback: Task 7.
-- cpal microphone reuse: Task 9, with explicit move if current module remains macOS-owned.
-- Existing mixer/writer/export reuse: Task 9.
-- Windows window recording via WGC, not crop: Task 10.
-- Cursor metadata: Task 8 and Task 9.
-- Manual validation/docs: Tasks 11-12.
+- cpal microphone reuse: Task 10, with explicit move if current module remains macOS-owned.
+- Existing mixer/writer/export reuse: Tasks 9 and 10.
+- Windows window recording via WGC, not crop: Task 11.
+- Cursor metadata: Tasks 8 and 10.
+- Manual validation/docs: Tasks 12-13.
 
 ### Placeholder Scan
 
