@@ -976,6 +976,48 @@ impl PlatformRecordingService for MacRecordingService {
     }
 }
 
+#[cfg(test)]
+impl MacRecordingService {
+    /// Forwarding wrapper that preserves the positional-argument test API while
+    /// delegating to the shared `recording_consumer::consume_frames`.
+    ///
+    /// All 13 `consume_frames_*` tests in this module call this associated
+    /// function. The production `start()`/`start_window()` methods call the
+    /// shared function directly via `RecordingConsumerInput`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn consume_frames(
+        stop_flag: Arc<AtomicBool>,
+        pause_flag: Arc<AtomicBool>,
+        video_rx: MediaReceiver<crate::core::frame::VideoFrameRef>,
+        system_audio_rx: MediaReceiver<crate::core::frame::AudioChunk>,
+        mic_rx: Option<MediaReceiver<crate::core::frame::AudioChunk>>,
+        frame_count: Arc<std::sync::atomic::AtomicU64>,
+        writer: Box<dyn crate::media::recording_writer::RecordingWriter>,
+        mic_level: Arc<std::sync::Mutex<f64>>,
+        trim_sensitivity: &str,
+        requested_system_audio: bool,
+        requested_microphone: bool,
+        microphone_device: Option<String>,
+        denoise_mode: DenoiseMode,
+    ) -> RecordingConsumerOutput {
+        consume_frames(RecordingConsumerInput {
+            stop_flag,
+            pause_flag,
+            video_rx,
+            system_audio_rx,
+            mic_rx,
+            frame_count,
+            writer,
+            mic_level,
+            trim_sensitivity: trim_sensitivity.to_string(),
+            requested_system_audio,
+            requested_microphone,
+            microphone_device,
+            denoise_mode,
+        })
+    }
+}
+
 /// Pushes a base audio sample into the bounded Vec, dropping it if at capacity.
 /// Returns `true` if the sample was pushed, `false` if dropped.
 fn push_bounded_base_audio_sample(

@@ -487,11 +487,17 @@ impl PlatformRecordingService for WindowsRecordingService {
         result.finalization_errors = errors.clone();
 
         // 12. Drive state machine.
+        // Transition to Processing first (required before complete/fail).
+        if let Err(e) = self.state_machine.stop() {
+            self.state_machine.fail();
+            return Err(e);
+        }
         let failed = !errors.is_empty() || result.duration_secs == 0;
         if failed {
             self.state_machine.fail();
-        } else {
-            self.state_machine.complete();
+        } else if let Err(e) = self.state_machine.complete() {
+            self.state_machine.fail();
+            return Err(e);
         }
 
         // 13. Clear channel receivers.
