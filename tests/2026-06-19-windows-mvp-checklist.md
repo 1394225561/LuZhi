@@ -52,12 +52,12 @@
 | 项目 | 状态 | 备注 |
 |------|------|------|
 | 平台服务边界 | PASS | `PlatformRecordingService` trait 已定义，macOS/Windows 均已实现 |
-| 全屏录制 (WGC) | 待实测 | `WindowsGraphicsCapture` 骨架已实现，worker 需在 Windows 设备上填充 WGC 代码 |
-| WASAPI 系统音频 | 待实测 | `WasapiLoopback` 生命周期已实现，worker 需在 Windows 设备上填充 WASAPI 代码 |
+| 全屏录制 (WGC) | BLOCKED | worker 为骨架，`start_display()` 返回假成功；需真实 WGC 实现或 fail-fast |
+| WASAPI 系统音频 | BLOCKED | worker 为骨架，`start()` 返回假成功；需真实 WASAPI 实现或 fail-fast |
 | cpal 麦克风 | 待实测 | `CpalMicrophoneCapture` 已移至共享模块，理论上可直接工作 |
 | 窗口枚举 | 待实测 | `EnumWindows` 已实现，过滤逻辑有单元测试覆盖 |
-| 窗口录制 (WGC) | 待实测 | `start_window` 接口已实现，WGC 窗口捕获需在 Windows 设备上填充 |
-| 光标元数据 | 待实测 | `WindowsCursorSource` 已实现 `GetCursorPos` + 按键状态 |
+| 窗口录制 (WGC) | BLOCKED | `run_window_capture_worker` 返回 `NativeCaptureUnavailable`；需 WGC 窗口捕获实现 |
+| 光标元数据 | 待实测 | `WindowsCursorSource` 已实现 `GetCursorPos` + 按键状态；CursorKind 固定为 Arrow |
 | 共享消费者 | PASS | `consume_frames` 已提取到共享模块，macOS 测试通过 |
 | 导出 (FFmpeg) | 待验证 | 依赖 FFmpeg 开发库配置 |
-| 原生安全 | PASS | WGC/WASAPI stop() 已添加 10 秒超时；安全注释已更新 |
+| 原生安全 | 有已知问题 | stop() 超时已修复；WGC/WASAPI 假成功、writer 启动回滚、CPAL Send safety 仍待解决 |

@@ -36,6 +36,7 @@ pub trait PlatformRecordingService: Send {
     fn start_window(
         &mut self,
         window_id: u32,
+        config: CaptureConfig,
         show_system_cursor: bool,
         audio_config: AudioConfig,
         beautify_snapshot: BeautifyConfigSnapshot,

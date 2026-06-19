@@ -180,6 +180,12 @@ fn register_recording_response(
     library: &Arc<Mutex<RecordingLibrary>>,
     response: &StopRecordingResponse,
 ) -> Result<(), String> {
+    // Do not register failed recordings — they would pollute the normal library
+    // and could be exported as if they were valid recordings.
+    if response.failed {
+        return Ok(());
+    }
+
     if let Some(ref video_path) = response.result.output_path {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -333,6 +339,7 @@ async fn start_recording(app: AppHandle, state: tauri::State<'_, AppState>) -> R
                 service
                     .start_window(
                         window_id,
+                        config.clone(),
                         config.show_system_cursor,
                         audio_config,
                         beautify_snapshot,
@@ -1131,6 +1138,24 @@ async fn set_window_id(state: tauri::State<'_, AppState>, window_id: u32) -> Res
 
         if !window.is_on_screen {
             return Err(format!("窗口已最小化，请恢复窗口后重试：{}", window.title));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow, IsWindowVisible};
+
+        let hwnd = windows::Win32::Foundation::HWND(window_id as *mut std::ffi::c_void);
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                return Err(format!("窗口未找到：{window_id}"));
+            }
+            if !IsWindowVisible(hwnd).as_bool() {
+                return Err(format!("窗口不可见，请恢复窗口后重试：{window_id}"));
+            }
+            if IsIconic(hwnd).as_bool() {
+                return Err(format!("窗口已最小化，请恢复窗口后重试：{window_id}"));
+            }
         }
     }
 

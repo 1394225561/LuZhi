@@ -324,6 +324,7 @@ impl MacRecordingService {
     pub fn start_window(
         &mut self,
         window_id: u32,
+        _config: CaptureConfig,
         show_system_cursor: bool,
         audio_config: AudioConfig,
         beautify_snapshot: BeautifyConfigSnapshot,
@@ -900,6 +901,7 @@ impl PlatformRecordingService for MacRecordingService {
     fn start_window(
         &mut self,
         window_id: u32,
+        config: CaptureConfig,
         show_system_cursor: bool,
         audio_config: AudioConfig,
         beautify_snapshot: BeautifyConfigSnapshot,
@@ -908,6 +910,7 @@ impl PlatformRecordingService for MacRecordingService {
         MacRecordingService::start_window(
             self,
             window_id,
+            config,
             show_system_cursor,
             audio_config,
             beautify_snapshot,
