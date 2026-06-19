@@ -521,7 +521,7 @@ struct RecordingFinalizeGuard<'a> {
     service: &'a mut MacRecordingService,
     cursor_metadata: Option<crate::media::recording_metadata::RecordingMetadata>,
     mic_stop_result: AppResult<()>,
-    mic_stop_diag: Option<crate::platform::macos::cpal_microphone::CpalMicrophoneStopDiagnostics>,
+    mic_stop_diag: Option<crate::platform::cpal_microphone::CpalMicrophoneStopDiagnostics>,
     capture_stop_result: AppResult<()>,
     consumer_output: Option<RecordingConsumerOutput>,
     consumer_panicked: bool,

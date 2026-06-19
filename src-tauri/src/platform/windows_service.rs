@@ -418,9 +418,18 @@ impl PlatformRecordingService for WindowsRecordingService {
             None
         };
 
-        // 7. Wait for consumer thread.
-        if let Some(handle) = self.consumer_handle.take() {
-            let _ = handle.join();
+        // 7. Wait for consumer thread (bounded — do not hang if consumer is stuck).
+        //    If recv_timeout already timed out, the consumer is likely stuck in
+        //    writer.finish() or artifact validation. Detach rather than hang.
+        if consumer_output.is_some() {
+            // Consumer already returned a result via channel — safe to join.
+            if let Some(handle) = self.consumer_handle.take() {
+                let _ = handle.join();
+            }
+        } else if self.consumer_handle.is_some() {
+            // Consumer timed out. Detach the thread to avoid blocking stop().
+            eprintln!("警告: 消费者线程已超时，放弃等待以避免挂起");
+            self.consumer_handle = None;
         }
 
         // 8. Write cursor metadata sidecar.

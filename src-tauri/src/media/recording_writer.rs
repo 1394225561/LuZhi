@@ -106,7 +106,7 @@ pub struct RecordingDiagnostics {
     /// Persisted before mic capture is rebuilt (BUG.md rule 21).
     #[cfg(target_os = "macos")]
     pub mic_stop_diagnostics:
-        Option<crate::platform::macos::cpal_microphone::CpalMicrophoneStopDiagnostics>,
+        Option<crate::platform::cpal_microphone::CpalMicrophoneStopDiagnostics>,
     #[cfg(not(target_os = "macos"))]
     pub mic_stop_diagnostics: Option<()>,
 }
@@ -793,7 +793,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn recording_result_serializes_diagnostics_as_camel_case() {
-        use crate::platform::macos::cpal_microphone::CpalMicrophoneStopDiagnostics;
+        use crate::platform::cpal_microphone::CpalMicrophoneStopDiagnostics;
 
         let result = RecordingResult {
             duration_secs: 10,

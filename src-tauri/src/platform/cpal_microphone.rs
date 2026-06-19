@@ -250,12 +250,20 @@ impl AudioCapture for CpalMicrophoneCapture {
             }
         }?;
 
-        stream.play().map_err(|e| AppError::AudioCaptureFailed {
-            reason: format!("启动麦克风采集失败: {}", e),
-        })?;
-
+        // Set running before play() so the first callback sees running=true.
+        // Roll back if play() fails to avoid a stuck running state.
         self.running.store(true, Ordering::Relaxed);
-        self.stream = Some(SendStream(stream));
+        match stream.play() {
+            Ok(()) => {
+                self.stream = Some(SendStream(stream));
+            }
+            Err(e) => {
+                self.running.store(false, Ordering::Relaxed);
+                return Err(AppError::AudioCaptureFailed {
+                    reason: format!("启动麦克风采集失败: {}", e),
+                });
+            }
+        }
 
         Ok(())
     }
