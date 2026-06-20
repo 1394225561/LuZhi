@@ -667,6 +667,37 @@ ld: symbol(s) not found for architecture arm64
 
 ---
 
+### 2026-06-20：BUG-001 Windows 平台回归修复
+
+#### 1. 当前任务上下文
+
+Windows 平台上 `npm run tauri:dev:ffmpeg` 启动后，录制面板外围有 800×600 白色边框。macOS 上已修复（`macos-private-api`），但 Windows 平台未覆盖。
+
+#### 2. 已完成进度
+
+- 根因定位：Win32 窗口类默认白色画刷 → `WM_ERASEBKGND` → `DefWindowProc` 用白色覆盖 DWM blur-behind 透明效果
+- 修复方案：在 `setup` 钩子中调用 `SetClassLongPtrW(GCLP_HBRBACKGROUND, NULL_BRUSH)` + `InvalidateRect`
+- 修复文件：`src-tauri/src/lib.rs`（setup 钩子）
+- `cargo check` 通过
+
+#### 3. 架构与关键决策
+
+- **Windows 透明窗口需要四层**：DWM blur-behind + WebView2 透明背景 + CSS 透明 + 窗口类 NULL_BRUSH
+- **`windows` crate 版本冲突处理**：tauri 用 0.61.x，项目用 0.62.x，`HWND` 类型需通过 `HWND(hwnd.0)` 转换
+- **`macos-private-api` 是 macOS 专属**：Windows 平台无等效 feature，需要在 setup 钩子中手动设置窗口类画刷
+
+#### 4. 立即执行清单
+
+1. `npm run tauri:dev:ffmpeg` 验证白色边框是否消失
+2. 如仍有白色闪现，需添加 `WM_ERASEBKGND` 子类钩子（在 `ShowWindow` 前拦截）
+3. 更新 BUG.md 预防规则（已完成）
+
+#### 5. 当前报错/阻碍
+
+当前无阻塞报错。
+
+---
+
 ### 2026-05-24：BUG-001 & BUG-002 修复完成冬眠
 
 #### 1. 当前任务上下文

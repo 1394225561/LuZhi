@@ -1890,6 +1890,32 @@ pub fn run() -> tauri::Result<()> {
                 let state = app.state::<AppState>();
                 state.init_library(&data_dir);
             }
+
+            // Windows: Fix BUG-001 — 通过 Tauri API 设置窗口/webview 背景透明。
+            // 配合 tauri.conf.json 的 `decorations: false` + `transparent: true`，
+            // 窗口无标题栏、无边框、背景透明，只有面板内容可见。
+            #[cfg(windows)]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    // 设置窗口背景透明
+                    let transparent = tauri::window::Color(0, 0, 0, 0);
+                    let _ = window.set_background_color(Some(transparent));
+
+                    // 移除 WS_THICKFRAME 和 WS_BORDER 样式，消除边框
+                    unsafe {
+                        use windows::Win32::Foundation::HWND;
+                        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_STYLE};
+
+                        let hwnd_raw = window.hwnd().unwrap();
+                        let hwnd = HWND(hwnd_raw.0);
+
+                        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+                        let new_style = style & !0x00040000 & !0x00800000;
+                        SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
+                    }
+                }
+            }
+
             Ok(())
         })
         .run(tauri::generate_context!())?;

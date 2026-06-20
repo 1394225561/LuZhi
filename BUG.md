@@ -1106,17 +1106,60 @@ cursor effect timeline 来自录制时的外部输入和动画计算，不应被
 
 第一轮修复只解决了 CSS 层 body 的问题，但 WKWebView 的白色背景随即暴露。之前 body `#040506` 覆盖了 WKWebView 的白色，使人误以为只有 CSS 问题。
 
-**修复**：
+**修复**（macOS）：
 
 1. `Cargo.toml`：tauri 添加 `macos-private-api` feature → 通过 KVC 禁用 WKWebView 的 `drawsBackground`
 2. `styles.css`：body 移除 `bg-background` + html 添加 `background-color: transparent`
 3. 需要全屏背景的视图（processing、error、preview）已在各自根 div 显式设置 `bg-background`
 
+**修复**（Windows — 2026-06-20 回归）：
+
+Windows 平台的透明窗口架构与 macOS 完全不同，需要四层都透明：
+
+| 层               | 机制                                      | 问题                                                                                                        |
+| ---------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Win32 窗口背景   | `set_background_color(Color(0,0,0,0))`    | ❌ 未设置：tao/WRY 默认窗口背景不透明                                                                       |
+| 窗口边框样式     | `WS_THICKFRAME` / `WS_BORDER`             | ❌ 默认存在：即使 `decorations: false`，Windows 仍可能渲染可调整大小的边框和细线边框                         |
+| WebView2         | `SetDefaultBackgroundColor(0,0,0,0)` (WRY) | ✅ WRY 已在 `transparent: true` 时设置                                                                      |
+| CSS              | `html { background-color: transparent }`  | ✅ 已配置                                                                                                   |
+
+**根因**：`WebviewWindow::set_background_color(Some(Color(0,0,0,0)))` 会同时设置 tao 窗口和 WRY webview 的背景为透明。但 Windows 窗口管理器仍会渲染窗口边框样式（`WS_THICKFRAME` 和 `WS_BORDER`），需要通过 `SetWindowLongPtrW` 移除这些样式。
+
+**修复方案**：
+
+```rust
+// src-tauri/src/lib.rs — setup 钩子中
+#[cfg(windows)]
+{
+    if let Some(window) = app.get_webview_window("main") {
+        // 设置窗口背景透明
+        let transparent = tauri::window::Color(0, 0, 0, 0);
+        let _ = window.set_background_color(Some(transparent));
+
+        // 移除 WS_THICKFRAME 和 WS_BORDER 样式，消除边框
+        unsafe {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_STYLE};
+
+            let hwnd_raw = window.hwnd().unwrap();
+            let hwnd = HWND(hwnd_raw.0);
+
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            let new_style = style & !0x00040000 & !0x00800000;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
+        }
+    }
+}
+```
+
 **预防规则**：
 
 - Tauri macOS 透明窗口 = NSWindow + WKWebView + CSS，三层缺一不可
+- Tauri Windows 透明窗口 = 窗口背景透明 + 窗口边框样式移除 + WebView2 透明 + CSS 透明，四层缺一不可
 - 排查透明窗口问题必须逐层验证，不能只看 CSS
 - `macos-private-api` feature 是 macOS 平台上实现真正透明 WKWebView 的必要条件
+- Windows 平台需要在 setup 钩子中调用 `set_background_color(Color(0,0,0,0))` 并移除 `WS_THICKFRAME`/`WS_BORDER` 样式
+- Windows 存在 `windows` crate 版本冲突（tauri 用 0.61.x，项目用 0.62.x），`HWND` 类型需通过 `HWND(hwnd.0)` 转换
 
 ---
 
