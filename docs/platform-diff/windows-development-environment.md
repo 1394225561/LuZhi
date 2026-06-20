@@ -8,12 +8,12 @@
 
 LuZhi 当前技术栈：
 
-| 层级 | 技术 |
-|------|------|
-| 桌面框架 | Tauri 2 |
-| 前端 | React 19 + TypeScript + Vite 7 + Tailwind CSS 4 |
+| 层级        | 技术                                                   |
+| ----------- | ------------------------------------------------------ |
+| 桌面框架    | Tauri 2                                                |
+| 前端        | React 19 + TypeScript + Vite 7 + Tailwind CSS 4        |
 | Rust 原生层 | macOS ScreenCaptureKit；Windows 计划使用 DXGI / WASAPI |
-| 媒体处理 | `ffmpeg-next`，通过 Cargo `ffmpeg` feature 启用 |
+| 媒体处理    | `ffmpeg-next`，通过 Cargo `ffmpeg` feature 启用        |
 
 当前 Windows 侧状态：
 
@@ -41,10 +41,10 @@ winver
 
 建议：
 
-| 项目 | 建议 |
-|------|------|
-| 系统 | Windows 10 最新补丁或 Windows 11 |
-| 终端 | PowerShell 7 或 Windows Terminal |
+| 项目 | 建议                                                     |
+| ---- | -------------------------------------------------------- |
+| 系统 | Windows 10 最新补丁或 Windows 11                         |
+| 终端 | PowerShell 7 或 Windows Terminal                         |
 | 权限 | 常规开发不需要管理员终端；安装工具链时可能需要管理员权限 |
 
 不通过时：
@@ -197,12 +197,12 @@ cmd /c '"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\
 
 ### 5.5 常见误判
 
-| 现象 | 判断 |
-|------|------|
+| 现象                           | 判断                       |
+| ------------------------------ | -------------------------- |
 | 普通 PowerShell 中 `cl` 不存在 | 可能只是没加载 VS 环境变量 |
-| `VsDevCmd.bat && cl` 也失败 | MSVC 组件大概率未安装 |
-| `vswhere` 返回 `[]` | Build Tools 实例未完整安装 |
-| `VC\Tools\MSVC` 目录不存在 | C++ workload 未安装 |
+| `VsDevCmd.bat && cl` 也失败    | MSVC 组件大概率未安装      |
+| `vswhere` 返回 `[]`            | Build Tools 实例未完整安装 |
+| `VC\Tools\MSVC` 目录不存在     | C++ workload 未安装        |
 
 ---
 
@@ -356,10 +356,10 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 FFmpeg 环境需要区分两层：
 
-| 层级 | 用途 | 是否足够支持 Rust `ffmpeg-next` |
-|------|------|--------------------------------|
-| `ffmpeg.exe` / `ffprobe.exe` 命令行工具 | 手工检查、转码、探测媒体文件 | 否 |
-| FFmpeg development libraries | Rust 编译链接所需的 headers、`.lib`、DLL | 是 |
+| 层级                                    | 用途                                     | 是否足够支持 Rust `ffmpeg-next` |
+| --------------------------------------- | ---------------------------------------- | ------------------------------- |
+| `ffmpeg.exe` / `ffprobe.exe` 命令行工具 | 手工检查、转码、探测媒体文件             | 否                              |
+| FFmpeg development libraries            | Rust 编译链接所需的 headers、`.lib`、DLL | 是                              |
 
 项目使用 `ffmpeg-next`，它绑定的是 FFmpeg C API，不是直接调用 `ffmpeg.exe`。因此，仅让 `ffmpeg -version` 通过，并不代表 `cargo test --features ffmpeg` 一定能通过。
 
@@ -418,10 +418,10 @@ C:\dev\toolchains\ffmpeg\7.1
 
 这套目录同时承担两层职责：
 
-| 使用方 | 使用内容 |
-|--------|----------|
-| 其他项目 | `C:\dev\toolchains\ffmpeg\7.1\bin\ffmpeg.exe` 和 `ffprobe.exe` |
-| LuZhi / Rust | `FFMPEG_DIR` 下的 `include/`、`lib/`、`bin/` |
+| 使用方       | 使用内容                                                       |
+| ------------ | -------------------------------------------------------------- |
+| 其他项目     | `C:\dev\toolchains\ffmpeg\7.1\bin\ffmpeg.exe` 和 `ffprobe.exe` |
+| LuZhi / Rust | `FFMPEG_DIR` 下的 `include/`、`lib/`、`bin/`                   |
 
 #### 11.3.1 安装 LLVM / libclang
 
@@ -429,6 +429,12 @@ C:\dev\toolchains\ffmpeg\7.1
 
 ```powershell
 winget install --id LLVM.LLVM -e
+
+winget uninstall --id=LLVM.LLVM
+
+# FFmpeg 编译问题：LLVM 22 与 bindgen 0.70.1 不兼容，安装 LLVM 18 后 LIBCLANG_PATH 指向 LLVM 18 解决
+winget show -e --id LLVM.LLVM
+winget install -e --id LLVM.LLVM --version 18.1.8
 ```
 
 安装方式二：手动下载安装包：
@@ -494,11 +500,11 @@ ffmpeg-next = { version = "7", optional = true }
 
 不要选择：
 
-| 包 | 原因 |
-|----|------|
-| `essentials_build` | 可能不包含完整开发所需文件 |
-| `ffmpeg-release-full-shared.7z` | 通常指向当前最新 release，可能是 8.x |
-| `ffmpeg-8.x-full_build-shared.7z` | 与当前 `ffmpeg-next = "7"` 不匹配 |
+| 包                                | 原因                                 |
+| --------------------------------- | ------------------------------------ |
+| `essentials_build`                | 可能不包含完整开发所需文件           |
+| `ffmpeg-release-full-shared.7z`   | 通常指向当前最新 release，可能是 8.x |
+| `ffmpeg-8.x-full_build-shared.7z` | 与当前 `ffmpeg-next = "7"` 不匹配    |
 
 #### 11.3.3 解压并整理目录
 
@@ -606,13 +612,13 @@ cargo test --manifest-path src-tauri/Cargo.toml --features ffmpeg
 
 如果失败，优先查看错误来自哪一层：
 
-| 报错关键字 | 常见原因 |
-|------------|----------|
-| `bindgen` / `libclang` | LLVM 未安装或 `LIBCLANG_PATH` 未设置 |
-| `avformat.h` not found | `FFMPEG_DIR\include` 不正确 |
-| `avformat.lib` not found | `FFMPEG_DIR\lib` 不正确或下载包不含 dev libs |
-| `LNK1112` / machine type conflict | FFmpeg 包架构与 Rust target 不一致 |
-| 运行时找不到 DLL | `FFMPEG_DIR\bin` 未加入 PATH |
+| 报错关键字                        | 常见原因                                     |
+| --------------------------------- | -------------------------------------------- |
+| `bindgen` / `libclang`            | LLVM 未安装或 `LIBCLANG_PATH` 未设置         |
+| `avformat.h` not found            | `FFMPEG_DIR\include` 不正确                  |
+| `avformat.lib` not found          | `FFMPEG_DIR\lib` 不正确或下载包不含 dev libs |
+| `LNK1112` / machine type conflict | FFmpeg 包架构与 Rust target 不一致           |
+| 运行时找不到 DLL                  | `FFMPEG_DIR\bin` 未加入 PATH                 |
 
 ---
 
@@ -702,3 +708,162 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - Microsoft WebView2 Runtime: <https://developer.microsoft.com/microsoft-edge/webview2/>
 - FFmpeg official download: <https://ffmpeg.org/download.html>
 - `ffmpeg-next` Windows build notes: <https://github.com/zmwangx/rust-ffmpeg/wiki/Notes-on-building>
+
+---
+
+## 15. MSYS2
+
+> MSYS2 是 Windows 上的软件包管理与 Unix-like 构建环境，提供 `pacman` 包管理器（同 Arch Linux）。本项目**不依赖** MSYS2，但在需要从源码编译 Unix 工具链时可作为辅助环境。
+
+### 15.1. 安装
+
+1. 从 https://www.msys2.org/ 下载安装器，安装到 `C:\msys64`
+2. 安装完成后，从开始菜单打开 **MSYS2 UCRT64** 终端（不是 MINGW64，不是 MSYS）
+3. 首次更新：
+   ```bash
+   pacman -Syu
+   # 如果提示关闭终端，重新打开 UCRT64 终端再执行：
+   pacman -Su
+   ```
+
+### 15.2. 环境类型
+
+MSYS2 提供多个独立的工具链环境，使用不同的 C 运行时和编译器：
+
+| 环境       | 前缀                       | C 运行时       | 编译器 | 说明                                    |
+| ---------- | -------------------------- | -------------- | ------ | --------------------------------------- |
+| **UCRT64** | `mingw-w64-ucrt-x86_64-`   | UCRT           | GCC    | **推荐**。UCRT 与 MSVC 一致，兼容性最好 |
+| MINGW64    | `mingw-w64-x86_64-`        | MSVCRT（旧版） | GCC    | 传统 MinGW 运行时，与 MSVC 混用有风险   |
+| CLANG64    | `mingw-w64-clang-x86_64-`  | UCRT           | Clang  | 使用 LLVM/clang 工具链                  |
+| CLANGARM64 | `mingw-w64-clang-aarch64-` | UCRT           | Clang  | ARM64 平台                              |
+| MSYS       | （无前缀）                 | Cygwin         | GCC    | 基础系统，非 MinGW                      |
+
+> **重要**：本项目使用 MSVC Build Tools，C 运行时为 UCRT。如果使用 MSYS2，必须选择 **UCRT64** 环境，避免 MSVCRT 与 UCRT 混用导致堆内存跨运行时崩溃、FILE\* 指针不兼容等问题。
+
+### 15.3. 包管理（pacman）
+
+```bash
+# 搜索包
+pacman -Ss <关键词>
+
+# 安装包
+pacman -S <包名>
+
+# 升级所有已安装的包
+pacman -Syu
+
+# 查看已安装的包
+pacman -Q
+
+# 卸载包（保留依赖）
+pacman -R <包名>
+
+# 卸载包及其未被其他包使用的依赖
+pacman -Rs <包名>
+
+# 清理包缓存
+pacman -Sc
+```
+
+### 15.4. 镜像源配置
+
+国内访问 MSYS2 默认镜像较慢，建议切换为清华源或中科大源。
+
+编辑对应的镜像列表文件：
+
+```bash
+# UCRT64 的镜像列表
+nano /etc/pacman.d/mirrorlist.ucrt64
+```
+
+替换为：
+
+```
+Server = https://mirrors.tuna.tsinghua.edu.cn/msys2/mingw/ucrt-64/
+Server = https://mirrors.ustc.edu.cn/msys2/mingw/ucrt-64/
+Server = https://mirror.msys2.org/mingw/ucrt-64/
+```
+
+其他环境的镜像列表文件：
+
+- MINGW64：`/etc/pacman.d/mirrorlist.mingw64`
+- CLANG64：`/etc/pacman.d/mirrorlist.clang64`
+- MSYS：`/etc/pacman.d/mirrorlist.msys`
+
+修改后刷新数据库：
+
+```bash
+pacman -Syy
+```
+
+### 15.5. FFmpeg 安装（实验性）
+
+> **注意**：本项目当前使用 gyan.dev 的 FFmpeg 7.1 standalone 构建，**不使用** MSYS2 的 FFmpeg。以下内容仅供参考。
+
+```bash
+# 在 UCRT64 终端中执行
+pacman -S mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-pkg-config mingw-w64-ucrt-x86_64-clang
+```
+
+安装后验证：
+
+```bash
+pkg-config --modversion libavcodec    # 查看 libavcodec 版本
+ffmpeg -version                        # 查看 FFmpeg 版本
+clang --version                        # MSYS2 clang 版本
+```
+
+FFmpeg 开发文件位置：
+
+- 头文件：`C:\msys64\ucrt64\include\libav*`
+- 库文件：`C:\msys64\ucrt64\lib\libav*.a` / `C:\msys64\ucrt64\lib\libav*.dll.a`
+- pkg-config：`C:\msys64\ucrt64\lib\pkgconfig\libav*.pc`
+
+**已知限制**：
+
+- MSYS2 仓库只保留最新版本的 FFmpeg（无法安装旧版本如 7.1.x）
+- MSYS2 的 FFmpeg 使用 MinGW 工具链编译，与本项目的 MSVC 工具链存在 ABI 差异
+- `ffmpeg-sys-next` crate 的 `bindgen` 使用 libclang 解析头文件，与 MSYS2 的 clang 存在兼容性问题（详见 15.6）
+
+### 15.6. 已知问题：bindgen 与系统头文件
+
+`ffmpeg-sys-next` crate 在构建时使用 `bindgen`（基于 libclang）解析 FFmpeg 头文件生成 Rust FFI 绑定。在 Windows 上，bindgen 的 clang **无法自动发现** Windows SDK 和 UCRT 的系统头文件路径，导致所有结构体（包括标准 C 类型如 `tm`）都被生成为 1 字节的不透明占位符，触发编译时的 size assertion 溢出错误：
+
+```rust
+// bindgen 生成的不透明结构体（1 字节）
+pub struct AVFormatContext {
+    pub _address: u8,
+}
+// 但编译时的静态断言期望 472 字节
+["Size of AVFormatContext"][::std::mem::size_of::<AVFormatContext>() - 472usize]; // overflow!
+```
+
+**根本原因**：`check.c` 使用 MSVC 的 `cl.exe` 编译，自动找到系统头文件；`bindgen` 使用 libclang，需要手动指定系统头文件路径。
+
+**修复方法**：设置 `BINDGEN_EXTRA_CLANG_ARGS` 环境变量，显式传入系统头文件路径：
+
+```
+BINDGEN_EXTRA_CLANG_ARGS=-I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt" -I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared" -I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um" -I"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include"
+```
+
+> **注意**：MSVC 版本号（如 `14.44.35207`）和 Windows SDK 版本号（如 `10.0.26100.0`）会随更新变化，需根据实际安装调整。可通过 `where cl.exe` 定位 MSVC 路径，通过 `ls "C:\Program Files (x86)\Windows Kits\10\Include\"` 查看 SDK 版本。
+
+### 15.7. 卸载
+
+MSYS2 是绿色安装，无注册表项，卸载只需三步：
+
+1. **删除安装目录**：
+
+   ```bash
+   rm -rf C:\msys64
+   ```
+
+2. **清理环境变量**（系统设置 → 环境变量）：
+   - 删除 `PKG_CONFIG_PATH`（如果值指向 `C:\msys64`）
+   - 删除 `LIBCLANG_PATH`（如果值指向 `C:\msys64`）
+   - 删除 `PATH` 中所有包含 `msys64` 的条目
+
+3. **清理开始菜单**（可选）：
+   ```bash
+   rm -rf "$APPDATA/Microsoft/Windows/Start Menu/Programs/MSYS2"
+   ```
